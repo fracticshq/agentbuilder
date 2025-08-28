@@ -1,0 +1,26 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-multipart>=0.0.6
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+redis>=5.0.0
+motor>=3.3.0
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-instrumentation-fastapi>=0.41b0
+opentelemetry-instrumentation-redis>=0.41b0
+opentelemetry-instrumentation-pymongo>=0.41b0
+prometheus-client>=0.18.0
+structlog>=23.2.0
+tenacity>=8.2.0
+psutil>=5.9.0
+sse-starlette>=1.6.0
+
+# Local packages (in development mode)
+-e ../../packages/commons
+-e ../../packages/memory  
+-e ../../packages/retrieval
+-e ../../packages/llm

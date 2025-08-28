@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Builder Platform - Chat Widget</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 20px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      
+      .demo-container {
+        background: white;
+        border-radius: 12px;
+        padding: 2rem;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        max-width: 600px;
+        text-align: center;
+      }
+      
+      .demo-container h1 {
+        color: #111827;
+        margin-bottom: 1rem;
+      }
+      
+      .demo-container p {
+        color: #6b7280;
+        margin-bottom: 1.5rem;
+        line-height: 1.6;
+      }
+      
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        background: #d1fae5;
+        border: 1px solid #10b981;
+        border-radius: 6px;
+        font-size: 0.875rem;
+        color: #065f46;
+      }
+      
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        background: #10b981;
+        border-radius: 50%;
+        animation: pulse 2s infinite;
+      }
+      
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+      }
+      
+      .demo-link {
+        display: inline-block;
+        margin-top: 1rem;
+        padding: 0.75rem 1.5rem;
+        background: #2563eb;
+        color: white;
+        text-decoration: none;
+        border-radius: 6px;
+        font-weight: 500;
+        transition: background-color 0.2s;
+      }
+      
+      .demo-link:hover {
+        background: #1d4ed8;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="demo-container">
+      <h1>🤖 Agent Builder Platform</h1>
+      <p>
+        Welcome to the Agent Builder Platform chat widget demo! 
+        This embeddable widget provides AI-powered conversations with 
+        real-time document retrieval and intelligent responses.
+      </p>
+      
+      <div class="status">
+        <span class="status-dot"></span>
+        Widget Active - Look for the chat button!
+      </div>
+      
+      <p style="margin-top: 1.5rem;">
+        The chat widget is now running on this page. Look for the blue chat button 
+        in the bottom-right corner to start a conversation.
+      </p>
+      
+      <a href="/demo.html" class="demo-link">View Full Demo Page</a>
+    </div>
+
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

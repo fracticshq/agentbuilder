@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Builder Platform - Demo Page</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 3rem;
+        }
+        
+        .header h1 {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            font-weight: 700;
+        }
+        
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+            margin-bottom: 2rem;
+        }
+        
+        .content {
+            background: white;
+            border-radius: 12px;
+            padding: 2rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+        }
+        
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-top: 2rem;
+        }
+        
+        .feature {
+            padding: 1.5rem;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            background: #f9fafb;
+        }
+        
+        .feature h3 {
+            color: #111827;
+            margin-bottom: 1rem;
+        }
+        
+        .feature p {
+            color: #6b7280;
+            margin: 0;
+        }
+        
+        .demo-section {
+            background: white;
+            border-radius: 12px;
+            padding: 2rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+        }
+        
+        .demo-section h2 {
+            color: #111827;
+            margin-bottom: 1rem;
+        }
+        
+        .demo-section p {
+            color: #6b7280;
+            margin-bottom: 1.5rem;
+        }
+        
+        .widget-info {
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1rem;
+        }
+        
+        .widget-info h4 {
+            color: #1e40af;
+            margin: 0 0 0.5rem 0;
+        }
+        
+        .widget-info p {
+            color: #1e40af;
+            margin: 0;
+            font-size: 0.875rem;
+        }
+        
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: #d1fae5;
+            border: 1px solid #10b981;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            color: #065f46;
+            margin-top: 1rem;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: #10b981;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>🤖 Agent Builder Platform</h1>
+            <p>Experience AI-powered conversations with real-time document retrieval and intelligent responses</p>
+            <div class="status-indicator">
+                <span class="status-dot"></span>
+                Backend API Running on localhost:8000
+            </div>
+        </header>
+
+        <div class="content">
+            <h2>About This Platform</h2>
+            <p>
+                The Agent Builder Platform is a comprehensive solution for creating intelligent AI agents 
+                that can process documents, maintain conversation context, and provide accurate responses 
+                with proper source citations. This demo page showcases the embeddable chat widget that 
+                connects to our FastAPI backend.
+            </p>
+            
+            <div class="features">
+                <div class="feature">
+                    <h3>🔍 Intelligent Retrieval</h3>
+                    <p>Advanced RAG (Retrieval-Augmented Generation) pipeline that finds relevant information from your documents and provides accurate, contextual responses.</p>
+                </div>
+                
+                <div class="feature">
+                    <h3>💬 Real-time Chat</h3>
+                    <p>Interactive chat interface with typing indicators, streaming responses, and WebSocket connectivity for seamless user experience.</p>
+                </div>
+                
+                <div class="feature">
+                    <h3>📚 Source Citations</h3>
+                    <p>Every response includes proper citations with links to source documents, ensuring transparency and allowing users to verify information.</p>
+                </div>
+                
+                <div class="feature">
+                    <h3>🎨 Customizable Widget</h3>
+                    <p>Easily embeddable widget that can be customized with your brand colors, positioned anywhere on your website, and configured to your needs.</p>
+                </div>
+                
+                <div class="feature">
+                    <h3>⚡ High Performance</h3>
+                    <p>Built with FastAPI, Redis caching, and MongoDB for optimal performance. Includes health monitoring and observability features.</p>
+                </div>
+                
+                <div class="feature">
+                    <h3>🔒 Enterprise Ready</h3>
+                    <p>Production-ready architecture with proper error handling, logging, monitoring, and scalable deployment options.</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="demo-section">
+            <h2>🚀 Try the Chat Widget</h2>
+            <p>
+                The chat widget is now active on this page! Look for the blue chat button in the bottom-right corner 
+                of your screen. Click it to start a conversation with our AI agent.
+            </p>
+            
+            <div class="widget-info">
+                <h4>Widget Features to Test:</h4>
+                <p>• Click the chat button to open/close the widget</p>
+                <p>• Type a message and see the typing indicator</p>
+                <p>• Watch for streaming responses (when connected to the backend)</p>
+                <p>• Test the responsive design on different screen sizes</p>
+                <p>• View source citations in assistant responses</p>
+            </div>
+            
+            <p style="margin-top: 1rem; font-style: italic; color: #6b7280;">
+                Note: To see full functionality including AI responses and document retrieval, 
+                make sure the FastAPI backend is running on localhost:8000. The widget will gracefully 
+                handle connection errors and provide user-friendly feedback.
+            </p>
+        </div>
+    </div>
+</body>
+</html>
