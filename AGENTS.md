@@ -1,53 +1,438 @@
-# AGENTS.md — Agent Operating Guide (Root)
+# Agent Configuration and Management
 
-> **Scope:** This file tells coding agents how to work inside this monorepo. Subprojects **must** ship their own `AGENTS.md`; agents always read the **nearest** one in the tree, so local rules override global rules.
+This document covers agent configuration, management, and the planned admin dashboard for the Agent Builder Platform.
 
----
+## 📋 Table of Contents
 
-## 1. Project Overview
-This is a context‑aware RAG assistant framework for brand‑safe, citation‑first answers. Core pillars: **minimal hallucinations, fast streaming, model‑agnostic LLMs, MongoDB Atlas vector search, Voyage AI embeddings, hybrid retrieval, KV cache**, and **strict security & observability**.
+1. [Current Agent Configuration](#current-agent-configuration)
+2. [Planned Admin Dashboard](#planned-admin-dashboard)
+3. [Brand Management](#brand-management)
+4. [Agent Builder Wizard](#agent-builder-wizard)
+5. [Knowledge Base Management](#knowledge-base-management)
+6. [System Prompt Configuration](#system-prompt-configuration)
+7. [LLM Provider Configuration](#llm-provider-configuration)
 
-### North‑Star SLOs
-- `citation_coverage = 100%`
-- `factuality ≥ 0.9`
-- `P95 latency ≤ 3s`
-- `cache_hit_ratio ≥ 50%`
-- **No source → No answer** (return refusal template)
+## 🔧 Current Agent Configuration
 
----
+### Manual YAML Configuration
 
-## 2. Build & Run (Top Level)
-**Apps** live in `apps/`; shared libraries in `packages/`. Prefer local `Makefile` or `package.json` scripts where provided.
+Currently, agents are configured manually using YAML files in the `agents/` directory.
 
-### API (FastAPI + WebSockets/SSE)
-```bash
-cd apps/api
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000  # Health: /health
+#### Example Agent Configuration
+
+```yaml
+# agents/essco-bathware-agent.yaml
+metadata:
+  name: "Essco Bathware Customer Support"
+  description: "AI assistant for Essco Bathware customer inquiries"
+  version: "1.0.0"
+  brand: "essco-bathware"
+  created_at: "2024-01-15T10:00:00Z"
+  updated_at: "2024-01-15T10:00:00Z"
+
+configuration:
+  llm:
+    provider: "openai"
+    model: "gpt-4o-mini"
+    temperature: 0.7
+    max_tokens: 1000
+  
+  embedding:
+    provider: "voyage"
+    model: "voyage-large-2-instruct"
+  
+  rag:
+    enabled: true
+    top_k: 5
+    similarity_threshold: 0.7
+    knowledge_base_id: "essco-kb-001"
+
+system_prompt: |
+  You are the Essco Bathware AI Assistant, a knowledgeable customer service representative 
+  for Essco Bathware, a premium bathroom solutions company.
+  
+  Your role:
+  - Help customers find the right bathroom products
+  - Provide installation guidance and support
+  - Answer questions about warranties and maintenance
+  - Maintain Essco's professional and helpful brand voice
+  
+  Guidelines:
+  - Always be professional, helpful, and solution-oriented
+  - Use the knowledge base to provide accurate product information
+  - If you don't know something, direct customers to human support
+  - Focus on Essco's quality and premium positioning
+
+personality:
+  tone: "professional"
+  style: "helpful"
+  expertise_level: "expert"
+  brand_voice: "premium_helpful"
+
+features:
+  websockets: true
+  file_upload: true
+  conversation_memory: true
+  typing_indicators: true
+
+security:
+  rate_limiting: true
+  content_filtering: true
+  session_timeout: 1800
 ```
 
-### Widget (React + TS, Vite)
-```bash
-cd apps/widget
-npm i
-npm run dev
+### Current Limitations
+
+- ❌ **Manual file editing** required for agent configuration
+- ❌ **No visual interface** for agent creation
+- ❌ **No brand management** system
+- ❌ **Manual knowledge base** upload via API
+- ❌ **No system prompt editor** interface
+- ❌ **No centralized LLM** provider configuration
+
+## 🎯 Planned Admin Dashboard
+
+### Overview
+
+A comprehensive web-based admin dashboard that will replace manual YAML editing with an intuitive interface for managing brands and agents.
+
+### Key Features
+
+1. **Brand Management** - Multi-tenant support for different companies
+2. **Agent Builder Wizard** - Step-by-step agent creation
+3. **Knowledge Base Manager** - Upload and organize documents
+4. **System Prompt Editor** - Rich text editor for agent personality
+5. **LLM Configuration** - Visual provider and model selection
+6. **YAML Auto-generation** - Automatic config file creation from UI
+
+## 🏢 Brand Management
+
+### Brand Entity Structure
+
+```typescript
+interface Brand {
+  id: string;
+  name: string;              // e.g., "Essco Bathware"
+  slug: string;              // e.g., "essco-bathware"
+  description: string;
+  logo_url?: string;
+  website?: string;
+  industry: string;
+  contact_info: {
+    email: string;
+    phone?: string;
+    address?: string;
+  };
+  brand_voice: {
+    tone: string;            // professional, casual, friendly
+    style: string;           // helpful, authoritative, consultative
+    personality: string[];    // [expert, approachable, solution-oriented]
+  };
+  colors: {
+    primary: string;
+    secondary: string;
+    accent: string;
+  };
+  created_at: string;
+  updated_at: string;
+}
 ```
 
-### Admin (React + TS)
-```bash
-cd apps/admin
-npm i
-npm run dev
+### Brand Management UI
+
+#### Create Brand Flow
+1. **Basic Information**
+   - Brand name, description, industry
+   - Logo upload and website URL
+   - Contact information
+
+2. **Brand Voice Configuration**
+   - Tone selection (professional, casual, friendly)
+   - Style preferences (helpful, authoritative)
+   - Personality traits selection
+
+3. **Visual Identity**
+   - Color scheme selection
+   - Logo and branding assets
+   - Widget styling preferences
+
+#### Brand Dashboard
+- Overview of all agents for the brand
+- Knowledge base statistics
+- Usage analytics and metrics
+- Brand settings and configuration
+
+## 🤖 Agent Builder Wizard
+
+### Step-by-Step Agent Creation
+
+#### Step 1: Basic Configuration
+- **Agent Name**: e.g., "Customer Support Assistant"
+- **Description**: Brief description of agent purpose
+- **Brand Selection**: Choose from existing brands
+- **Agent Type**: Support, Sales, Technical, General
+
+#### Step 2: LLM Configuration
+- **Provider Selection**: OpenAI, Qwen, Anthropic (dropdown)
+- **Model Selection**: Based on selected provider
+- **Advanced Settings**: Temperature, max tokens, top-p
+- **API Key Management**: Secure key storage per brand
+
+#### Step 3: System Prompt Creation
+- **Rich Text Editor** with markdown support
+- **Template Library**: Pre-built prompts for common use cases
+- **Brand Voice Integration**: Auto-populate brand-specific guidelines
+- **Preview Mode**: Test prompt with sample queries
+
+#### Step 4: Knowledge Base Setup
+- **Document Upload**: Drag-and-drop interface
+- **File Management**: Organize documents by category
+- **Processing Status**: Real-time ingestion progress
+- **Content Preview**: View processed document content
+
+#### Step 5: RAG Configuration
+- **Enable/Disable RAG**: Toggle RAG functionality
+- **Similarity Threshold**: Adjust retrieval sensitivity
+- **Top-K Results**: Number of documents to retrieve
+- **Knowledge Base Linking**: Select relevant document sets
+
+#### Step 6: Features & Security
+- **Feature Toggles**: WebSockets, file upload, memory
+- **Rate Limiting**: Configure usage limits
+- **Content Filtering**: Enable safety measures
+- **Session Configuration**: Timeout and persistence settings
+
+#### Step 7: Review & Deploy
+- **Configuration Preview**: Review all settings
+- **YAML Generation**: Auto-generated config file
+- **Test Interface**: Test agent before deployment
+- **Deployment**: One-click agent activation
+
+### Auto-Generated YAML
+
+The wizard automatically generates the YAML configuration based on UI inputs:
+
+```typescript
+// Auto-generation logic
+const generateAgentConfig = (formData: AgentFormData) => {
+  return {
+    metadata: {
+      name: formData.name,
+      description: formData.description,
+      brand: formData.brand.slug,
+      version: "1.0.0",
+      created_at: new Date().toISOString(),
+    },
+    configuration: {
+      llm: {
+        provider: formData.llmProvider,
+        model: formData.llmModel,
+        temperature: formData.temperature,
+        max_tokens: formData.maxTokens,
+      },
+      // ... rest of config
+    },
+    system_prompt: formData.systemPrompt,
+    // ... rest of configuration
+  };
+};
 ```
 
----
+## 📚 Knowledge Base Management
 
-## 3. Environment (Global)
-Set in deployment or local `.env` files (never commit secrets).
+### Document Management Interface
 
-| Key | Required | Example / Notes |
-| --- | --- | --- |
+#### Upload Interface
+- **Drag-and-Drop Zone**: Support for multiple file types
+- **Bulk Upload**: Upload multiple documents at once
+- **Progress Tracking**: Real-time upload and processing status
+- **Error Handling**: Clear feedback on failed uploads
+
+#### Document Organization
+- **Categories**: Organize documents by type or topic
+- **Tags**: Flexible tagging system for document discovery
+- **Search**: Full-text search across all documents
+- **Filters**: Filter by type, date, category, processing status
+
+#### Document Processing
+- **Text Extraction**: Preview extracted content
+- **Chunking Strategy**: Configure how documents are split
+- **Embedding Generation**: Monitor embedding creation
+- **Vector Storage**: Track storage in MongoDB Atlas
+
+#### Supported File Types
+- PDF documents (.pdf)
+- Markdown files (.md)
+- Text files (.txt)
+- Word documents (.docx)
+- HTML files (.html)
+
+### Knowledge Base Analytics
+- **Document Count**: Total documents per agent
+- **Storage Usage**: Monitor vector storage consumption
+- **Query Analytics**: Most retrieved documents
+- **Performance Metrics**: Retrieval accuracy and speed
+
+## ✍️ System Prompt Configuration
+
+### Rich Text Editor Features
+
+#### Editor Interface
+- **Markdown Support**: Rich text editing with markdown
+- **Syntax Highlighting**: Code blocks and formatting
+- **Real-time Preview**: Live preview of formatted prompt
+- **Template Variables**: Insert brand-specific variables
+
+#### Template Library
+- **Industry Templates**: Pre-built prompts for different industries
+- **Use Case Templates**: Customer support, sales, technical
+- **Brand Voice Templates**: Professional, casual, friendly tones
+- **Custom Templates**: Save and reuse custom prompts
+
+#### Brand Integration
+- **Auto-population**: Insert brand voice and guidelines
+- **Variable Substitution**: Dynamic brand information
+- **Voice Consistency**: Maintain consistent brand voice
+- **Guidelines Enforcement**: Built-in brand guideline prompts
+
+#### Testing Interface
+- **Prompt Testing**: Test prompts with sample queries
+- **Response Preview**: See how agent responds
+- **A/B Testing**: Compare different prompt versions
+- **Performance Metrics**: Track prompt effectiveness
+
+## ⚙️ LLM Provider Configuration
+
+### Provider Management
+
+#### Supported Providers
+- **OpenAI**: GPT-4, GPT-3.5-turbo models
+- **Qwen**: Qwen-max, Qwen-plus models
+- **Anthropic**: Claude models (planned)
+- **Custom Providers**: API-compatible endpoints
+
+#### Configuration Interface
+- **Provider Selection**: Dropdown with available providers
+- **Model Selection**: Dynamic model list based on provider
+- **API Key Management**: Secure storage and validation
+- **Advanced Settings**: Temperature, top-p, frequency penalty
+
+#### Per-Brand Configuration
+- **Brand-specific Keys**: Different API keys per brand
+- **Model Preferences**: Preferred models for each brand
+- **Cost Management**: Usage tracking and limits
+- **Fallback Providers**: Backup provider configuration
+
+### Model Configuration
+
+```typescript
+interface LLMConfiguration {
+  provider: 'openai' | 'qwen' | 'anthropic' | 'custom';
+  model: string;
+  api_key: string;          // Encrypted storage
+  base_url?: string;        // For custom providers
+  parameters: {
+    temperature: number;     // 0.0 - 2.0
+    max_tokens: number;      // Model-specific limits
+    top_p?: number;          // 0.0 - 1.0
+    frequency_penalty?: number;
+    presence_penalty?: number;
+  };
+  rate_limits: {
+    requests_per_minute: number;
+    tokens_per_minute: number;
+  };
+}
+```
+
+## 🗂️ File Structure (Planned)
+
+```
+apps/admin/                          # Admin Dashboard
+├── src/
+│   ├── pages/
+│   │   ├── brands/
+│   │   │   ├── BrandList.tsx       # List all brands
+│   │   │   ├── BrandCreate.tsx     # Create new brand
+│   │   │   ├── BrandEdit.tsx       # Edit brand settings
+│   │   │   └── BrandDashboard.tsx  # Brand overview
+│   │   ├── agents/
+│   │   │   ├── AgentList.tsx       # List agents
+│   │   │   ├── AgentWizard.tsx     # Agent creation wizard
+│   │   │   ├── AgentEdit.tsx       # Edit agent configuration
+│   │   │   └── AgentTest.tsx       # Test agent interface
+│   │   ├── knowledge/
+│   │   │   ├── DocumentManager.tsx # Document upload/management
+│   │   │   ├── DocumentUpload.tsx  # Bulk upload interface
+│   │   │   └── DocumentAnalytics.tsx # Knowledge base analytics
+│   │   └── prompts/
+│   │       ├── PromptEditor.tsx    # Rich text prompt editor
+│   │       ├── PromptTemplates.tsx # Template library
+│   │       └── PromptTesting.tsx   # Prompt testing interface
+│   ├── components/
+│   │   ├── forms/
+│   │   │   ├── BrandForm.tsx       # Brand creation form
+│   │   │   ├── AgentConfigForm.tsx # Agent configuration
+│   │   │   └── LLMConfigForm.tsx   # LLM provider settings
+│   │   ├── editors/
+│   │   │   ├── YamlEditor.tsx      # YAML configuration editor
+│   │   │   ├── PromptEditor.tsx    # System prompt editor
+│   │   │   └── CodeEditor.tsx      # Code editing component
+│   │   └── upload/
+│   │       ├── FileUpload.tsx      # File upload component
+│   │       ├── DocumentViewer.tsx  # Document preview
+│   │       └── UploadProgress.tsx  # Upload progress tracking
+│   ├── hooks/
+│   │   ├── useBrands.ts           # Brand management hooks
+│   │   ├── useAgents.ts           # Agent management hooks
+│   │   └── useDocuments.ts        # Document management hooks
+│   ├── api/
+│   │   ├── brands.ts              # Brand API calls
+│   │   ├── agents.ts              # Agent API calls
+│   │   ├── documents.ts           # Document API calls
+│   │   └── llm.ts                 # LLM provider API calls
+│   └── utils/
+│       ├── yaml-generator.ts      # YAML config generation
+│       ├── validation.ts          # Form validation
+│       └── file-utils.ts          # File handling utilities
+```
+
+## 🔄 Migration Path
+
+### From Manual to Admin Dashboard
+
+1. **Phase 1**: Build brand management interface
+2. **Phase 2**: Implement agent creation wizard
+3. **Phase 3**: Add knowledge base management
+4. **Phase 4**: System prompt editor and testing
+5. **Phase 5**: Advanced features and analytics
+
+### Backwards Compatibility
+- Existing YAML files will be importable
+- API endpoints remain unchanged
+- Gradual migration of manual configurations
+
+## 📊 Current Status
+
+- ✅ **YAML Configuration**: Manual agent configuration working
+- ✅ **API Endpoints**: Document ingestion and messaging APIs
+- 🚧 **Admin Dashboard**: Not implemented - high priority
+- 🚧 **Brand Management**: Not implemented - required for multi-tenancy
+- 🚧 **Visual Agent Builder**: Not implemented - core feature
+- 🚧 **Knowledge Base UI**: Not implemented - essential for usability
+- 🚧 **System Prompt Editor**: Not implemented - important for customization
+
+## 🎯 Next Steps
+
+1. **Implement Admin Dashboard** foundation
+2. **Build Brand Management** system
+3. **Create Agent Builder Wizard** with auto-YAML generation
+4. **Develop Knowledge Base** management interface
+5. **Add System Prompt Editor** with rich text capabilities
+6. **Integrate LLM Provider** configuration UI
+7. **Add Testing and Analytics** features
+
+This admin dashboard will transform the platform from a developer-focused tool to a user-friendly platform accessible to non-technical users.
 | `API_LOG_LEVEL` | No | `debug` \| `info` \| `warn` \| `error` |
 | `CORS_ALLOW_ORIGINS` | No | `*` (tighten in prod) |
 | `REDIS_URL` | Yes | Redis for KV cache |

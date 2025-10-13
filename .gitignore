@@ -236,6 +236,12 @@ web_modules/
 # Yarn Integrity file
 .yarn-integrity
 
+# Package lock files (keep package-lock.json for reproducible builds)
+# Uncomment below if using yarn or pnpm exclusively
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
 # dotenv environment variable files
 .env
 .env.development.local
@@ -254,6 +260,10 @@ out
 # Nuxt.js build / generate output
 .nuxt
 dist
+
+# Vite build output
+dist/
+build/
 
 # Gatsby files
 .cache/
@@ -409,20 +419,33 @@ $RECYCLE.BIN/
 # API Server
 apps/api/server.log*
 apps/api/.env
+apps/api/.env.local
+apps/api/.env.production
+apps/api/.env.development
 apps/api/uploads/
 apps/api/temp/
+apps/api/logs/
+
+# Development scripts
+start-dev.sh
+start-*.sh
+dev-*.sh
 
 # Widget Build
 apps/widget/dist/
+apps/widget/build/
 apps/widget/.env
 apps/widget/.env.local
 apps/widget/.env.production.local
+apps/widget/.env.development.local
 
-# Admin Panel (if created)
+# Admin Panel
 apps/admin/dist/
+apps/admin/build/
 apps/admin/.env
 apps/admin/.env.local
 apps/admin/.env.production.local
+apps/admin/.env.development.local
 
 # Database files
 *.db
@@ -454,11 +477,31 @@ logs/
 tmp/
 temp/
 .tmp/
+.temp/
+
+# Test documents (development only)
+test_document.md
+*_test_*.md
+sample_*.pdf
+demo_*.pdf
+
+# Development notes (personal)
+notes.md
+TODO.md
+SCRATCH.md
 
 # Configuration files with secrets
 config/secrets.json
 config/production.json
 config/.env*
+.secrets/
+secrets/
+
+# Local development overrides
+.env.override
+.env.local.*
+local_config.py
+dev_config.py
 
 # SSL certificates
 *.pem

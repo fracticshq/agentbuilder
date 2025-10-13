@@ -1,6 +1,120 @@
 """
-Health Service - System health and metrics
+Health Service - System health monitoring
 """
+
+import time
+from typing import Dict, Any
+import structlog
+
+from ..connections import connection_manager
+
+logger = structlog.get_logger()
+
+# Track application start time
+_app_start_time = time.time()
+
+
+class HealthService:
+    """Service for monitoring system health."""
+    
+    def __init__(self):
+        pass
+    
+    async def get_health_status(self) -> Dict[str, Any]:
+        """
+        Get comprehensive health status.
+        
+        Returns:
+            Dict with overall status and component details
+        """
+        # Get connection health
+        connections_health = await connection_manager.health_check()
+        
+        # Check individual components
+        mongodb_status = await self._check_mongodb()
+        redis_status = await self._check_redis()
+        llm_status = await self._check_llm()
+        
+        # Determine overall status
+        all_healthy = all([
+            connections_health.get("mongodb") in ["healthy", "not_connected"],
+            connections_health.get("redis") in ["healthy", "not_connected"],
+            mongodb_status.get("status") in ["healthy", "not_connected"],
+            redis_status.get("status") in ["healthy", "not_connected"]
+        ])
+        
+        overall_status = "healthy" if all_healthy else "degraded"
+        
+        return {
+            "status": overall_status,
+            "timestamp": time.time(),
+            "uptime_seconds": time.time() - _app_start_time,
+            "components": {
+                "mongodb": mongodb_status,
+                "redis": redis_status,
+                "llm": llm_status
+            },
+            "metrics": {
+                "active_connections": 0,  # Can be tracked via middleware
+                "total_requests": 0,      # Can be tracked via middleware
+                "error_rate": 0.0         # Can be calculated from metrics
+            }
+        }
+    
+    async def _check_mongodb(self) -> Dict[str, Any]:
+        """Check MongoDB health."""
+        try:
+            if connection_manager.mongodb_client:
+                await connection_manager.mongodb_client.admin.command('ping')
+                return {
+                    "status": "healthy",
+                    "latency_ms": None  # Could measure ping time
+                }
+            else:
+                return {
+                    "status": "not_connected",
+                    "message": "MongoDB not configured"
+                }
+        except Exception as e:
+            logger.error("MongoDB health check failed", error=str(e))
+            return {
+                "status": "unhealthy",
+                "error": str(e)
+            }
+    
+    async def _check_redis(self) -> Dict[str, Any]:
+        """Check Redis health."""
+        try:
+            if connection_manager.redis_client:
+                await connection_manager.redis_client.ping()
+                return {
+                    "status": "healthy",
+                    "latency_ms": None  # Could measure ping time
+                }
+            else:
+                return {
+                    "status": "not_connected",
+                    "message": "Redis not configured"
+                }
+        except Exception as e:
+            logger.error("Redis health check failed", error=str(e))
+            return {
+                "status": "unhealthy",
+                "error": str(e)
+            }
+    
+    async def _check_llm(self) -> Dict[str, Any]:
+        """Check LLM provider health."""
+        # TODO: Implement actual LLM provider health check
+        return {
+            "status": "healthy",
+            "provider": "configured"
+        }
+    
+    def get_uptime(self) -> float:
+        """Get application uptime in seconds."""
+        return time.time() - _app_start_time
+
 
 import asyncio
 import psutil

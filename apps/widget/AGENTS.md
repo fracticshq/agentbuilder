@@ -118,3 +118,6 @@ npm run test:e2e
 - Follows "No source → No answer" principle
 - Real-time streaming via WebSocket/SSE fallback
 - Page context extraction for better responses
+
+**End of widget AGENTS.md.** 
+

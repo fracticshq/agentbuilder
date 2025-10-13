@@ -15,6 +15,7 @@ from .config import Settings
 from .api.v1 import api_router
 from .middleware import setup_middleware
 from .monitoring import setup_monitoring
+from .connections import connection_manager
 
 # Configure structured logging
 structlog.configure(
@@ -40,13 +41,20 @@ async def lifespan(app: FastAPI):
     # Setup monitoring and tracing
     setup_monitoring(app)
     
-    # Initialize connections
-    # TODO: Initialize Redis and MongoDB connections
+    # Initialize database connections
+    logger.info("Connecting to databases...")
+    await connection_manager.connect_mongodb()
+    await connection_manager.connect_redis()
+    
+    # Check connection health
+    health = await connection_manager.health_check()
+    logger.info("Connection health check", **health)
     
     yield
     
     logger.info("Shutting down Agent Builder API")
-    # TODO: Cleanup connections
+    # Cleanup connections
+    await connection_manager.close_all()
 
 
 def create_app() -> FastAPI:
