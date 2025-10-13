@@ -5,8 +5,12 @@ API v1 Router
 from fastapi import APIRouter
 from .endpoints import messages, ingestion, status
 from .admin import router as admin_router
+from .auth import auth_router
 
 api_router = APIRouter()
+
+# Include authentication router (no prefix, it has its own /auth prefix)
+api_router.include_router(auth_router)
 
 # Include endpoint routers
 api_router.include_router(messages.router, prefix="/messages", tags=["messages"])

@@ -1,15 +1,133 @@
 # Agent Builder Platform
 
-A comprehensive platform for building, managing, and deploying AI agents with RAG (Retrieval Augmented Generation) capabilities.
+A production-grade AI Agent Builder Platform enabling businesses to create, deploy, and manage intelligent conversational agents with enterprise-grade RAG (Retrieval-Augmented Generation), multi-layer memory, and comprehensive observability.
+
+---
+
+## 🎯 Overview
+
+The **Agent Builder Platform** is a monorepo-based system that empowers you to:
+- **Build** AI agents with custom personalities, knowledge bases, and behaviors
+- **Deploy** agents across multiple channels (web widgets, APIs, integrations)
+- **Manage** agent configurations, document ingestion, and user interactions
+- **Monitor** performance, usage, and quality through comprehensive observability
+
+### Key Features
+
+- 🧠 **4-Layer Memory System**: Short-term, episodic, semantic, and graph-based memory
+- 🔍 **Hybrid Retrieval**: Vector search (MongoDB Atlas) + BM25 + RRF fusion + cross-encoder reranking
+- 🔐 **Enterprise Security**: JWT authentication, API keys, RBAC, rate limiting, PII vaulting
+- 📊 **Observability**: OpenTelemetry tracing, Prometheus metrics, structured logging
+- 🎨 **Multi-Brand Support**: Isolated agent configurations per brand with custom styling
+- ⚡ **High Performance**: Redis caching, connection pooling, optimized retrieval (<100ms target)
+- 🔌 **Pluggable LLMs**: Support for OpenAI, Qwen, Gemini, LLaMA, Anthropic Claude
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Agent Builder Platform                  │
+├─────────────────────────────────────────────────────────────┤
+│                                                               │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐    │
+│  │    Widget    │   │     API      │   │    Admin     │    │
+│  │  (React TS)  │   │  (FastAPI)   │   │  (React TS)  │    │
+│  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘    │
+│         │                   │                   │             │
+│         └───────────────────┴───────────────────┘             │
+│                             │                                 │
+│         ┌───────────────────┴───────────────────┐             │
+│         │                                       │             │
+│    ┌────▼─────┐  ┌──────────┐  ┌────────────┐  │             │
+│    │ Retrieval│  │  Memory  │  │    LLM     │  │             │
+│    │  Engine  │  │  System  │  │  Adapters  │  │             │
+│    └────┬─────┘  └────┬─────┘  └─────┬──────┘  │             │
+│         │             │              │          │             │
+│    ┌────▼─────────────▼──────────────▼────┐     │             │
+│    │         Storage & Caching             │     │             │
+│    │  MongoDB Atlas  │  Redis  │  S3/Local│     │             │
+│    └───────────────────────────────────────┘     │             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📂 Project Structure
+
+```
+agent-builder/
+├── apps/
+│   ├── api/                 # FastAPI backend service
+│   │   ├── app/
+│   │   │   ├── main.py      # Application entry point
+│   │   │   ├── config.py    # Pydantic settings
+│   │   │   ├── api/v1/      # API route handlers
+│   │   │   ├── auth/        # Authentication (JWT, API keys, RBAC)
+│   │   │   ├── services/    # Business logic
+│   │   │   └── middleware.py # CORS, logging, rate limiting
+│   │   └── run.py           # Server startup script
+│   ├── admin/               # React admin dashboard
+│   │   └── src/
+│   │       ├── pages/       # Dashboard, Brands, Agents
+│   │       ├── components/  # Reusable UI components
+│   │       └── api/         # API client
+│   └── widget/              # React widget SDK
+│       └── src/
+│           ├── components/  # Chat UI components
+│           ├── stores/      # State management
+│           └── utils/       # Page context extraction
+├── packages/
+│   ├── retrieval/           # Hybrid retrieval (Vector + BM25 + RRF)
+│   │   └── src/retrieval/
+│   │       ├── vector_search.py    # MongoDB Atlas Vector Search
+│   │       ├── bm25_search.py      # BM25 keyword search
+│   │       ├── fusion.py           # RRF fusion algorithm
+│   │       └── reranker.py         # Cross-encoder reranking
+│   ├── memory/              # 4-layer memory system
+│   │   └── src/memory/
+│   │       ├── short_term.py       # Rolling buffer (72h TTL)
+│   │       ├── episodic.py         # User facts (90d TTL, PII vault)
+│   │       ├── semantic.py         # Knowledge base
+│   │       └── graph.py            # Rules and policies
+│   ├── llm/                 # LLM provider adapters
+│   │   └── src/llm/
+│   │       ├── openai_adapter.py   # OpenAI GPT models
+│   │       ├── qwen_adapter.py     # Qwen models
+│   │       └── base.py             # Abstract base class
+│   ├── commons/             # Shared utilities
+│   │   └── src/commons/
+│   │       ├── types.py            # Common data types
+│   │       ├── errors.py           # Error classes
+│   │       └── hashing.py          # Hashing utilities
+│   ├── tracing/             # OpenTelemetry observability
+│   └── cache/               # Redis caching layer (planned)
+├── agents/                  # Agent YAML configurations
+│   └── essco-bathware-agent.yaml
+├── ingestion/               # Document ingestion pipeline
+├── evals/                   # Evaluation datasets & metrics
+├── infra/                   # Docker, K8s, CI/CD
+└── docs/                    # Documentation
+    ├── phases/              # Phase-specific docs
+    ├── guides/              # User guides
+    ├── api/                 # API documentation
+    └── archive/             # Historical documentation
+```
+
+---
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Node.js 18+
-- Python 3.9+
-- MongoDB Atlas account
-- OpenAI API key
-- Voyage AI API key
+
+- **Python 3.12+** (3.12.6 recommended)
+- **Node.js 18+** and npm/yarn
+- **MongoDB Atlas** account with Vector Search enabled
+- **Redis** server (local or cloud)
+- API keys for:
+  - **OpenAI** or **Qwen** (LLM provider)
+  - **Voyage AI** (embeddings)
 
 ### Installation
 
@@ -21,326 +139,477 @@ A comprehensive platform for building, managing, and deploying AI agents with RA
 
 2. **Install dependencies**
    ```bash
-   # Install API dependencies
-   cd apps/api
-   pip install -r requirements.txt
-
-   # Install widget dependencies (if using)
+   # Backend (Python)
+   python3 -m pip install -r apps/api/requirements.txt
+   
+   # Install packages in editable mode
+   pip install -e packages/commons
+   pip install -e packages/retrieval
+   pip install -e packages/memory
+   pip install -e packages/llm
+   
+   # Frontend (Admin Dashboard)
+   cd apps/admin
+   npm install
+   
+   # Frontend (Widget)
    cd ../widget
    npm install
    ```
 
-3. **Configure environment**
+3. **Configure environment variables**
    ```bash
-   # Copy and configure API environment
-   cd apps/api
-   cp .env.example .env
-   # Edit .env with your API keys
+   # Copy example env file
+   cp apps/api/.env.example apps/api/.env
+   
+   # Edit .env with your configuration
+   nano apps/api/.env
    ```
 
-4. **Start the services**
+   **Required variables:**
    ```bash
-   # Start API server
+   # Core
+   API_SECRET_KEY=your-256-bit-secret-key-here
+   API_HOST=0.0.0.0
+   API_PORT=8000
+   
+   # Database
+   MONGO_URI=mongodb+srv://user:pass@cluster.mongodb.net/agent_builder
+   REDIS_URL=redis://localhost:6379/0
+   
+   # LLM Provider (choose one)
+   MODEL_PROVIDER=openai  # or qwen
+   OPENAI_API_KEY=sk-...
+   # QWEN_API_KEY=sk-...
+   
+   # Embeddings
+   EMBEDDINGS_PROVIDER=voyage
+   VOYAGE_API_KEY=pa-...
+   
+   # Memory System (Phase 5)
+   PII_ENCRYPTION_KEY=your-pii-encryption-key-32-chars
+   SHORT_TERM_TTL=259200          # 72 hours
+   EPISODIC_TTL=7776000           # 90 days
+   CONFIDENCE_THRESHOLD=0.70      # Min confidence for fact extraction
+   AUTO_SUMMARY_TURNS=4           # Turns before auto-summary
+   ENABLE_AUTO_SUMMARY=true
+   ENABLE_PII_VAULTING=true
+   ENABLE_FACT_EXTRACTION=true
+   
+   # CORS
+   CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost:5173
+   ```
+
+4. **Run the application**
+   ```bash
+   # Terminal 1: Start API server
    cd apps/api
-   uvicorn app.main:app --reload --port 8000
-
-   # Start admin dashboard (when available)
+   python run.py
+   # API available at http://localhost:8000
+   # API docs at http://localhost:8000/docs
+   
+   # Terminal 2: Start Admin Dashboard
    cd apps/admin
-   npm run dev
-
-   # Start widget (if needed)
+   npm start
+   # Dashboard available at http://localhost:3000
+   
+   # Terminal 3: Start Widget (optional)
    cd apps/widget
    npm run dev
+   # Widget available at http://localhost:5173
    ```
 
-## 🏗️ Architecture
+5. **Verify installation**
+   ```bash
+   # Check API health
+   curl http://localhost:8000/health
+   
+   # Expected response:
+   # {"status":"healthy","timestamp":"..."}
+   ```
 
-### Current Components
+---
 
-- **API Server** (`apps/api/`) - FastAPI backend with RAG capabilities
-- **Chat Widget** (`apps/widget/`) - Embeddable chat interface
-- **Agent Configs** (`agents/`) - YAML-based agent definitions
+## 🔧 Tech Stack
 
-### Planned Components
+### Backend
+- **FastAPI**: High-performance async API framework
+- **Python 3.12.6**: Modern Python with type hints
+- **Pydantic v2**: Data validation and settings management
+- **MongoDB Atlas**: Vector database with Atlas Vector Search
+- **Redis**: In-memory caching and rate limiting
+- **Voyage AI**: High-quality embeddings (voyage-large-2-instruct)
+- **OpenAI/Qwen**: LLM providers (pluggable architecture)
+- **python-jose**: JWT token handling (HS256)
+- **bcrypt**: Password hashing
+- **httpx**: Async HTTP client
 
-- **Admin Dashboard** (`apps/admin/`) - Web-based management interface
-- **Brand Management** - Multi-tenant brand support
-- **Agent Builder** - Visual agent creation and configuration
+### Frontend
+- **React 18**: UI framework
+- **TypeScript**: Type-safe JavaScript
+- **Tailwind CSS**: Utility-first styling
+- **Vite**: Fast build tool and dev server
+- **React Router**: Client-side routing
+- **Zustand**: State management (widget)
+- **Axios**: HTTP client
 
-## 📱 Applications
+### Security & Auth
+- **JWT**: JSON Web Tokens (30min access, 7day refresh)
+- **API Keys**: SHA-256 hashed, scoped permissions
+- **RBAC**: Role-based access control (admin, user, viewer)
+- **Rate Limiting**: Redis-based sliding window (60 req/min)
+- **PII Vaulting**: AES-256 encrypted episodic memory
+- **Password Policy**: Min 8 chars, complexity requirements
 
-### 1. API Server (`apps/api/`)
-FastAPI backend providing:
-- RESTful APIs for agent interactions
-- Document ingestion and RAG pipeline
-- Multi-LLM provider support (OpenAI, Qwen)
-- Vector storage with MongoDB Atlas
-- Real-time messaging with WebSockets
+### Memory System (4 Layers)
+- **Short-term**: Rolling buffer, auto-summary every 4 turns, TTL 72h (Redis/Mongo)
+- **Episodic**: User facts/preferences with PII vaulting, TTL 90d, confidence ≥ 0.70 (MongoDB)
+- **Semantic**: Brand knowledge base (chunked + embedded), versioned by doc_id+section (MongoDB Atlas Vector)
+- **Graph**: Rules, policies, escalation paths (MongoDB)
 
-**Current Status**: ✅ Fully functional
+### Retrieval Pipeline
+1. **Vector Search**: Voyage embeddings in MongoDB Atlas Vector Search
+2. **BM25**: Traditional keyword search (Elasticsearch/Lucene compatible)
+3. **RRF Fusion**: Reciprocal Rank Fusion (1/(k+rank)) → ~top 50 results
+4. **Cross-encoder Reranking**: Rerank to top 12 most relevant results
+5. **Boosts**: Brand-specific (manuals/FAQs/policies first), page-type boosts (SKU, FAQ)
+6. **Deduplication**: MinHash on doc_id+section to remove duplicates
 
-### 2. Chat Widget (`apps/widget/`)
-Embeddable React component for:
-- Real-time chat interface
-- File upload capabilities
-- Customizable styling
-- Easy integration into websites
+### Observability
+- **OpenTelemetry**: Distributed tracing with spans across services
+- **Prometheus**: Metrics (p95_total, cache_hit_ratio, citation_coverage, errors)
+- **Structured Logging**: JSON logs with trace_id correlation and redaction
+- **Health Checks**: Liveness (/health) and readiness probes
+- **Dashboards**: Grafana dashboards for monitoring (planned)
 
-**Current Status**: ✅ Basic implementation
+---
 
-### 3. Admin Dashboard (`apps/admin/`) - *Planned*
-Web-based management interface for:
-- **Brand Management**: Create and manage multiple brands (e.g., Essco Bathware)
-- **Agent Builder**: Visual agent creation with step-by-step wizard
-- **Knowledge Base**: Upload and manage documents per agent
-- **System Prompts**: Rich text editor for agent personality
-- **LLM Configuration**: Provider selection and API key management
-- **YAML Generation**: Auto-populate agent configs from UI forms
+## 📊 Current Status
 
-**Current Status**: 🚧 Not implemented - planned for development
+**Overall Completion: 82%** 🚀
 
-## 🎯 Current Workflow (Manual)
+### ✅ What's Working
+- ✅ **Core API**: FastAPI server with health checks and /api/v1 routes
+- ✅ **Configuration**: Pydantic Settings with all Phase 5 memory fields
+- ✅ **Authentication System**: JWT, API keys, RBAC fully built (1,840 lines)
+- ✅ **Memory System**: All 4 layers complete (short-term, episodic, semantic, graph)
+- ✅ **Retrieval Engine**: Hybrid retrieval with Vector + BM25 + RRF + reranking
+- ✅ **LLM Adapters**: OpenAI and Qwen providers with streaming support
+- ✅ **Document Ingestion**: Upload, chunking, embedding, indexing pipeline operational
+- ✅ **Embeddings**: Voyage AI integration for vector embeddings
+- ✅ **Admin UI**: Brand and agent management interfaces (UI complete)
+- ✅ **Widget UI**: Chat interface components (UI complete)
+- ✅ **Rate Limiting**: Redis-based with sliding window algorithm
+- ✅ **Database**: MongoDB collections (users, api_keys, documents, memory)
+- ✅ **Security**: Password hashing, API key hashing, permission checks
 
-1. Create agent YAML file in `agents/` directory
-2. Configure `.env` file with API keys
-3. Upload documents via API endpoints
-4. Test agent via API or widget
+### 🚧 Critical Gaps (P0 Blockers)
+- ❌ **WebSocket/SSE Streaming**: Real-time token streaming not implemented (4-6h)
+  - Location: `apps/api/app/api/v1/messages.py` needs WebSocket endpoint
+  - Impact: Cannot stream responses in real-time (required for chat UX)
+  
+- ❌ **Auth Integration**: Built but not wired into main.py routes (3-4h)
+  - Location: `apps/api/app/main.py` missing auth_router inclusion
+  - Impact: No authentication/authorization on API endpoints
+  
+- ❌ **Widget Backend Integration**: UI ready but not connected to API (6-8h)
+  - Location: `apps/widget/src/` needs WebSocket client + API integration
+  - Impact: Widget cannot communicate with backend
+  
+- ❌ **Admin Backend Integration**: UI ready but not connected to API (4-5h)
+  - Location: `apps/admin/src/api/` needs proper API client implementation
+  - Impact: Admin dashboard cannot manage brands/agents
 
-## 🎯 Planned Workflow (Admin Dashboard)
+**Total time to MVP: 17-23 hours**
 
-1. **Create Brand** → Web form with brand details
-2. **Create Agent** → Wizard that auto-populates YAML template
-3. **Add Knowledge** → Drag-and-drop document upload
-4. **Configure Prompts** → Rich text editor for system prompts
-5. **Set LLM Provider** → Dropdown with API key configuration
-6. **Deploy Agent** → One-click activation and testing
+See **[CRITICAL_GAPS_ANALYSIS.md](./CRITICAL_GAPS_ANALYSIS.md)** for comprehensive gap analysis with solutions.
 
-## 🔧 Configuration
+---
 
-### Environment Variables
-See `apps/api/.env` for configuration options:
-- LLM provider settings (OpenAI, Qwen)
-- Vector database configuration
-- API keys and security settings
+## 📖 Documentation
 
-### Agent Configuration
-Agents are defined in YAML files in the `agents/` directory. See `AGENTS.md` for detailed configuration options.
+### Core Documentation
+- **[AGENTS.md](./AGENTS.md)**: Complete system architecture, contracts, coding standards, and AGENTS.md hierarchy
+- **[PROGRESS_TRACKER.md](./PROGRESS_TRACKER.md)**: Detailed component-by-component progress tracking
+- **[STATUS_SUMMARY.md](./STATUS_SUMMARY.md)**: Quick reference dashboard with visual progress bars
+- **[CRITICAL_GAPS_ANALYSIS.md](./CRITICAL_GAPS_ANALYSIS.md)**: Production readiness assessment with P0/P1/P2 gaps
+- **[PLAN.md](./PLAN.md)**: Development phases and roadmap
+- **[QUICK_START_CARD.md](./QUICK_START_CARD.md)**: Next session quick reference
 
-## 📚 Documentation
+### API Documentation
+- **[API_DOCUMENTATION.md](./docs/api/API_DOCUMENTATION.md)**: Complete API endpoint reference with examples
+- **[Postman Collection](./docs/api/Agent_Builder_Platform.postman_collection.json)**: Ready-to-import API collection
 
-- `AGENTS.md` - Agent configuration and management
-- `PLAN.md` - Development roadmap and current status
-- `apps/api/README.md` - API documentation
-- `apps/widget/README.md` - Widget integration guide
+### Phase Documentation
+- [Phase 1-6 Documentation](./docs/phases/) - Detailed phase-by-phase implementation
+  - Phase 5: Memory Systems (100% complete)
+  - Phase 6: Authentication (75% complete - built, not integrated)
+
+### Guides
+- [Production Ready Guide](./docs/guides/PRODUCTION_READY.md)
+- [Quick Start Guide](./docs/guides/QUICK_START.md)
+- [Phase 6 Quick Start](./docs/guides/PHASE6_QUICKSTART.md)
+
+---
 
 ## 🛠️ Development
 
-### API Server
+### Running the API Server
 ```bash
 cd apps/api
+
+# Standard run
+python run.py
+
+# With uvicorn directly (auto-reload)
 uvicorn app.main:app --reload --port 8000
+
+# View logs
+tail -f server.log
+
+# View API documentation
+open http://localhost:8000/docs
 ```
 
 ### Running Tests
 ```bash
-cd apps/api
-pytest
+# Unit tests
+pytest apps/api/tests/ -v
+
+# Integration tests
+pytest apps/api/tests/integration/ -v
+
+# Coverage report
+pytest --cov=app --cov-report=html --cov-report=term
+
+# Open coverage report
+open htmlcov/index.html
 ```
 
-## 🚀 Deployment
+### Running Admin Dashboard
+```bash
+cd apps/admin
 
-### Production Setup
-1. Configure production environment variables
-2. Set up MongoDB Atlas cluster
-3. Deploy API server to cloud platform
-4. Configure domain and SSL certificates
+# Development mode
+npm start
+# Available at http://localhost:3000
 
-## 📞 Support
-
-For technical support and questions:
-- Create an issue in this repository
-- Check the documentation in `/docs`
-- Review the API documentation at `/docs` when server is running
-
-## 🔄 Current Status
-
-- ✅ **API Server**: Fully functional with RAG capabilities
-- ✅ **Chat Widget**: Basic implementation complete
-- 🚧 **Admin Dashboard**: Planned - requires development
-- 🚧 **Brand Management**: Planned - requires development
-- 🚧 **Visual Agent Builder**: Planned - requires development
-
-See `PLAN.md` for detailed development roadmap.
-
----
-
-## 🔑 Core Features
-
-### Messages API (contract)
-
-- **Endpoint:** `/api/v1/messages` (SSE/WebSocket for streaming)
-- **Input:** `session_id`, `agent_id`, `text`, `constraints`, `page_context`
-
-```json
-{
-  "session_id": "s_123",
-  "agent_id": "glen_ai_v1",
-  "text": "How to clean the baffle filter?",
-  "constraints": { "language": "en-IN" },
-  "page_context": {
-    "url": "https://site.com/chimneys/abc",
-    "path": "/chimneys/abc",
-    "title": "Chimney ABC",
-    "lang": "en",
-    "meta": { "og_title":"...", "og_type":"product", "canonical":"...", "section":"Kitchen", "tags":["chimney","baffle"] },
-    "schemaOrg": { "type":"Product", "sku":"ABC-123", "data":{ } },
-    "domHints": "nearby paragraph text…"
-  }
-}
+# Production build
+npm run build
+npm install -g serve
+serve -s build -p 3000
 ```
 
-- **Output:** `response.text`, `citations[]`, `trace_id`
+### Running Widget
+```bash
+cd apps/widget
 
-```json
-{
-  "response": {
-    "text": "Step 1… Step 2…",
-    "citations": [ { "title": "Manual p.12", "url": "https://…", "excerpt": "…" } ],
-    "safety": { "disclaimer": "Brand guidance; follow local safety rules.", "escalation": ["sparking", "gas smell"] },
-    "follow_up": ["Do you have model ABC-123?"]
-  },
-  "trace_id": "tr_abc123"
-}
+# Development mode
+npm run dev
+# Available at http://localhost:5173
+
+# Production build
+npm run build
+npm run preview
 ```
 
-- **Hard rules**: If citations.length == 0 → refuse politely with next steps.
+### Code Style
 
-### Page-Aware Context (spatial awareness)
-- Extracts: `URL`, `path`, `title`, `schema.org` (Product, FAQPage, etc.), `meta tags`, `breadcrumbs`, `lang`, `neighbbour text around widget`
+**Python:**
+- **Formatter**: Black (line length 100)
+- **Import sorting**: isort
+- **Linting**: flake8
+- **Type checking**: mypy (planned)
+```bash
+# Format code
+black apps/api/app packages/
 
-- Retrieval boosts chunks matching page signals (e.g., Product SKU, FAQ page).
+# Sort imports
+isort apps/api/app packages/
 
-- Privacy: Redact query params; do not log raw DOM unless consented.
-
-### Memory Layers
-
-- **Short-Term:** Rolling buffer with auto-summaries (every 4 turns), TTL=72h.
-- **Episodic:** Durable user preferences/facts; PII vaulted; TTL=90d; write if confidence >= 0.70.
-- **Semantic:** Brand KB (chunked, embedded, indexed in vector + BM25).
-- **Graph:** Safety rules, policy links, escalation graphs. 
-
-### Hybrid Retrieval
-- Semantic embeddings (Embed → vector search) + BM25 lexical + RRF fusion  
-- Cross-encoder rerank (top_k=12)
-- Brand-first boosting: manuals, FAQs, policies > blogs, PR.
-
-### LLM Writer (guarded)
-- Deterministic prompt; Schema-constrained outputs  
-- No source → no answer; produce refusal with helpful next steps.
-- Strips chain-of-thought; includes safety & troubleshooting when applicable.
-
-### KV Cache
-- Key: sha256(agent|locale|constraints|normalized_query|page_fp)
-- Salted by `agent_id + query + page_fp`  
-- `<100ms` retrieval path  
-- TTL=24h
-- Least Recently Used (LRU) cache is a cache eviction algorithm that organizes elements in order of use.
-
-### Tools (allow-listed)
-
-- Deterministic adapters: render_diagram, unit_convert, ticket_create, etc.
-- Policy-gated in agent YAML; typed I/O; fully traced.
-
-### Observability
-- OpenTelemetry spans (intent, retrieval, rerank, generation, writebacks).
-- Prometheus: p95_total, cache_hit_ratio, citation_coverage, errors. 
-- Grafana dashboards
-- Nightly evals: retrieval, grounding, latency; fail CI if SLOs regress.
-
-### Security
-- TLS, JWT per agent, RBAC/ABAC, WAF; rate limit 60 req/min/user.
-- PII vault, log redaction; GDPR/CCPA deletions for episodic memory.
-- No raw PII in prompts or logs.
-
----
-
-## ⚙️ Environment Variables (API)
-
-| Key | Default | Notes |
-| -------------------- | ------- | ----------------------------------- |
-| `API_LOG_LEVEL` | `info` | `debug | info | warn | error` |
-| `CORS_ALLOW_ORIGINS` | `*` | tighten in prod |
-| `REDIS_URL` | — | required for KV cache |
-| `MONGO_URI` | — | required for MongoDB Atlas Vector Search |
-| `EMBEDDINGS_PROVIDER`| `voyage`| set to `voyage` (default) |
-| `MODEL_PROVIDER` | — | choose between `qwen`, `gemini`, `llama`, `openai`, `claude` |
-
----
-
-## 🔧 WebSocket Support
-- **Messages API** now supports both **Server-Sent Events (SSE)** and **WebSockets**.
-- WebSockets enable **real-time, token-level streaming responses** and bidirectional features like cancellation and interactive tool calls.
-
----
-
-## 🛠️ Extended Tech Stack
-
-- **Frontend**: React + TypeScript (Vite)
-- **API**: Python (FastAPI) with **WebSocket + SSE support**
-- **Admin UI**: React + TypeScript
-- **Cache**: Redis KV
-- **Memory Store & Vector DB**: MongoDB Atlas (short-term, episodic, semantic KB, vector search)
-- **Retrieval**: Hybrid (BM25 via Elastic/Lucene + Voyage AI embeddings + Atlas vector search + RRF fusion + reranker)
-- **Models**: Pluggable (Qwen, Gemini, LLaMA, OpenAI GPTs, Claude)
-- **Tracing/Monitoring**: OpenTelemetry, Prometheus, Grafana
-- **Infra**: Docker, Helm (K8s), GitHub Actions for CI/CD
-- **Security**: TLS, JWT per agent, RBAC/ABAC, WAF, GDPR/CCPA compliance
-
----
-
-## 🔧 Agent Config (YAML Template)
-
-```yaml
-agent:
-  id: "<brand>_assistant_v1"
-  persona:
-    voice: "Crisp, expert, friendly"
-    style: "Stepwise, cited"
-    languages: ["en-IN","hi-IN"]
-  north_star:
-    citations_required: true
-    no_source_behavior: "say_dont_know"
-    fast_path: ["kv_cache", "short_schema"]
-  retrieval:
-    provider: "pinecone"
-    k: { vector: 40, bm25: 20, rerank_top_k: 12 }
-    reranker: "voyage-rerank-2"
-    thresholds: { min_sim: 0.70 }
-    brand_boost: { sources: ["manuals","faqs","policies"], weight: 1.25 }
-    fusion: "rrf"
-  memory:
-    short_term: { ttl_hours: 72, summarize_after_turns: 4 }
-    episodic:   { ttl_days: 90, write_if_confidence_gte: 0.70, redact_pii: true }
-    semantic:   { versioning: "doc_id+section", prefer_latest: true }
-  kv_cache:
-    key_parts: ["agent_id","locale","constraints","normalized_query","page_fp"]
-    ttl_hours: 24
-  page_awareness:
-    boosts:
-      - if: "schemaOrg.type == 'Product' && chunk.meta.sku == schemaOrg.sku" then: +2.0
-      - if: "path like '/support' && chunk.meta.kind == 'faq'" then: +1.5
-  tool_policies:
-    allow: ["render_diagram","execute_python"]
-    execute_python: { deny_network: true }
-  safety:
-    forbid_speculation: true
-    escalation_rules: ["gas smell","visible sparking"]
-  evaluation_targets:
-    recall_at_12_min: 0.80
-    precision_at_12_min: 0.70
-    p95_total_seconds: 3.0
+# Lint
+flake8 apps/api/app packages/
 ```
 
+**TypeScript:**
+- **Linter**: ESLint
+- **Formatter**: Prettier
+- **Config**: .eslintrc, .prettierrc
+```bash
+# Lint
+npm run lint
+
+# Format
+npm run format
+```
+
+**Commits:**
+- Follow **Conventional Commits**: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
+- Example: `feat: add WebSocket streaming support for messages`
+
 ---
 
-✅ With these enhancements, the Agent Builder remains **fast, truthful, model-agnostic, and enterprise-ready**, capable of supporting modern LLMs with **streaming, embeddings, and scalable memory layers**.
+## 🎯 Roadmap & Time Estimates
+
+### Phase 6 (Current - 75% Complete)
+- ✅ Build authentication system (JWT, API keys, RBAC) - **DONE**
+- 🚧 Integrate auth into API routes - **3-4 hours**
+- 🚧 Implement WebSocket/SSE streaming - **4-6 hours**
+- 🚧 Connect Widget to backend - **6-8 hours**
+- 🚧 Connect Admin Dashboard to backend - **4-5 hours**
+
+**Phase 6 Completion: 17-23 hours** → **MVP Ready**
+
+### Phase 7 (Planned - P1 Critical)
+- Deployment infrastructure (Docker, K8s, Helm charts) - **15-20 hours**
+- Monitoring dashboards (Grafana, Prometheus, alerts) - **10-12 hours**
+- Content filtering and safety guardrails - **6-10 hours**
+- Authentication integration tests - **4-6 hours**
+- Secrets management (Vault, K8s secrets) - **2-3 hours**
+
+**Phase 7 Total: 31-42 hours** → **Production Beta Ready**
+
+### Phase 8 (Planned - P2 Important)
+- Comprehensive unit tests (retrieval, memory, LLM) - **15-20 hours**
+- Evaluation harness with datasets (recall@k, nDCG) - **10-12 hours**
+- Error handling improvements - **5-7 hours**
+- Performance optimization - **8-10 hours**
+- Documentation completion - **5-8 hours**
+
+**Phase 8 Total: 30-39 hours** → **Enterprise Ready**
+
+### Timeline Summary
+- **MVP (P0 blockers)**: 17-23 hours
+- **Production Beta (P0 + P1)**: 48-66 hours
+- **Enterprise Ready (P0 + P1 + P2)**: 78-105 hours
+
+See **[CRITICAL_GAPS_ANALYSIS.md](./CRITICAL_GAPS_ANALYSIS.md)** for detailed breakdown and solutions.
+
+---
+
+## 🔐 Security
+
+### Authentication & Authorization
+- **JWT Tokens**: 30-min access tokens, 7-day refresh tokens (HS256)
+- **API Keys**: SHA-256 hashed, scoped by brand and permissions
+- **Roles**: admin, user, viewer with granular permissions
+- **RBAC**: Role-based access control with permission checks
+- **Session Management**: Refresh token rotation, logout invalidation
+
+### Data Protection
+- **PII Vaulting**: AES-256 encrypted episodic memory storage
+- **Password Hashing**: bcrypt with 12 rounds
+- **API Key Hashing**: SHA-256 with salt
+- **Environment Variables**: Secrets never in code, use .env files
+- **TLS**: HTTPS required in production (TLS 1.2+)
+
+### Rate Limiting & Abuse Prevention
+- **Rate Limits**: 60 requests/min per user/API key
+- **Algorithm**: Redis-based sliding window with sorted sets
+- **Headers**: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
+- **Account Lockout**: 5 failed login attempts → 15 min lockout
+
+### Planned Security Features
+- 🚧 Content filtering for harmful content
+- 🚧 Input sanitization and validation
+- 🚧 DDoS protection with WAF
+- 🚧 Penetration testing
+- 🚧 Security audit logging
+- 🚧 GDPR/CCPA compliance (episodic memory deletion)
+
+---
+
+## 🤝 Contributing
+
+We welcome contributions! Please follow these guidelines:
+
+### Getting Started
+1. **Fork the repository** and clone your fork
+2. **Create a feature branch**: `git checkout -b feature/your-feature-name`
+3. **Set up development environment** (see Quick Start)
+4. **Install pre-commit hooks** (optional but recommended)
+
+### Development Guidelines
+- **Follow code style**: Black for Python, ESLint+Prettier for TypeScript
+- **Write tests**: Unit tests for new features, integration tests for APIs
+- **Update documentation**: 
+  - Update relevant `AGENTS.md` files (root and package-specific)
+  - Update API documentation if endpoints change
+  - Update README if major features added
+- **Add observability**: Include OpenTelemetry spans and Prometheus metrics
+- **Security first**: Never commit secrets, sanitize inputs, validate data
+
+### Commit Guidelines
+- **Use Conventional Commits**: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
+- **Be specific**: Good: `feat: add WebSocket streaming for messages`
+- **Reference issues**: `fix: resolve rate limiting bug (#123)`
+
+### Pull Request Process
+1. **Ensure all tests pass**: `pytest apps/api/tests/ -v`
+2. **Update documentation**: README, AGENTS.md, API docs
+3. **Write clear PR description**: What, why, how
+4. **Link related issues**: Closes #123
+5. **Request review**: Tag relevant maintainers
+6. **Address feedback**: Make requested changes
+7. **Squash commits**: Clean git history before merge
+
+### Code Review Checklist
+- [ ] Code follows style guidelines
+- [ ] Tests added and passing
+- [ ] Documentation updated
+- [ ] No security vulnerabilities
+- [ ] Observability added (spans, metrics, logs)
+- [ ] Backwards compatible (or migration plan)
+- [ ] Performance acceptable
+
+---
+
+## 📄 License
+
+This project is proprietary software. All rights reserved.
+
+For licensing inquiries, please contact: licensing@yourcompany.com
+
+---
+
+## 📞 Contact & Support
+
+### Getting Help
+- **Documentation**: Start with this README and [AGENTS.md](./AGENTS.md)
+- **Issues**: [GitHub Issues](https://github.com/your-org/agent-builder/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/your-org/agent-builder/discussions)
+- **Email**: support@yourcompany.com
+
+### Community
+- **Slack**: [Join our community](https://yourslack.slack.com)
+- **Twitter**: [@YourCompany](https://twitter.com/yourcompany)
+- **Blog**: [blog.yourcompany.com](https://blog.yourcompany.com)
+
+### Enterprise Support
+For enterprise support, SLAs, and custom development:
+- **Sales**: sales@yourcompany.com
+- **Enterprise Support**: enterprise@yourcompany.com
+
+---
+
+## 🙏 Acknowledgments
+
+Built with amazing open-source tools:
+- [FastAPI](https://fastapi.tiangolo.com/) - Modern Python web framework
+- [React](https://react.dev/) - UI library
+- [MongoDB Atlas](https://www.mongodb.com/atlas) - Vector database with Atlas Vector Search
+- [Redis](https://redis.io/) - In-memory data store
+- [OpenAI](https://openai.com/) - GPT models
+- [Voyage AI](https://www.voyageai.com/) - High-quality embeddings
+- [Tailwind CSS](https://tailwindcss.com/) - Utility-first CSS
+- [Vite](https://vitejs.dev/) - Fast build tool
+- [Pydantic](https://pydantic-docs.helpmanual.io/) - Data validation
+
+Special thanks to the open-source community for making this possible! 🙌
+
+---
+
+**Current Version:** 0.8.2 (82% Complete)  
+**Last Updated:** January 2025  
+**Status:** Active Development 🚀  
+**Next Milestone:** MVP (17-23 hours remaining)
