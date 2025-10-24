@@ -56,14 +56,37 @@ async def lifespan(app: FastAPI):
             logger.info("Setting up MongoDB indexes...")
             db = connection_manager.mongodb_db
             
-            # Brand indexes
-            await db.brands.create_index("id", unique=True)
-            await db.brands.create_index("slug", unique=True)
+            # Brand indexes (with proper names to avoid conflicts)
+            try:
+                await db.brands.create_index("id", unique=True, name="brand_id_idx")
+            except Exception as e:
+                if "already exists" not in str(e):
+                    raise
             
-            # Agent indexes
-            await db.agents.create_index("id", unique=True)
-            await db.agents.create_index("brand_id")
-            await db.agents.create_index([("brand_id", 1), ("slug", 1)], unique=True)
+            try:
+                await db.brands.create_index("slug", unique=True, name="brand_slug_idx")
+            except Exception as e:
+                if "already exists" not in str(e):
+                    raise
+            
+            # Agent indexes (with proper names to avoid conflicts)
+            try:
+                await db.agents.create_index("id", unique=True, name="agent_id_idx")
+            except Exception as e:
+                if "already exists" not in str(e):
+                    raise
+                    
+            try:
+                await db.agents.create_index("brand_id", name="agent_brand_id_idx")
+            except Exception as e:
+                if "already exists" not in str(e):
+                    raise
+                    
+            try:
+                await db.agents.create_index([("brand_id", 1), ("slug", 1)], unique=True, name="agent_brand_slug_idx")
+            except Exception as e:
+                if "already exists" not in str(e):
+                    raise
             
             logger.info("MongoDB indexes created successfully")
         except Exception as e:

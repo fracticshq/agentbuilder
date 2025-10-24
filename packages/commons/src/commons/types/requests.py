@@ -19,6 +19,7 @@ class MessageRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=10000)
     user_id: str = Field(..., min_length=1)
     conversation_id: Optional[str] = None
+    agent_id: Optional[str] = None  # Agent ID for custom configuration
     page_context: Optional[PageContext] = None
     filters: Optional[Dict[str, Any]] = None
     stream: bool = False

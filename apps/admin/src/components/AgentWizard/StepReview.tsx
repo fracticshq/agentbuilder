@@ -7,9 +7,10 @@ interface StepReviewProps {
   onDeploy: () => void;
   isDeploying: boolean;
   brands: Array<{ id: string; name: string }>;
+  agentId?: string; // Add agentId prop
 }
 
-export default function StepReview({ data, onTest, onDeploy, isDeploying, brands }: StepReviewProps) {
+export default function StepReview({ data, onTest, onDeploy, isDeploying, brands, agentId }: StepReviewProps) {
   const [showYaml, setShowYaml] = useState(false);
   const [testMessage, setTestMessage] = useState('');
   const [testResponse, setTestResponse] = useState('');
@@ -92,13 +93,113 @@ export default function StepReview({ data, onTest, onDeploy, isDeploying, brands
   const handleTest = async () => {
     if (!testMessage.trim()) return;
     
+    // Check if agent is deployed
+    if (!agentId) {
+      setTestResponse(
+        `⚠️ Agent Testing Not Available\n\n` +
+        `This agent hasn't been deployed yet, so live testing is not possible.\n\n` +
+        `What you can do:\n` +
+        `1. Click "Deploy Agent" below to create the agent\n` +
+        `2. After deployment, come back to edit the agent\n` +
+        `3. You'll then be able to test with real API responses\n\n` +
+        `For now, you can review the configuration in the YAML tab.`
+      );
+      return;
+    }
+    
     setIsTestLoading(true);
+    setTestResponse('');
+    
     try {
-      // Simulate API call for testing
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      setTestResponse(`Hello! I'm ${data.name}, ${selectedBrand?.name}'s AI assistant. I'd be happy to help you with: ${testMessage}`);
+      // Use the real messaging API to test the agent
+      const apiBaseUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+      
+      console.log('🧪 Testing agent with message:', testMessage);
+      console.log('📡 Agent ID:', agentId);
+      console.log('📡 API URL:', `${apiBaseUrl}/api/v1/messages/`);
+      
+      const response = await fetch(`${apiBaseUrl}/api/v1/messages/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: testMessage,
+          agent_id: agentId, // Use actual agent ID
+          session_id: `test-${Date.now()}`,
+          user_id: 'test-user',
+          page_context: {
+            url: window.location.href,
+            title: 'Agent Test - Admin Dashboard',
+          },
+        }),
+      });
+
+      console.log('📨 Response status:', response.status);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('❌ API error response:', errorText);
+        throw new Error(`API responded with status ${response.status}: ${errorText}`);
+      }
+
+      const result = await response.json();
+      console.log('✅ Test response:', result);
+      
+      // Extract the response text
+      const responseText = result.response || result.message || JSON.stringify(result);
+      setTestResponse(responseText);
+      
     } catch (error) {
-      setTestResponse('Error: Could not connect to the agent. Please check your configuration.');
+      console.error('❌ Test error:', error);
+      
+      // Provide helpful error messages
+      if (error instanceof Error) {
+        if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+          setTestResponse(
+            `⚠️ Cannot connect to API server.\n\n` +
+            `Make sure the API is running at ${process.env.REACT_APP_API_URL || 'http://localhost:8000'}\n\n` +
+            `Expected endpoint: /api/v1/messages/\n\n` +
+            `To start the API:\n` +
+            `1. Open terminal\n` +
+            `2. cd apps/api\n` +
+            `3. python run.py`
+          );
+        } else if (error.message.includes('500')) {
+          setTestResponse(
+            `⚠️ Server Error (500)\n\n` +
+            `The API encountered an error processing your request.\n\n` +
+            `Common causes:\n` +
+            `- Agent configuration is incomplete\n` +
+            `- LLM provider API keys not set\n` +
+            `- Database connection issues\n` +
+            `- RAG is enabled but no documents uploaded\n\n` +
+            `Check the API logs for more details:\n` +
+            `tail -f apps/api/logs/api.log`
+          );
+        } else if (error.message.includes('404')) {
+          setTestResponse(
+            `⚠️ Agent Not Found (404)\n\n` +
+            `The agent with ID "${agentId}" doesn't exist in the database.\n\n` +
+            `This usually means:\n` +
+            `1. The agent was deleted\n` +
+            `2. The agent ID is invalid\n` +
+            `3. Database connection issue\n\n` +
+            `Try deploying the agent again.`
+          );
+        } else {
+          setTestResponse(
+            `Error: ${error.message}\n\n` +
+            `Please check:\n` +
+            `- API server is running\n` +
+            `- Agent configuration is valid\n` +
+            `- LLM provider credentials are set\n` +
+            `- Database is accessible`
+          );
+        }
+      } else {
+        setTestResponse('Unknown error occurred during testing');
+      }
     } finally {
       setIsTestLoading(false);
     }
@@ -220,7 +321,18 @@ export default function StepReview({ data, onTest, onDeploy, isDeploying, brands
 
       {/* Test Interface */}
       <div className="bg-white border border-gray-200 rounded-lg p-6">
-        <h4 className="text-base font-medium text-gray-900 mb-4">Test Your Agent</h4>
+        <div className="flex items-center justify-between mb-4">
+          <h4 className="text-base font-medium text-gray-900">Test Your Agent</h4>
+          {agentId ? (
+            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+              Testing Available
+            </span>
+          ) : (
+            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
+              Deploy First to Test
+            </span>
+          )}
+        </div>
         
         <div className="space-y-4">
           <div>

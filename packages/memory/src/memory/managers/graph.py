@@ -151,7 +151,8 @@ class GraphMemory:
     async def match_rules(
         self,
         brand_id: str,
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        query: Optional[str] = None
     ) -> List[GraphRule]:
         """
         Match rules against a context.
@@ -159,10 +160,15 @@ class GraphMemory:
         Args:
             brand_id: Brand identifier
             context: Context to match (e.g., user input, page_context)
+            query: Optional user query to add to context
         
         Returns:
             List of matched rules sorted by priority
         """
+        # Add query to context if provided
+        if query:
+            context = {**context, "query": query}
+        
         rules = await self.get_rules(brand_id, enabled_only=True)
         matched = []
         

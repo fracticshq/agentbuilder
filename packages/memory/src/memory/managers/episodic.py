@@ -188,7 +188,8 @@ class EpisodicMemory:
         self,
         user_id: str,
         fact_types: Optional[List[str]] = None,
-        min_confidence: Optional[float] = None
+        min_confidence: Optional[float] = None,
+        limit: Optional[int] = None
     ) -> List[EpisodicFact]:
         """
         Get all facts for a user.
@@ -197,6 +198,7 @@ class EpisodicMemory:
             user_id: User identifier
             fact_types: Optional filter by fact types
             min_confidence: Optional minimum confidence threshold
+            limit: Optional limit on number of facts to return
         
         Returns:
             List of EpisodicFact objects
@@ -212,6 +214,10 @@ class EpisodicMemory:
         
         # Retrieve facts
         cursor = self.collection.find(query).sort("confidence", -1)
+        
+        # Apply limit if specified
+        if limit:
+            cursor = cursor.limit(limit)
         
         facts = []
         async for doc in cursor:

@@ -1,5 +1,6 @@
 import React, { useCallback } from 'react';
 import { DocumentArrowUpIcon, DocumentTextIcon, TrashIcon } from '@heroicons/react/24/outline';
+import { documentApi } from '../../api/client';
 
 interface StepKnowledgeBaseProps {
   data: {
@@ -9,16 +10,18 @@ interface StepKnowledgeBaseProps {
       size: number;
       type: string;
       status: 'uploading' | 'processing' | 'ready' | 'error';
+      file?: File;
     }>;
     chunking_strategy: string;
     chunk_size: number;
     chunk_overlap: number;
   };
   onChange: (field: string, value: any) => void;
+  agentId?: string;
 }
 
 const allowedFileTypes = [
-  '.pdf', '.docx', '.doc', '.txt', '.md', '.rtf'
+  '.pdf', '.docx', '.doc', '.txt', '.md', '.rtf', '.json'
 ];
 
 const chunkingStrategies = [
@@ -45,115 +48,171 @@ const chunkingStrategies = [
   }
 ];
 
-export default function StepKnowledgeBase({ data, onChange }: StepKnowledgeBaseProps) {
-  const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+export default function StepKnowledgeBase({ data, onChange, agentId }: StepKnowledgeBaseProps) {
+  const handleFileUpload = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []);
     
-    files.forEach(file => {
+    for (const file of files) {
       // Validate file type
       const fileExtension = '.' + file.name.split('.').pop()?.toLowerCase();
       if (!allowedFileTypes.includes(fileExtension)) {
         alert(`File type ${fileExtension} is not supported. Please upload: ${allowedFileTypes.join(', ')}`);
-        return;
+        continue;
       }
 
       // Validate file size (10MB limit)
       if (file.size > 10 * 1024 * 1024) {
         alert(`File ${file.name} is too large. Maximum size is 10MB.`);
-        return;
+        continue;
       }
 
-      // Add to documents list
+      // Add to documents list with file object
       const newDocument = {
         id: Math.random().toString(36).substr(2, 9),
         filename: file.name,
         size: file.size,
         type: fileExtension,
-        status: 'uploading' as const
+        status: 'ready' as const, // Mark as ready for new uploads
+        file: file // Store the actual File object for later upload
       };
 
       const updatedDocuments = [...data.documents, newDocument];
       onChange('documents', updatedDocuments);
 
-      // Simulate upload process
-      setTimeout(() => {
-        const docs = updatedDocuments.map(doc => 
-          doc.id === newDocument.id 
-            ? { ...doc, status: 'processing' as const }
-            : doc
-        );
-        onChange('documents', docs);
+      // Only upload immediately if we have an agentId (editing existing agent)
+      if (agentId) {
+        try {
+          console.log('📤 Uploading file immediately (editing mode):', file.name);
+          
+          // Update status to uploading
+          onChange('documents', updatedDocuments.map(doc => 
+            doc.id === newDocument.id ? { ...doc, status: 'uploading' as const } : doc
+          ));
+          
+          const result = await documentApi.uploadDocuments([file], {
+            agent_id: agentId,
+            category: 'knowledge_base',
+            document_type: 'other'
+          });
 
-        setTimeout(() => {
-          const finalDocs = docs.map(doc => 
+          console.log('✅ Upload result:', result);
+
+          // Update status to processing
+          const docsProcessing = updatedDocuments.map(doc => 
             doc.id === newDocument.id 
-              ? { ...doc, status: 'ready' as const }
+              ? { ...doc, status: 'processing' as const }
               : doc
           );
-          onChange('documents', finalDocs);
-        }, 2000);
-      }, 1000);
-    });
+          onChange('documents', docsProcessing);
+
+          // Simulate final ready state (in real app, you'd poll the job status)
+          setTimeout(() => {
+            const finalDocs = docsProcessing.map(doc => 
+              doc.id === newDocument.id 
+                ? { ...doc, status: 'ready' as const }
+                : doc
+            );
+            onChange('documents', finalDocs);
+          }, 2000);
+
+        } catch (error) {
+          console.error('❌ Upload failed:', error);
+          // Mark as error
+          const docsWithError = updatedDocuments.map(doc => 
+            doc.id === newDocument.id 
+              ? { ...doc, status: 'error' as const }
+              : doc
+          );
+          onChange('documents', docsWithError);
+          alert(`Failed to upload ${file.name}: ${(error as Error).message}`);
+        }
+      } else {
+        // For new agents, documents will be uploaded after agent creation
+        console.log(`📋 Queued file for upload after agent creation: ${file.name}`);
+      }
+    }
 
     // Reset input
     event.target.value = '';
-  }, [data.documents, onChange]);
+  }, [data.documents, onChange, agentId]);
 
   const handleDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
   }, []);
 
-  const handleDrop = useCallback((event: React.DragEvent) => {
+  const handleDrop = useCallback(async (event: React.DragEvent) => {
     event.preventDefault();
     const files = Array.from(event.dataTransfer.files);
     
-    // Process files directly instead of creating fake event
-    files.forEach(file => {
+    // Process files
+    for (const file of files) {
       // Validate file type
       const fileExtension = '.' + file.name.split('.').pop()?.toLowerCase();
       if (!allowedFileTypes.includes(fileExtension)) {
         alert(`File type ${fileExtension} is not supported. Please upload: ${allowedFileTypes.join(', ')}`);
-        return;
+        continue;
       }
 
       // Validate file size (10MB limit)
       if (file.size > 10 * 1024 * 1024) {
         alert(`File ${file.name} is too large. Maximum size is 10MB.`);
-        return;
+        continue;
       }
 
-      // Add to documents list
+      // Add to documents list with file object
       const newDocument = {
         id: Math.random().toString(36).substr(2, 9),
         filename: file.name,
         size: file.size,
         type: fileExtension,
-        status: 'uploading' as const
+        status: 'uploading' as const,
+        file: file
       };
 
       const updatedDocuments = [...data.documents, newDocument];
       onChange('documents', updatedDocuments);
 
-      // Simulate upload process
-      setTimeout(() => {
-        const docs = updatedDocuments.map(doc => 
+      // Actually upload the file to the API
+      try {
+        console.log('Uploading file:', file.name);
+        const result = await documentApi.uploadDocuments([file], {
+          agent_id: agentId,
+          category: 'knowledge_base',
+          document_type: 'other'
+        });
+
+        console.log('Upload result:', result);
+
+        // Update status to processing
+        const docsProcessing = updatedDocuments.map(doc => 
           doc.id === newDocument.id 
             ? { ...doc, status: 'processing' as const }
             : doc
         );
-        onChange('documents', docs);
+        onChange('documents', docsProcessing);
 
+        // Simulate final ready state
         setTimeout(() => {
-          const finalDocs = docs.map(doc => 
+          const finalDocs = docsProcessing.map(doc => 
             doc.id === newDocument.id 
               ? { ...doc, status: 'ready' as const }
               : doc
           );
           onChange('documents', finalDocs);
         }, 2000);
-      }, 1000);
-    });
-  }, [data.documents, onChange]);
+
+      } catch (error) {
+        console.error('Upload failed:', error);
+        const docsWithError = updatedDocuments.map(doc => 
+          doc.id === newDocument.id 
+            ? { ...doc, status: 'error' as const }
+            : doc
+        );
+        onChange('documents', docsWithError);
+        alert(`Failed to upload ${file.name}: ${(error as Error).message}`);
+      }
+    }
+  }, [data.documents, onChange, agentId]);
 
   const removeDocument = (documentId: string) => {
     const updatedDocuments = data.documents.filter(doc => doc.id !== documentId);
@@ -223,39 +282,95 @@ export default function StepKnowledgeBase({ data, onChange }: StepKnowledgeBaseP
 
       {/* Uploaded Documents */}
       {data.documents.length > 0 && (
-        <div>
-          <h4 className="text-sm font-medium text-gray-700 mb-3">
-            Uploaded Documents ({data.documents.length})
-          </h4>
-          <div className="space-y-2">
-            {data.documents.map((doc) => (
-              <div key={doc.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                <div className="flex items-center space-x-3">
-                  <DocumentTextIcon className="h-5 w-5 text-gray-400" />
-                  <div>
-                    <p className="text-sm font-medium text-gray-900">{doc.filename}</p>
-                    <p className="text-xs text-gray-500">
-                      {formatFileSize(doc.size)} • {doc.type.toUpperCase()}
-                    </p>
+        <div className="space-y-4">
+          {/* Existing Documents from Database */}
+          {data.documents.some(doc => !doc.file) && (
+            <div>
+              <h4 className="text-sm font-medium text-gray-700 mb-3 flex items-center">
+                <DocumentTextIcon className="h-5 w-5 mr-2 text-blue-500" />
+                Existing Documents ({data.documents.filter(doc => !doc.file).length})
+                <span className="ml-2 text-xs text-gray-500">(Already uploaded to database)</span>
+              </h4>
+              <div className="space-y-2 border-l-4 border-blue-300 pl-4">
+                {data.documents.filter(doc => !doc.file).map((doc) => (
+                  <div key={doc.id} className="flex items-center justify-between p-3 bg-blue-50 rounded-lg border border-blue-200">
+                    <div className="flex items-center space-x-3">
+                      <DocumentTextIcon className="h-5 w-5 text-blue-600" />
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">
+                          {doc.filename}
+                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                            ✓ In Database
+                          </span>
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          {formatFileSize(doc.size)} • {doc.type.toUpperCase()}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                        ✓ Ready
+                      </span>
+                      <button
+                        onClick={() => removeDocument(doc.id)}
+                        className="text-gray-400 hover:text-red-500 transition-colors"
+                        title="Remove from list (file remains in database)"
+                      >
+                        <TrashIcon className="h-4 w-4" />
+                      </button>
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusColor(doc.status)}`}>
-                    {doc.status === 'uploading' && 'Uploading...'}
-                    {doc.status === 'processing' && 'Processing...'}
-                    {doc.status === 'ready' && 'Ready'}
-                    {doc.status === 'error' && 'Error'}
-                  </span>
-                  <button
-                    onClick={() => removeDocument(doc.id)}
-                    className="text-gray-400 hover:text-red-500 transition-colors"
-                  >
-                    <TrashIcon className="h-4 w-4" />
-                  </button>
-                </div>
+                ))}
               </div>
-            ))}
-          </div>
+            </div>
+          )}
+
+          {/* Newly Added Documents (Not yet uploaded) */}
+          {data.documents.some(doc => doc.file) && (
+            <div>
+              <h4 className="text-sm font-medium text-gray-700 mb-3 flex items-center">
+                <DocumentArrowUpIcon className="h-5 w-5 mr-2 text-yellow-500" />
+                New Documents ({data.documents.filter(doc => doc.file).length})
+                <span className="ml-2 text-xs text-gray-500">(Will be uploaded on save)</span>
+              </h4>
+              <div className="space-y-2 border-l-4 border-yellow-300 pl-4">
+                {data.documents.filter(doc => doc.file).map((doc) => (
+                  <div key={doc.id} className="flex items-center justify-between p-3 bg-yellow-50 rounded-lg border border-yellow-200">
+                    <div className="flex items-center space-x-3">
+                      <DocumentTextIcon className="h-5 w-5 text-yellow-600" />
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">
+                          {doc.filename}
+                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                            Queued
+                          </span>
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          {formatFileSize(doc.size)} • {doc.type.toUpperCase()}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusColor(doc.status)}`}>
+                        {doc.status === 'uploading' && '⏳ Uploading...'}
+                        {doc.status === 'processing' && '⚙️ Processing...'}
+                        {doc.status === 'ready' && '📋 Queued'}
+                        {doc.status === 'error' && '❌ Error'}
+                      </span>
+                      <button
+                        onClick={() => removeDocument(doc.id)}
+                        className="text-gray-400 hover:text-red-500 transition-colors"
+                        title="Remove document"
+                      >
+                        <TrashIcon className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

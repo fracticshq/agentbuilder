@@ -232,9 +232,11 @@ export default function StepSystemPrompt({ data, onChange, brandVoice }: StepSys
                 Brand Voice Settings
               </h3>
               <div className="mt-2 text-sm text-blue-700">
-                <p><strong>Tone:</strong> {brandVoice.tone}</p>
-                <p><strong>Style:</strong> {brandVoice.style}</p>
-                <p><strong>Personality:</strong> {brandVoice.personality.join(', ')}</p>
+                <p><strong>Tone:</strong> {brandVoice.tone || 'Not specified'}</p>
+                <p><strong>Style:</strong> {brandVoice.style || 'Not specified'}</p>
+                {brandVoice.personality && brandVoice.personality.length > 0 && (
+                  <p><strong>Personality:</strong> {brandVoice.personality.join(', ')}</p>
+                )}
               </div>
             </div>
           </div>

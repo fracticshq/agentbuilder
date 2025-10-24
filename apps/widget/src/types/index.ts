@@ -1,6 +1,7 @@
 export interface WidgetConfig {
   apiUrl: string;
   userId: string;
+  agentId?: string;  // Agent ID for custom agent configuration
   theme?: 'light' | 'dark';
   position?: 'bottom-right' | 'bottom-left' | 'sidebar';
   pageContext?: {

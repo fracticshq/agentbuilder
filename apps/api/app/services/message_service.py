@@ -44,6 +44,10 @@ class MessageService:
         self.mongo_client = AsyncIOMotorClient(settings.MONGODB_URI)
         self.db = self.mongo_client[settings.MONGODB_DATABASE]
         
+        # Agent configuration (will be loaded on first message)
+        self.agent_config = None
+        self.system_prompt = None
+        
         # Initialize Phase 5 Memory System
         self.memory_config = MemoryConfig()
         self.short_term = ShortTermMemory(self.db)
@@ -115,6 +119,33 @@ class MessageService:
                 await self.graph.seed_default_escalations()
             self._memory_initialized = True
             logger.info("memory_indexes_initialized")
+    
+    async def _load_agent_config(self, agent_id: Optional[str] = None):
+        """Load agent configuration from database."""
+        if self.agent_config is not None:
+            return  # Already loaded
+        
+        try:
+            # Try to get agent_id from request or use brand_id
+            if not agent_id:
+                agent_id = self.brand_id
+            
+            # Load agent from database
+            agents_collection = self.db["agents"]
+            agent = await agents_collection.find_one({"id": agent_id})
+            
+            if agent:
+                self.agent_config = agent
+                self.system_prompt = agent.get("system_prompt", "")
+                logger.info("agent_config_loaded", agent_id=agent_id, has_system_prompt=bool(self.system_prompt))
+            else:
+                logger.warning("agent_not_found", agent_id=agent_id)
+                self.agent_config = {}
+                self.system_prompt = ""
+        except Exception as e:
+            logger.error("agent_config_load_error", error=str(e))
+            self.agent_config = {}
+            self.system_prompt = ""
 
     
     async def process_message(self, request: MessageRequest) -> MessageResponse:
@@ -122,18 +153,23 @@ class MessageService:
         Process a single message with Phase 5 Memory System.
         
         Flow:
-        1. Ensure memory initialized
-        2. Store user message in short-term memory
-        3. Check for safety escalations
-        4. Retrieve semantic context (KB)
-        5. Build full memory context (short-term + episodic + graph)
-        6. Generate response with LLM
-        7. Store assistant response
-        8. Extract and store episodic facts
-        9. Check if auto-summary needed
+        1. Load agent configuration
+        2. Ensure memory initialized
+        3. Store user message in short-term memory
+        4. Check for safety escalations
+        5. Retrieve semantic context (KB)
+        6. Build full memory context (short-term + episodic + graph)
+        7. Generate response with LLM
+        8. Store assistant response
+        9. Extract and store episodic facts
+        10. Check if auto-summary needed
         """
         try:
             start_time = datetime.now(timezone.utc)
+            
+            # Load agent configuration from request
+            agent_id = request.agent_id or self.brand_id
+            await self._load_agent_config(agent_id)
             
             # Ensure memory is initialized
             await self._ensure_memory_initialized()
@@ -546,13 +582,17 @@ class MessageService:
         """
         prompt_parts = []
         
-        # System instruction
-        prompt_parts.append(
-            "You are a helpful AI assistant for customer support. "
-            "Use the provided context to answer questions accurately and helpfully. "
-            "If you cannot find relevant information in the context, say so clearly. "
-            "Always cite your sources when possible."
-        )
+        # System instruction - use custom agent prompt if available
+        if self.system_prompt:
+            prompt_parts.append(self.system_prompt)
+        else:
+            # Fallback to generic prompt
+            prompt_parts.append(
+                "You are a helpful AI assistant for customer support. "
+                "Use the provided context to answer questions accurately and helpfully. "
+                "If you cannot find relevant information in the context, say so clearly. "
+                "Always cite your sources when possible."
+            )
         
         # Add safety escalation warnings
         if escalations:
@@ -569,11 +609,14 @@ class MessageService:
         # Add knowledge base context (semantic memory)
         if retrieval_context.chunks:
             prompt_parts.append("\n📚 Knowledge Base Context:")
-            for i, chunk in enumerate(retrieval_context.chunks[:5]):  # Top 5 chunks
+            prompt_parts.append("Use the following information to answer the user's question accurately:")
+            for i, chunk in enumerate(retrieval_context.chunks[:10]):  # Top 10 chunks
                 citation = f"[{i+1}]"
                 if chunk.title:
                     citation += f" {chunk.title}"
-                prompt_parts.append(f"{citation}: {chunk.content[:200]}...")  # Truncate for prompt
+                # Include more content - up to 500 chars per chunk
+                content = chunk.content[:500] if len(chunk.content) > 500 else chunk.content
+                prompt_parts.append(f"\n{citation}:\n{content}")
         
         # Add user preferences (episodic memory)
         if memory_context.get("user_facts"):

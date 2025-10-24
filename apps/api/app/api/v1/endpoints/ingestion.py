@@ -35,9 +35,17 @@ class ChunkRequest(BaseModel):
 async def upload_documents(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
+    agent_id: Optional[str] = None,
     ingestion_service: IngestionService = Depends(get_ingestion_service)
 ):
-    """Upload and process documents for ingestion."""
+    """Upload and process documents for ingestion.
+    
+    Args:
+        background_tasks: FastAPI background tasks
+        files: List of files to upload
+        agent_id: Optional agent ID to associate with documents (query parameter)
+        ingestion_service: Injected ingestion service
+    """
     try:
         # Validate file types
         allowed_types = {
@@ -52,9 +60,21 @@ async def upload_documents(
                     detail=f"Unsupported file type: {file.content_type}"
                 )
         
-        # Start background ingestion job
-        job_id = await ingestion_service.start_ingestion_job(files)
-        background_tasks.add_task(ingestion_service.process_documents, job_id, files)
+        # Read file contents before starting background task
+        file_contents = []
+        for file in files:
+            content = await file.read()
+            file_contents.append({
+                'content': content,
+                'filename': file.filename,
+                'content_type': file.content_type
+            })
+        
+        # Start background ingestion job with agent_id
+        job_id = await ingestion_service.start_ingestion_job(file_contents, agent_id)
+        background_tasks.add_task(ingestion_service.process_documents, job_id, file_contents, agent_id)
+        
+        logger.info("Document upload started", job_id=job_id, files_count=len(files), agent_id=agent_id)
         
         return DocumentUploadResponse(
             job_id=job_id,
@@ -63,6 +83,8 @@ async def upload_documents(
             documents_count=len(files)
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error uploading documents", error=str(e))
         raise HTTPException(status_code=500, detail="Error uploading documents")
@@ -78,7 +100,9 @@ async def process_chunk(
         ingestion_request = IngestionRequest(
             text=request.text,
             metadata=request.metadata,
-            doc_id=request.doc_id
+            doc_id=request.doc_id,
+            chunk_size=None,
+            chunk_overlap=None
         )
         
         response = await ingestion_service.process_chunk(ingestion_request)
@@ -125,3 +149,22 @@ async def cancel_ingestion_job(
     except Exception as e:
         logger.error("Error cancelling job", job_id=job_id, error=str(e))
         raise HTTPException(status_code=500, detail="Error cancelling job")
+
+
+@router.get("/documents")
+async def get_documents(
+    agent_id: Optional[str] = None,
+    ingestion_service: IngestionService = Depends(get_ingestion_service)
+):
+    """Get uploaded documents, optionally filtered by agent_id."""
+    try:
+        documents = await ingestion_service.get_documents(agent_id)
+        return {
+            "documents": documents,
+            "count": len(documents)
+        }
+        
+    except Exception as e:
+        logger.error("Error retrieving documents", agent_id=agent_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error retrieving documents")
+

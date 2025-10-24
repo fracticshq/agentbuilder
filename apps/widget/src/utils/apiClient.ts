@@ -11,15 +11,17 @@ export class APIClient {
   }
 
   async sendMessage(
-    request: { content: string; context?: PageContext },
+    request: { content: string; context?: PageContext; userId?: string },  // Add userId to request
     conversationId?: string,
+    agentId?: string,  // Add agentId parameter
     onStream?: (chunk: StreamingMessage) => void
   ): Promise<Message> {
     try {
       const requestBody = {
         message: request.content,
-        user_id: 'anonymous',
+        user_id: request.userId || 'anonymous',  // Use provided userId or default
         conversation_id: conversationId,
+        agent_id: agentId,  // Include agent_id in request
         page_context: request.context,
         stream: !!onStream,
       };
