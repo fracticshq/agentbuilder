@@ -142,9 +142,15 @@ export class APIClient {
                 } else if (chunk.type === 'status') {
                   onStream(chunk);
                 } else if (chunk.type === 'metadata') {
-                  // Store metadata (citations, etc.)
+                  // Phase 5: Store metadata (citations, products, dealers)
                   if (chunk.citations) {
                     messageData.citations = chunk.citations;
+                  }
+                  if (chunk.products) {
+                    messageData.products = chunk.products;
+                  }
+                  if (chunk.dealers) {
+                    messageData.dealers = chunk.dealers;
                   }
                 } else if (chunk.type === 'error') {
                   reject(new Error(chunk.content || 'Streaming error'));
@@ -163,6 +169,8 @@ export class APIClient {
             role: 'assistant',
             timestamp: new Date(),
             citations: messageData.citations,
+            products: messageData.products || [],  // Phase 5: Product cards
+            dealers: messageData.dealers || [],    // Phase 5: Dealer cards
           };
           
           console.log('[APIClient] Resolving with final message:', finalMessage);
@@ -183,6 +191,8 @@ export class APIClient {
       role: data.role || 'assistant',
       timestamp: new Date(data.timestamp || Date.now()),
       citations: data.citations || [],
+      products: data.products || [],  // Phase 5: Product cards
+      dealers: data.dealers || [],    // Phase 5: Dealer cards
     };
   }
 

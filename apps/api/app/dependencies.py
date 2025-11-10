@@ -6,6 +6,7 @@ from functools import lru_cache
 from .services.message_service import MessageService
 from .services.ingestion_service import IngestionService
 from .services.health_service import HealthService
+from .services.knowledge_service import KnowledgeService
 from .config import Settings
 
 
@@ -31,3 +32,9 @@ def get_health_service() -> HealthService:
     """Get health service instance."""
     settings = get_settings()
     return HealthService(settings)
+
+
+def get_knowledge_service() -> KnowledgeService:
+    """Get knowledge service instance."""
+    settings = get_settings()
+    return KnowledgeService(settings)

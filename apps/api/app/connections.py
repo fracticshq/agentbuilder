@@ -1,10 +1,11 @@
 """
 Connection Manager for MongoDB and Redis
+Supports brand-isolated databases with caching
 """
 
 import os
-from typing import Optional
-from motor.motor_asyncio import AsyncIOMotorClient
+from typing import Optional, Dict, Any
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 import redis.asyncio as aioredis
 import structlog
 
@@ -12,45 +13,49 @@ logger = structlog.get_logger()
 
 
 class ConnectionManager:
-    """Manages database and cache connections."""
+    """Manages database and cache connections with brand isolation."""
     
     def __init__(self):
         self.mongodb_client: Optional[AsyncIOMotorClient] = None
-        self.mongodb_db = None
+        self.system_db: Optional[AsyncIOMotorDatabase] = None
+        self.brand_db_cache: Dict[str, AsyncIOMotorDatabase] = {}
         self.redis_client: Optional[aioredis.Redis] = None
         logger.info("Connection manager initialized")
     
     async def connect_mongodb(self) -> None:
-        """Initialize MongoDB connection."""
+        """Initialize MongoDB connection and system database."""
         try:
             mongodb_uri = os.getenv("MONGODB_URI")
             if not mongodb_uri:
                 logger.warning("MONGODB_URI not set, MongoDB features will be unavailable")
                 return
             
-            db_name = os.getenv("MONGODB_DATABASE", "agent-builder")
+            system_db_name = os.getenv("MONGO_SYSTEM_DB", "system")
             
             self.mongodb_client = AsyncIOMotorClient(
                 mongodb_uri,
-                maxPoolSize=50,
-                minPoolSize=10,
+                maxPoolSize=100,  # Increased for multiple databases
+                minPoolSize=20,   # Increased for multiple databases
                 serverSelectionTimeoutMS=5000
             )
             
             # Test connection
             await self.mongodb_client.admin.command('ping')
-            self.mongodb_db = self.mongodb_client[db_name]
+            
+            # Initialize system database (for brands, users, etc.)
+            self.system_db = self.mongodb_client[system_db_name]
             
             logger.info(
                 "MongoDB connected successfully",
-                database=db_name,
+                system_database=system_db_name,
                 host=mongodb_uri.split('@')[-1].split('/')[0] if '@' in mongodb_uri else "localhost"
             )
             
         except Exception as e:
             logger.error("MongoDB connection failed", error=str(e))
             self.mongodb_client = None
-            self.mongodb_db = None
+            self.system_db = None
+            self.brand_db_cache.clear()
             # Don't raise - allow app to start without MongoDB
     
     async def connect_redis(self) -> None:
@@ -81,9 +86,11 @@ class ConnectionManager:
             # Don't raise - allow app to start without Redis
     
     async def disconnect_mongodb(self) -> None:
-        """Close MongoDB connection."""
+        """Close MongoDB connection and clear cache."""
         if self.mongodb_client:
             self.mongodb_client.close()
+            self.system_db = None
+            self.brand_db_cache.clear()
             logger.info("MongoDB disconnected")
     
     async def disconnect_redis(self) -> None:
@@ -98,15 +105,51 @@ class ConnectionManager:
         await self.disconnect_redis()
         logger.info("All connections closed")
     
-    def get_mongodb_db(self):
-        """Get MongoDB database instance."""
-        if not self.mongodb_db:
+    def get_system_db(self) -> AsyncIOMotorDatabase:
+        """Get system database instance for brands, users, etc."""
+        if self.system_db is None:
             raise RuntimeError("MongoDB not connected")
-        return self.mongodb_db
+        return self.system_db
+    
+    def get_brand_db(self, brand_slug: str) -> AsyncIOMotorDatabase:
+        """Get brand-specific database instance with caching."""
+        if self.mongodb_client is None:
+            raise RuntimeError("MongoDB not connected")
+        
+        # Check cache first
+        if brand_slug in self.brand_db_cache:
+            return self.brand_db_cache[brand_slug]
+        
+        # Create new database connection
+        brand_db = self.mongodb_client[brand_slug]
+        self.brand_db_cache[brand_slug] = brand_db
+        
+        logger.debug("Brand database cached", brand=brand_slug)
+        return brand_db
+    
+    async def get_brand_db_by_agent_id(self, agent_id: str) -> AsyncIOMotorDatabase:
+        """Get brand database by looking up agent's brand."""
+        system_db = self.get_system_db()
+        
+        # Find agent in system database (using "id" field, not "_id")
+        agent = await system_db.agents.find_one({"id": agent_id})
+        if not agent:
+            raise ValueError(f"Agent not found: {agent_id}")
+        
+        brand_slug = agent.get("brand_slug")
+        if not brand_slug:
+            raise ValueError(f"Agent {agent_id} has no brand_slug")
+        
+        return self.get_brand_db(brand_slug)
+    
+    def get_mongodb_db(self):
+        """Legacy method - deprecated. Use get_system_db() or get_brand_db() instead."""
+        logger.warning("get_mongodb_db() is deprecated. Use get_system_db() or get_brand_db() instead.")
+        return self.get_system_db()
     
     def get_redis_client(self):
         """Get Redis client instance."""
-        if not self.redis_client:
+        if self.redis_client is None:
             raise RuntimeError("Redis not connected")
         return self.redis_client
     
@@ -147,8 +190,23 @@ connection_manager = ConnectionManager()
 
 
 async def get_mongodb():
-    """Dependency to get MongoDB database."""
+    """Legacy dependency - deprecated. Use get_system_db or get_brand_db instead."""
     return connection_manager.get_mongodb_db()
+
+
+async def get_system_db():
+    """Dependency to get system database."""
+    return connection_manager.get_system_db()
+
+
+def get_brand_db(brand_slug: str):
+    """Dependency factory to get brand-specific database."""
+    return connection_manager.get_brand_db(brand_slug)
+
+
+async def get_brand_db_by_agent(agent_id: str):
+    """Dependency to get brand database by agent ID."""
+    return await connection_manager.get_brand_db_by_agent_id(agent_id)
 
 
 async def get_redis():

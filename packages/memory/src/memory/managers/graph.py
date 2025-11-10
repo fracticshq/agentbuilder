@@ -39,27 +39,29 @@ class GraphMemory:
             db: MongoDB database instance
         """
         self.db = db
-        self.rules_collection = db[MemoryConfig.GRAPH_RULES_COLLECTION]
-        self.escalations_collection = db[MemoryConfig.ESCALATIONS_COLLECTION]
+        # Use unified graph_memory collection for both rules and escalations
+        self.collection = db[MemoryConfig.GRAPH_MEMORY_COLLECTION]
         
-        logger.info("Graph memory initialized")
+        # Backward compatibility: keep references but point to same collection
+        self.rules_collection = self.collection
+        self.escalations_collection = self.collection
+        
+        logger.info("Graph memory initialized with unified collection")
     
     async def _ensure_indexes(self):
-        """Create indexes for graph memory."""
+        """Create indexes for unified graph memory collection."""
         try:
-            # Rules indexes
-            await self.rules_collection.create_index("brand_id")
-            await self.rules_collection.create_index([
-                ("brand_id", 1),
+            # Unified indexes for all rule types
+            # Use 'id' field (from GraphRule) instead of 'rule_id', make it sparse to allow nulls
+            await self.collection.create_index("id", unique=True, sparse=True)
+            await self.collection.create_index("rule_type")  # safety_escalation, business_rule, policy, etc.
+            await self.collection.create_index("enabled")
+            await self.collection.create_index("severity")
+            await self.collection.create_index("priority")
+            await self.collection.create_index("trigger_keywords")
+            await self.collection.create_index([
                 ("enabled", 1),
                 ("priority", -1)
-            ])
-            
-            # Escalations indexes
-            await self.escalations_collection.create_index("enabled")
-            await self.escalations_collection.create_index([
-                ("enabled", 1),
-                ("severity", 1)
             ])
             
             logger.debug("Graph memory indexes created")
@@ -296,32 +298,47 @@ class GraphMemory:
     
     async def check_escalation(self, text: str) -> List[EscalationTrigger]:
         """
-        Check if text triggers any escalations.
+        Check if text triggers any safety escalations.
         
         Args:
             text: Text to check (user input)
         
         Returns:
-            List of triggered escalations
+            List of triggered escalations (converted from graph_memory format)
         """
-        triggers = await self.get_escalation_triggers(enabled_only=True)
+        # Query for safety escalation rules from unified graph_memory collection
+        query = {
+            "rule_type": "safety_escalation",
+            "enabled": True
+        }
+        
+        cursor = self.collection.find(query).sort("priority", -1)
+        
         matched = []
         text_lower = text.lower()
         
-        for trigger in triggers:
-            # Check if any keyword is in text
-            for keyword in trigger.keywords:
+        async for rule in cursor:
+            # Check trigger keywords
+            keywords = rule.get("trigger_keywords", [])
+            for keyword in keywords:
                 if keyword.lower() in text_lower:
+                    # Convert graph_memory rule to EscalationTrigger format
+                    action_data = rule.get("actions", [{}])[0]
+                    trigger = EscalationTrigger(
+                        id=rule.get("rule_id", str(uuid.uuid4())),
+                        keywords=keywords,
+                        severity=rule.get("severity", "medium"),
+                        action=action_data.get("action_id", "escalate"),
+                        message=rule.get("description", ""),
+                        enabled=rule.get("enabled", True)
+                    )
                     matched.append(trigger)
-                    logger.warning("Escalation triggered",
+                    logger.warning("Safety escalation triggered",
                                   severity=trigger.severity,
                                   keyword=keyword,
-                                  action=trigger.action)
-                    break  # One match per trigger is enough
-        
-        # Sort by severity
-        severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1}
-        matched.sort(key=lambda t: severity_order.get(t.severity, 0), reverse=True)
+                                  action=trigger.action,
+                                  rule_id=rule.get("rule_id"))
+                    break  # One match per rule is enough
         
         return matched
     

@@ -20,25 +20,32 @@ class AtlasVectorSearch:
         self,
         collection_name: str = "knowledge_base",
         index_name: str = "vector_index",
-        voyage_client: Optional[VoyageClient] = None
+        voyage_client: Optional[VoyageClient] = None,
+        brand_id: Optional[str] = None  # Brand ID for database isolation
     ):
         # MongoDB connection
         mongodb_uri = os.getenv("MONGODB_URI")
         if not mongodb_uri:
             raise ValueError("MONGODB_URI environment variable not set")
         
-        db_name = os.getenv("MONGODB_DATABASE", "agent-builder")
+        # Use brand_id as database name for isolation
+        if brand_id:
+            db_name = brand_id.replace('.', '_')[:63]  # MongoDB db name max 63 chars
+        else:
+            db_name = os.getenv("MONGODB_DATABASE", "agent-builder")
         
         self.client = AsyncIOMotorClient(mongodb_uri)
         self.db = self.client[db_name]
         self.collection = self.db[collection_name]
         self.index_name = index_name
+        self.brand_id = brand_id
         
         # Voyage embeddings client
         self.voyage = voyage_client or VoyageClient()
         
         logger.info(
             "Atlas Vector Search initialized",
+            brand_id=brand_id,
             database=db_name,
             collection=collection_name,
             index=index_name
@@ -157,7 +164,11 @@ class AtlasVectorSearch:
                     "section": 1,
                     "metadata": 1,
                     "score": 1,
-                    "created_at": 1
+                    "created_at": 1,
+                    # Phase 2: Include structured data fields
+                    "content_type": 1,
+                    "product_data": 1,
+                    "dealer_data": 1
                 }
             }
         ]
@@ -175,7 +186,11 @@ class AtlasVectorSearch:
             section=result.get("section"),
             score=score,
             metadata=result.get("metadata", {}),
-            created_at=result.get("created_at")
+            created_at=result.get("created_at"),
+            # Phase 2: Add structured data fields
+            content_type=result.get("content_type"),
+            product_data=result.get("product_data"),
+            dealer_data=result.get("dealer_data")
         )
     
     async def index_documents(

@@ -1,4 +1,6 @@
 import React, { useState } from 'react';
+import { SparklesIcon } from '@heroicons/react/24/outline';
+import PromptTemplatesModal from '../PromptTemplatesModal';
 
 interface StepSystemPromptProps {
   data: {
@@ -82,6 +84,7 @@ const responseFormats = [
 
 export default function StepSystemPrompt({ data, onChange, brandVoice }: StepSystemPromptProps) {
   const [selectedTemplate, setSelectedTemplate] = useState('');
+  const [showTemplatesModal, setShowTemplatesModal] = useState(false);
 
   const applyTemplate = (templateId: string) => {
     const template = promptTemplates.find(t => t.id === templateId);
@@ -138,9 +141,19 @@ export default function StepSystemPrompt({ data, onChange, brandVoice }: StepSys
 
       {/* System Prompt Editor */}
       <div>
-        <label htmlFor="system_prompt" className="block text-sm font-medium text-gray-700">
-          System Prompt *
-        </label>
+        <div className="flex items-center justify-between mb-2">
+          <label htmlFor="system_prompt" className="block text-sm font-medium text-gray-700">
+            System Prompt *
+          </label>
+          <button
+            type="button"
+            onClick={() => setShowTemplatesModal(true)}
+            className="inline-flex items-center px-3 py-1 text-sm font-medium text-primary-700 bg-primary-50 border border-primary-300 rounded-md hover:bg-primary-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
+          >
+            <SparklesIcon className="w-4 h-4 mr-1" />
+            Browse Templates
+          </button>
+        </div>
         <textarea
           id="system_prompt"
           rows={12}
@@ -266,6 +279,13 @@ export default function StepSystemPrompt({ data, onChange, brandVoice }: StepSys
           </div>
         </div>
       </div>
+
+      {/* Prompt Templates Modal */}
+      <PromptTemplatesModal
+        isOpen={showTemplatesModal}
+        onClose={() => setShowTemplatesModal(false)}
+        onSelectTemplate={(template) => onChange('system_prompt', template)}
+      />
     </div>
   );
 }

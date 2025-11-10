@@ -132,16 +132,19 @@ class IngestionService:
     async def get_documents(self, agent_id: Optional[str] = None) -> List[dict]:
         """Get uploaded documents, optionally filtered by agent_id."""
         try:
-            db = connection_manager.mongodb_db
-            if db is None:
-                logger.error("MongoDB not connected")
-                return []
-            
-            chunks_collection = db["knowledge_base"]
-            
-            # Build query
-            query = {}
+            # Get brand-specific database
             if agent_id:
+                brand_db = await connection_manager.get_brand_db_by_agent_id(agent_id)
+            else:
+                # Fallback to system database (though documents should be in brand databases)
+                brand_db = connection_manager.get_system_db()
+            
+            chunks_collection = brand_db["knowledge_base"]
+            
+            # Build query (no need to filter by agent_id since we're in brand-specific DB)
+            query = {}
+            if agent_id and not hasattr(connection_manager, 'get_brand_db_by_agent_id'):
+                # Fallback for legacy compatibility
                 query["agent_id"] = agent_id
             
             # Aggregate to group by filename and get metadata
@@ -181,14 +184,107 @@ class IngestionService:
             return []
 
     
+    def _extract_product_data(self, json_obj: dict) -> Optional[dict]:
+        """Extract product fields from JSON object."""
+        try:
+            # Check if this looks like product data
+            has_product_fields = any(
+                field in json_obj 
+                for field in ['sku', 'name', 'price', 'product_id', 'product_name']
+            )
+            
+            if not has_product_fields:
+                return None
+            
+            return {
+                "sku": json_obj.get("sku") or json_obj.get("product_id"),
+                "name": json_obj.get("name") or json_obj.get("product_name"),
+                "price": json_obj.get("price"),
+                "currency": json_obj.get("currency", "INR"),
+                "category": json_obj.get("category"),
+                "image_url": json_obj.get("image_url"),
+                "product_url": json_obj.get("product_url"),
+                "in_stock": json_obj.get("in_stock", True),
+                "features": json_obj.get("features", [])
+            }
+        except Exception as e:
+            logger.warning("Failed to extract product data", error=str(e))
+            return None
+    
+    def _extract_dealer_data(self, json_obj: dict) -> Optional[dict]:
+        """Extract dealer fields from JSON object."""
+        try:
+            # Check if this looks like dealer data
+            has_dealer_fields = any(
+                field in json_obj 
+                for field in ['dealer_id', 'name', 'city', 'phone']
+            )
+            
+            if not has_dealer_fields:
+                return None
+            
+            return {
+                "dealer_id": json_obj.get("dealer_id"),
+                "name": json_obj.get("name"),
+                "city": json_obj.get("city"),
+                "state": json_obj.get("state"),
+                "phone": json_obj.get("phone"),
+                "email": json_obj.get("email"),
+                "address": json_obj.get("address")
+            }
+        except Exception as e:
+            logger.warning("Failed to extract dealer data", error=str(e))
+            return None
+    
+    def _detect_content_type(self, json_obj: dict) -> str:
+        """Auto-detect content type from JSON structure."""
+        # Check for product fields
+        if any(f in json_obj for f in ['sku', 'product_id', 'price']):
+            return "product"
+        
+        # Check for dealer fields
+        if any(f in json_obj for f in ['dealer_id', 'city', 'phone']):
+            return "dealer"
+        
+        # Check for FAQ fields
+        if 'question' in json_obj or 'answer' in json_obj:
+            return "faq"
+        
+        # Check for office fields
+        if 'office_id' in json_obj or 'office_name' in json_obj:
+            return "office"
+        
+        # Check for category fields
+        if 'category_id' in json_obj or 'category_name' in json_obj:
+            return "category"
+        
+        # Default to guide
+        return "guide"
+
     async def _extract_and_chunk(self, content: bytes, content_type: str, filename: str) -> List[dict]:
-        """Extract text and create chunks."""
+        """Extract text and create chunks with structured data extraction."""
         # Extract text based on content type
+        json_data = None
+        structured_content_type = None
+        
         if content_type == "application/json":
             text = content.decode('utf-8')
-            # For JSON files, try to extract meaningful text
+            # For JSON files, try to extract structured data
             try:
                 json_data = json.loads(text)
+                
+                # If it's a list, process each item
+                if isinstance(json_data, list):
+                    # Process the first item to detect type
+                    if json_data and isinstance(json_data[0], dict):
+                        structured_content_type = self._detect_content_type(json_data[0])
+                        logger.info(
+                            "Detected content type from JSON",
+                            filename=filename,
+                            detected_type=structured_content_type,
+                            items_count=len(json_data)
+                        )
+                
                 # Convert JSON to readable text format
                 text = self._json_to_text(json_data)
             except json.JSONDecodeError:
@@ -204,27 +300,62 @@ class IngestionService:
         chunk_overlap = 50  # Overlap between chunks
         chunks = []
         
-        # Split text into chunks with overlap
-        start = 0
-        chunk_index = 0
-        while start < len(text):
-            end = start + chunk_size
-            chunk_text = text[start:end]
-            
-            if chunk_text.strip():  # Only add non-empty chunks
+        # If we have structured JSON data (list of items), create one chunk per item
+        if json_data and isinstance(json_data, list) and structured_content_type:
+            for idx, item in enumerate(json_data):
+                if not isinstance(item, dict):
+                    continue
+                
+                # Extract structured data based on content type
+                product_data = None
+                dealer_data = None
+                
+                if structured_content_type == "product":
+                    product_data = self._extract_product_data(item)
+                elif structured_content_type == "dealer":
+                    dealer_data = self._extract_dealer_data(item)
+                
+                # Create readable text for this item
+                item_text = self._json_to_text(item)
+                
                 chunks.append({
-                    "content": chunk_text,
+                    "content": item_text,
+                    "content_type": structured_content_type,
+                    "product_data": product_data,
+                    "dealer_data": dealer_data,
                     "metadata": {
                         "filename": filename,
-                        "chunk_index": chunk_index,
+                        "chunk_index": idx,
                         "content_type": content_type,
-                        "start_char": start,
-                        "end_char": end
+                        "item_index": idx,
+                        "structured_type": structured_content_type
                     }
                 })
-                chunk_index += 1
-            
-            start = end - chunk_overlap
+        else:
+            # Standard chunking for non-structured content
+            start = 0
+            chunk_index = 0
+            while start < len(text):
+                end = start + chunk_size
+                chunk_text = text[start:end]
+                
+                if chunk_text.strip():  # Only add non-empty chunks
+                    chunks.append({
+                        "content": chunk_text,
+                        "content_type": "guide",  # Default content type
+                        "product_data": None,
+                        "dealer_data": None,
+                        "metadata": {
+                            "filename": filename,
+                            "chunk_index": chunk_index,
+                            "content_type": content_type,
+                            "start_char": start,
+                            "end_char": end
+                        }
+                    })
+                    chunk_index += 1
+                
+                start = end - chunk_overlap
         
         return chunks
     
@@ -286,7 +417,7 @@ class IngestionService:
             return [0.0] * 1024
     
     async def _store_chunks(self, chunks: List[dict], job_id: str, filename: str, agent_id: Optional[str] = None):
-        """Store chunks in vector database."""
+        """Store chunks in vector database with structured data."""
         for chunk in chunks:
             # Generate embeddings for this chunk
             chunk["embeddings"] = await self._generate_embeddings(chunk["content"])
@@ -296,20 +427,54 @@ class IngestionService:
             chunk["agent_id"] = agent_id
             chunk["created_at"] = datetime.utcnow().isoformat()
             
+            # content_type, product_data, dealer_data are already in chunk from _extract_and_chunk()
+            # Just ensure they exist
+            if "content_type" not in chunk:
+                chunk["content_type"] = "guide"
+            
+            if "product_data" not in chunk:
+                chunk["product_data"] = None
+            
+            if "dealer_data" not in chunk:
+                chunk["dealer_data"] = None
+
+            # Ensure metadata object exists and include brand info when possible
+            if "metadata" not in chunk or not isinstance(chunk["metadata"], dict):
+                chunk.setdefault("metadata", {})
+
+            # If agent_id is provided, try to resolve the agent -> brand and include both
+            if agent_id:
+                try:
+                    system_db = connection_manager.get_system_db()
+                    agent_doc = await system_db.agents.find_one({"id": agent_id})
+                    if agent_doc:
+                        # include both brand_id and brand_slug for cross-referencing
+                        if agent_doc.get("brand_id"):
+                            chunk["metadata"]["brand_id"] = agent_doc.get("brand_id")
+                        if agent_doc.get("brand_slug"):
+                            chunk["metadata"]["brand_slug"] = agent_doc.get("brand_slug")
+                        # Also ensure agent_id present in metadata for convenience
+                        chunk["metadata"]["agent_id"] = agent_id
+                except Exception:
+                    # If resolving fails, continue without brand info (will fallback)
+                    logger.debug("Could not resolve agent -> brand for chunk metadata", agent_id=agent_id)
+
             # Store in MongoDB
             await self._store_chunk(chunk)
     
     async def _store_chunk(self, chunk_doc: dict) -> str:
-        """Store a single chunk in MongoDB Atlas."""
+        """Store a single chunk in brand-specific MongoDB database."""
         try:
-            # Get MongoDB connection
-            db = connection_manager.mongodb_db
-            if db is None:
-                logger.error("MongoDB not connected, cannot store chunk")
-                return str(uuid.uuid4())  # Return fake ID
+            # Get brand-specific database
+            agent_id = chunk_doc.get("agent_id")
+            if agent_id:
+                brand_db = await connection_manager.get_brand_db_by_agent_id(agent_id)
+            else:
+                # Fallback to system database if no agent_id
+                brand_db = connection_manager.get_system_db()
             
-            # Get or create the chunks collection
-            chunks_collection = db["knowledge_base"]
+            # Get or create the chunks collection in brand database  
+            chunks_collection = brand_db["knowledge_base"]
             
             # Add unique ID if not present
             if "_id" not in chunk_doc:

@@ -32,8 +32,9 @@ class Settings(BaseSettings):
     
     # MongoDB Configuration
     MONGODB_URI: str = "mongodb://localhost:27017"
-    MONGODB_DATABASE: str = "agent-builder"
-    MONGODB_COLLECTION: str = "documents"
+    MONGO_SYSTEM_DB: str = "system"  # System database for brands, users, etc.
+    MONGODB_DATABASE: str = "agent-builder"  # Legacy - deprecated
+    MONGODB_COLLECTION: str = "documents"    # Legacy - deprecated
     
     # Voyage AI Configuration
     VOYAGE_API_KEY: str = ""
@@ -48,7 +49,13 @@ class Settings(BaseSettings):
     API_RELOAD: bool = True
     
     # CORS Configuration
-    CORS_ALLOW_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]
+    CORS_ALLOW_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://localhost:3001",  # Admin Dashboard
+        "http://localhost:5173",  # Widget
+        "http://127.0.0.1:3001",
+        "http://127.0.0.1:5173"
+    ]
     
     # Logging Configuration
     LOG_LEVEL: str = "INFO"

@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 import structlog
 
-from app.connections import connection_manager
+from app.connections import connection_manager, get_system_db
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -45,10 +45,10 @@ def generate_slug(name: str) -> str:
     return name.lower().replace(' ', '-').replace('&', 'and')
 
 def get_brands_collection():
-    """Get MongoDB brands collection."""
-    if connection_manager.mongodb_db is None:
+    """Get MongoDB brands collection from system database."""
+    if connection_manager.system_db is None:
         raise HTTPException(status_code=503, detail="Database not available")
-    return connection_manager.mongodb_db.brands
+    return connection_manager.system_db.brands
 
 @router.get("/", response_model=List[Brand])
 async def list_brands():

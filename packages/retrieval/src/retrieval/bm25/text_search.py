@@ -18,22 +18,29 @@ class BM25Search:
     def __init__(
         self,
         collection_name: str = "knowledge_base",
-        text_index_name: str = "text_index"
+        text_index_name: str = "text_index",
+        brand_id: Optional[str] = None  # Brand ID for database isolation
     ):
         # MongoDB connection
         mongodb_uri = os.getenv("MONGODB_URI")
         if not mongodb_uri:
             raise ValueError("MONGODB_URI environment variable not set")
         
-        db_name = os.getenv("MONGODB_DATABASE", "agent-builder")
+        # Use brand_id as database name for isolation
+        if brand_id:
+            db_name = brand_id.replace('.', '_')[:63]  # MongoDB db name max 63 chars
+        else:
+            db_name = os.getenv("MONGODB_DATABASE", "agent-builder")
         
         self.client = AsyncIOMotorClient(mongodb_uri)
         self.db = self.client[db_name]
         self.collection = self.db[collection_name]
         self.text_index_name = text_index_name
+        self.brand_id = brand_id
         
         logger.info(
             "BM25 Search initialized",
+            brand_id=brand_id,
             database=db_name,
             collection=collection_name
         )
@@ -126,7 +133,11 @@ class BM25Search:
             section=result.get("section"),
             score=result.get("score", 0.0),
             metadata=result.get("metadata", {}),
-            created_at=result.get("created_at")
+            created_at=result.get("created_at"),
+            # Phase 2: Add structured data fields
+            content_type=result.get("content_type"),
+            product_data=result.get("product_data"),
+            dealer_data=result.get("dealer_data")
         )
     
     async def create_text_index(self):

@@ -21,6 +21,11 @@ class DocumentChunk(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     embeddings: Optional[List[float]] = None
     
+    # Phase 2: Structured data for product cards
+    content_type: Optional[str] = None  # "product" | "dealer" | "faq" | "office" | "category" | "guide"
+    product_data: Optional[Dict[str, Any]] = None  # SKU, name, price, category, etc.
+    dealer_data: Optional[Dict[str, Any]] = None   # dealer_id, name, city, phone, etc.
+    
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -49,6 +54,10 @@ class RetrievalContext(BaseModel):
     
     query: str
     filters_applied: Optional[Dict[str, Any]] = None
+    
+    # Phase 2: Query intent and content type awareness
+    query_intent: Optional[str] = None  # "product_search" | "dealer_search" | "faq" | "general"
+    content_types_found: Optional[List[str]] = None  # Content types in results
 
 
 class PageContext(BaseModel):

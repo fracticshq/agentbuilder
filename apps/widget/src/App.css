@@ -133,46 +133,183 @@
   word-wrap: break-word;
 }
 
+/* Markdown Content Styling */
+.markdown-content {
+  font-size: 15px;  /* Increased from 14px */
+  line-height: 1.65; /* Slightly increased for better readability */
+  color: #1F2937;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  margin-top: 14px;
+  margin-bottom: 8px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: #111827;
+}
+
+.markdown-content h1 { font-size: 1.5em; }  /* Increased from 1.4em */
+.markdown-content h2 { font-size: 1.3em; }  /* Increased from 1.2em */
+.markdown-content h3 { font-size: 1.15em; } /* Increased from 1.1em */
+.markdown-content h4 { font-size: 1.05em; } /* Increased from 1em */
+
+.markdown-content p {
+  margin: 8px 0;  /* Increased from 6px */
+  line-height: 1.7;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.markdown-content li {
+  margin: 3px 0;
+}
+
+.markdown-content strong {
+  font-weight: 600;
+}
+
+.markdown-content em {
+  font-style: italic;
+}
+
+.markdown-content code {
+  background: #f3f4f6;
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.9em;
+}
+
+.markdown-content a {
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.markdown-content a:hover {
+  text-decoration: underline;
+}
+
+.markdown-content blockquote {
+  border-left: 3px solid #e5e7eb;
+  padding-left: 12px;
+  margin: 6px 0;
+  color: #6b7280;
+}
+
+.markdown-content hr {
+  border: none;
+  border-top: 1px solid #e5e7eb;
+  margin: 12px 0;
+}
+
 .message-timestamp {
   font-size: 11px;
   opacity: 0.7;
   margin-top: 4px;
 }
 
-/* Citations */
+/* Citations - Perplexity Style */
 .citations {
-  margin-top: 12px;
-  padding-top: 8px;
-  border-top: 1px solid #e5e7eb;
+  margin-top: 16px;
+  padding: 12px 0 0 0;
+  border-top: 1px solid #E5E7EB;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .citations-label {
-  font-size: 12px;
+  font-size: 10px;  /* Reduced from 11px */
   font-weight: 600;
-  color: #6b7280;
-  margin-bottom: 6px;
+  color: #9CA3AF;   /* Lighter gray */
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.citations-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;  /* Reduced from 6px */
 }
 
 .citation {
-  margin-bottom: 6px;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;  /* Reduced from 8px */
+  padding: 6px 8px;  /* Reduced from 8px */
+  background: #F9FAFB;
+  border-radius: 5px;  /* Reduced from 6px */
+  transition: all 0.2s ease;
+  font-size: 11px;  /* Smaller overall font */
+}
+
+.citation:hover {
+  background: #F3F4F6;
+}
+
+.citation-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;  /* Reduced from 20px */
+  height: 16px;     /* Reduced from 20px */
+  background: #3B82F6;
+  color: white;
+  border-radius: 3px;  /* Reduced from 4px */
+  font-size: 9px;      /* Reduced from 10px */
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.citation-content {
+  flex: 1;
+  min-width: 0;
 }
 
 .citation-link {
-  font-size: 12px;
-  color: #2563eb;
+  font-size: 11px;  /* Reduced from 12px */
+  color: #374151;   /* Darker gray instead of black */
   text-decoration: none;
-  font-weight: 500;
+  font-weight: 600;
+  line-height: 1.4;
+  display: block;
+  margin-bottom: 2px;  /* Reduced from 4px */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .citation-link:hover {
+  color: #3B82F6;
   text-decoration: underline;
 }
 
+.citation-url {
+  font-size: 9px;   /* Reduced from 10px */
+  color: #9CA3AF;   /* Lighter gray */
+  font-family: 'Monaco', 'Courier New', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .citation-snippet {
-  font-size: 11px;
-  color: #6b7280;
-  margin: 2px 0 0 0;
-  line-height: 1.4;
+  font-size: 10px;  /* Reduced from 11px */
+  color: #6B7280;
+  margin: 3px 0 0 0;  /* Reduced from 4px */
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* Typing Indicator */

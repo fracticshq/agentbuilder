@@ -37,12 +37,12 @@ class VoyageClient:
     async def embed_query(self, query: str) -> List[float]:
         """Generate embedding for a search query."""
         embeddings = await self._embed([query], input_type="query")
-        return embeddings[0]  # type: ignore
+        return embeddings[0]  # Get first (and only) embedding from the list
     
     async def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for multiple documents."""
         embeddings = await self._embed(texts, input_type="document")
-        return embeddings  # type: ignore
+        return embeddings  # Already a list of embeddings
     
     async def _embed(
         self,
@@ -74,11 +74,13 @@ class VoyageClient:
                 "Generated embeddings",
                 count=len(embeddings),
                 model=self.model,
-                input_type=input_type
+                input_type=input_type,
+                first_embedding_type=type(embeddings[0]).__name__ if embeddings else None,
+                first_embedding_length=len(embeddings[0]) if embeddings and isinstance(embeddings[0], list) else None
             )
             
-            # Return single embedding if single text, otherwise list
-            return embeddings[0] if len(texts) == 1 else embeddings
+            # Always return list of embeddings (list of lists)
+            return embeddings
             
         except httpx.HTTPStatusError as e:
             logger.error("Voyage API error", status=e.response.status_code, detail=e.response.text)

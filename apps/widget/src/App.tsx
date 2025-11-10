@@ -48,6 +48,57 @@ function App({ config }: AppProps) {
     return newId;
   });
 
+  // Fetch agent ID dynamically from URL or config
+  const [agentId, setAgentId] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    // Priority: URL query param > config.agentId > data-agent-id attribute > fetch from API
+    
+    // 1. Check URL query parameter (highest priority)
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlAgentId = urlParams.get('agent_id');
+    if (urlAgentId) {
+      setAgentId(urlAgentId);
+      console.log('[Widget] Using agent ID from URL:', urlAgentId);
+      return;
+    }
+
+    // 2. Check config prop
+    if (config?.agentId) {
+      setAgentId(config.agentId);
+      console.log('[Widget] Using agent ID from config:', config.agentId);
+      return;
+    }
+
+    // 3. Check for data-agent-id attribute on script tag
+    const scriptTag = document.querySelector('script[data-agent-id]') as HTMLScriptElement;
+    if (scriptTag?.dataset.agentId) {
+      setAgentId(scriptTag.dataset.agentId);
+      console.log('[Widget] Using agent ID from data attribute:', scriptTag.dataset.agentId);
+      return;
+    }
+
+    // 4. Fallback: Fetch first available agent from API
+    const fetchAgent = async () => {
+      try {
+        const response = await fetch('http://localhost:8000/api/v1/admin/agents/');
+        if (response.ok) {
+          const agents = await response.json();
+          if (agents.length > 0) {
+            setAgentId(agents[0].id);
+            console.log('[Widget] Using first available agent:', agents[0].name, agents[0].id);
+          } else {
+            console.error('[Widget] No agents found in database');
+          }
+        }
+      } catch (error) {
+        console.error('[Widget] Failed to fetch agent:', error);
+      }
+    };
+
+    fetchAgent();
+  }, [config?.agentId]);
+
   React.useEffect(() => {
     if (config) {
       setConfig(config);
@@ -73,6 +124,18 @@ function App({ config }: AppProps) {
   };
 
   const handleSendMessage = async (text: string) => {
+    // Check if agent is loaded
+    if (!agentId) {
+      console.error('[Widget] Agent ID not available yet');
+      addMessage({
+        id: Date.now().toString(),
+        content: 'Agent is still loading, please wait...',
+        role: 'assistant',
+        timestamp: new Date()
+      });
+      return;
+    }
+
     // Add user message
     addMessage({
       id: Date.now().toString(),
@@ -87,9 +150,6 @@ function App({ config }: AppProps) {
     try {
       // Extract page context
       const context = extractPageContext();
-      
-      // Get agent ID from config (default to Essco agent if not specified)
-      const agentId = config?.agentId || 'f168131d-7833-4f9c-ac8e-8a19b22c16f3';
       
       // Use conversation ID from store (or create new one)
       const currentConvId = conversationId || `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -138,10 +198,12 @@ function App({ config }: AppProps) {
 
       console.log('[App] Stream complete, final response:', response);
 
-      // Update final message with complete response and citations
+      // Update final message with complete response, citations, products, and dealers
       updateMessage(assistantMessageId, {
         content: response.content,
-        citations: response.citations
+        citations: response.citations,
+        products: response.products,  // Phase 5: Product cards
+        dealers: response.dealers      // Phase 5: Dealer cards
       });
     } catch (error) {
       console.error('Error sending message:', error);

@@ -1,4 +1,8 @@
 /* Custom styles for the widget */
+
+/* Import Phase 5 product and dealer card styles */
+@import './styles/cards.css';
+
 * {
   box-sizing: border-box;
 }

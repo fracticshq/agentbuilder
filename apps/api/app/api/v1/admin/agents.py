@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 import structlog
 
-from app.connections import connection_manager
+from app.connections import connection_manager, get_system_db
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -30,6 +30,7 @@ class AgentUpdate(BaseModel):
 class Agent(AgentBase):
     id: str
     brand_id: str
+    brand_slug: str  # Brand slug for database routing
     slug: str
     configuration: dict
     status: str
@@ -44,10 +45,10 @@ def generate_slug(name: str) -> str:
     return name.lower().replace(' ', '-').replace('&', 'and')
 
 def get_agents_collection():
-    """Get MongoDB agents collection."""
-    if connection_manager.mongodb_db is None:
+    """Get MongoDB agents collection from system database."""
+    if connection_manager.system_db is None:
         raise HTTPException(status_code=503, detail="Database not available")
-    return connection_manager.mongodb_db.agents
+    return connection_manager.system_db.agents
 
 @router.get("/", response_model=List[Agent])
 async def list_agents(brand_id: Optional[str] = Query(None)):
@@ -81,8 +82,19 @@ async def create_agent(agent: AgentCreate):
     """Create a new agent."""
     try:
         collection = get_agents_collection()
+        brands_collection = connection_manager.get_system_db()["brands"]
+        
         agent_id = str(uuid.uuid4())
         slug = generate_slug(agent.name)
+        
+        # Look up brand to get brand_slug
+        brand = await brands_collection.find_one({"id": agent.brand_id})
+        if not brand:
+            raise HTTPException(status_code=404, detail=f"Brand not found: {agent.brand_id}")
+        
+        brand_slug = brand.get("slug")
+        if not brand_slug:
+            raise HTTPException(status_code=400, detail=f"Brand {agent.brand_id} has no slug")
         
         # Check if slug already exists for this brand
         existing = await collection.find_one({"brand_id": agent.brand_id, "slug": slug})
@@ -93,6 +105,7 @@ async def create_agent(agent: AgentCreate):
         agent_doc = {
             "id": agent_id,
             "brand_id": agent.brand_id,
+            "brand_slug": brand_slug,  # Add brand_slug for database routing
             "slug": slug,
             "name": agent.name,
             "description": agent.description,
@@ -104,7 +117,7 @@ async def create_agent(agent: AgentCreate):
         }
         
         await collection.insert_one(agent_doc)
-        logger.info("Agent created", agent_id=agent_id, name=agent.name, brand_id=agent.brand_id)
+        logger.info("Agent created", agent_id=agent_id, name=agent.name, brand_id=agent.brand_id, brand_slug=brand_slug)
         
         return Agent(**agent_doc)
     except Exception as e:

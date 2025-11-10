@@ -25,6 +25,8 @@ export interface Message {
   citations?: Citation[];
   contextUsed?: number;
   confidenceScore?: number;
+  products?: ProductData[];  // Phase 5: Product cards
+  dealers?: DealerData[];    // Phase 5: Dealer cards
 }
 
 export interface Citation {
@@ -33,6 +35,33 @@ export interface Citation {
   url?: string;
   confidence: number;
   snippet?: string;
+}
+
+// Phase 5: Product card data
+export interface ProductData {
+  sku: string;
+  name: string;
+  price?: number;
+  currency?: string;
+  category?: string;
+  in_stock?: boolean;
+  features?: string[];
+  image_url?: string;
+  product_url?: string;
+  description?: string;
+}
+
+// Phase 5: Dealer card data
+export interface DealerData {
+  dealer_id: string;
+  name: string;
+  city: string;
+  state?: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  map_url?: string;
+  hours?: string;
 }
 
 export interface PageContext {
@@ -49,6 +78,8 @@ export interface StreamingMessage {
   citations?: Citation[];
   context_used?: number;
   confidence_score?: number;
+  products?: ProductData[];  // Phase 5: Product cards in metadata
+  dealers?: DealerData[];    // Phase 5: Dealer cards in metadata
   timestamp?: string;
 }
 

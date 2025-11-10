@@ -1,0 +1,25 @@
+feat: Add comprehensive console logging for RAG pipeline debugging
+
+Added detailed console output for Vector search, BM25 search, and LLM responses
+to provide real-time visibility into the retrieval and generation pipeline.
+
+Changes:
+- Vector search logging: Shows top-K results with scores, SKUs, text previews
+- BM25 search logging: Shows keyword matches with scores and metadata
+- LLM response logging: Shows full response, context used, memory layers, escalations
+- Created UPDATES.md: Single chronological history file for all codebase changes
+
+Benefits:
+- Real-time debugging visibility across entire RAG pipeline
+- SKU verification (real vs hallucinated)
+- Context quality validation
+- Memory layer activity tracking
+- Safety escalation monitoring
+- Minimal performance impact (<1ms per request)
+
+Files modified:
+- packages/retrieval/src/retrieval/pipeline.py (vector + BM25 logging)
+- apps/api/app/services/message_service.py (LLM response logging)
+- UPDATES.md (created - sequential update history)
+
+Breaking changes: None

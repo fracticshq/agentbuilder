@@ -133,8 +133,8 @@ const steps = [
   { id: 1, name: 'Basic Info', description: 'Agent details and purpose' },
   { id: 2, name: 'LLM Config', description: 'Language model settings' },
   { id: 3, name: 'System Prompt', description: 'Agent personality and behavior' },
-  { id: 4, name: 'Knowledge Base', description: 'Upload and manage documents' },
-  { id: 5, name: 'RAG Config', description: 'Retrieval settings' },
+  { id: 4, name: 'RAG Config', description: 'Retrieval settings' },
+  { id: 5, name: 'Knowledge Base', description: 'Upload and manage documents' },
   { id: 6, name: 'Features', description: 'Features and security' },
   { id: 7, name: 'Review', description: 'Test and deploy' },
 ];
@@ -194,22 +194,32 @@ export default function AgentWizard() {
       const loadDocuments = async () => {
         try {
           console.log('📄 Loading documents for agent:', id);
-          const { documentApi } = await import('../api/client');
-          const docs = await documentApi.getKnowledgeDocuments(id);
+          
+          // Resolve agent -> brand_slug first
+          // Agent might have brand_slug in response or just brand_id
+          const brandSlug = (existingAgent as any).brand_slug || existingAgent.brand_id;
+          if (!brandSlug) {
+            console.warn('⚠️  Agent has no brand_slug or brand_id, cannot load documents');
+            return;
+          }
+          
+          console.log('🔍 Using brand_slug for document query:', brandSlug);
+          
+          // Use the new knowledge API endpoint
+          const { knowledgeApi } = await import('../api/knowledge');
+          const docs = await knowledgeApi.getDocuments(brandSlug);
           
           console.log('📦 Raw documents from API:', docs);
           
           // Map documents to wizard format
-          // Backend returns: { filename, agent_id, job_id, chunks_count, created_at, content_type }
           const mappedDocs = docs.map(doc => ({
-            id: doc.job_id || doc.filename, // Use job_id as unique ID, fallback to filename
-            filename: doc.filename,
-            size: 0, // Backend doesn't return original file size
+            id: doc.doc_id,
+            filename: doc.title || doc.doc_id,
+            size: doc.chunks_count || 0,
             type: doc.content_type || 'application/octet-stream',
             status: 'ready' as const,
-            chunks_count: doc.chunks_count, // Additional info
+            chunks_count: doc.chunks_count,
             created_at: doc.created_at,
-            // Note: We can't get the original File object, so these are display-only
           }));
           
           setAgentData(prev => ({ ...prev, documents: mappedDocs }));
@@ -536,17 +546,17 @@ export default function AgentWizard() {
         );
       case 4:
         return (
-          <StepKnowledgeBase
+          <StepRAGConfig
             data={agentData}
             onChange={updateStepData}
-            agentId={id}
           />
         );
       case 5:
         return (
-          <StepRAGConfig
+          <StepKnowledgeBase
             data={agentData}
             onChange={updateStepData}
+            agentId={id}
           />
         );
       case 6:

@@ -50,47 +50,46 @@ async def lifespan(app: FastAPI):
     await connection_manager.connect_mongodb()
     await connection_manager.connect_redis()
     
-    # Setup MongoDB indexes for admin collections
-    if connection_manager.mongodb_db is not None:
+    # Setup MongoDB indexes for admin collections (using system database)
+    try:
+        logger.info("Setting up MongoDB indexes...")
+        system_db = connection_manager.system_db
+        
+        # Brand indexes
         try:
-            logger.info("Setting up MongoDB indexes...")
-            db = connection_manager.mongodb_db
-            
-            # Brand indexes (with proper names to avoid conflicts)
-            try:
-                await db.brands.create_index("id", unique=True, name="brand_id_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-            
-            try:
-                await db.brands.create_index("slug", unique=True, name="brand_slug_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-            
-            # Agent indexes (with proper names to avoid conflicts)
-            try:
-                await db.agents.create_index("id", unique=True, name="agent_id_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-                    
-            try:
-                await db.agents.create_index("brand_id", name="agent_brand_id_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-                    
-            try:
-                await db.agents.create_index([("brand_id", 1), ("slug", 1)], unique=True, name="agent_brand_slug_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-            
-            logger.info("MongoDB indexes created successfully")
+            await system_db.brands.create_index("id", unique=True, name="brand_id_idx")
         except Exception as e:
-            logger.warning("Failed to create MongoDB indexes", error=str(e))
+            if "already exists" not in str(e):
+                raise
+        
+        try:
+            await system_db.brands.create_index("slug", unique=True, name="brand_slug_idx")
+        except Exception as e:
+            if "already exists" not in str(e):
+                raise
+        
+        # Agent indexes
+        try:
+            await system_db.agents.create_index("id", unique=True, name="agent_id_idx")
+        except Exception as e:
+            if "already exists" not in str(e):
+                raise
+                
+        try:
+            await system_db.agents.create_index("brand_id", name="agent_brand_id_idx")
+        except Exception as e:
+            if "already exists" not in str(e):
+                raise
+                
+        try:
+            await system_db.agents.create_index([("brand_id", 1), ("slug", 1)], unique=True, name="agent_brand_slug_idx")
+        except Exception as e:
+            if "already exists" not in str(e):
+                raise
+        
+        logger.info("✅ MongoDB indexes setup complete")
+    except Exception as e:
+        logger.error("Failed to setup MongoDB indexes", error=str(e))
     
     # Check connection health
     health = await connection_manager.health_check()

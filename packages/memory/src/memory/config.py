@@ -40,12 +40,19 @@ class MemoryConfig:
     MONGODB_DATABASE: str = os.getenv('MONGODB_DATABASE', 'agent-builder')
     REDIS_URL: str = os.getenv('REDIS_URL', 'redis://localhost:6379')
     
-    # Collections
+    # Collections (Mirix-inspired memory architecture)
     CONVERSATIONS_COLLECTION: str = 'conversations'
-    SUMMARIES_COLLECTION: str = 'conversation_summaries'
+    SUMMARIES_COLLECTION: str = 'short_term_summaries'  # Updated from conversation_summaries
     EPISODIC_COLLECTION: str = 'episodic_memory'
-    GRAPH_RULES_COLLECTION: str = 'graph_rules'
-    ESCALATIONS_COLLECTION: str = 'escalation_triggers'
+    GRAPH_MEMORY_COLLECTION: str = 'graph_memory'  # Unified collection for rules + escalations
+    PROCEDURAL_MEMORY_COLLECTION: str = 'procedural_memory'  # NEW: workflows, SOPs
+    RESOURCE_MEMORY_COLLECTION: str = 'resource_memory'  # NEW: tools, APIs
+    KNOWLEDGE_VAULT_COLLECTION: str = 'knowledge_vault'  # NEW: encrypted PII
+    KNOWLEDGE_SOURCES_COLLECTION: str = 'knowledge_sources'  # NEW: source registry
+    
+    # Legacy collections (deprecated)
+    GRAPH_RULES_COLLECTION: str = 'graph_memory'  # Redirected to graph_memory
+    ESCALATIONS_COLLECTION: str = 'graph_memory'  # Redirected to graph_memory
     
     # LLM Settings for Summarization
     SUMMARY_MODEL: str = os.getenv('SUMMARY_MODEL', 'gpt-4o-mini')

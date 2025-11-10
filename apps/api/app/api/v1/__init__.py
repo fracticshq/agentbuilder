@@ -3,7 +3,7 @@ API v1 Router
 """
 
 from fastapi import APIRouter
-from .endpoints import messages, ingestion, status
+from .endpoints import messages, ingestion, status, knowledge
 from .admin import router as admin_router
 from .auth import auth_router
 
@@ -15,6 +15,7 @@ api_router.include_router(auth_router)
 # Include endpoint routers
 api_router.include_router(messages.router, prefix="/messages", tags=["messages"])
 api_router.include_router(ingestion.router, prefix="/ingest", tags=["ingestion"])
+api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledge"])
 api_router.include_router(status.router, prefix="/status", tags=["status"])
 
 # Include admin routers

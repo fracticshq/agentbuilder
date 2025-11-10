@@ -4,11 +4,11 @@ import './index.css'
 import App from './App.tsx'
 import type { WidgetConfig } from './types'
 
-// Default configuration with Essco agent ID
+// Default configuration - agentId will be auto-detected
 const defaultConfig: WidgetConfig = {
   apiUrl: 'http://localhost:8000',
   userId: 'anonymous',
-  agentId: 'f168131d-7833-4f9c-ac8e-8a19b22c16f3',  // Essco AI agent
+  // agentId is auto-fetched from API if not specified
   theme: 'light',
   position: 'bottom-right',
   autoOpen: false,
