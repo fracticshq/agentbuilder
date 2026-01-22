@@ -1,5 +1,7 @@
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
+email-validator>=2.1.0
+sse-starlette>=2.1.0
 websockets>=12.0
 pydantic>=2.7.1
 pydantic-settings>=2.2.1
@@ -28,9 +30,3 @@ python-dotenv>=1.0.1
 
 # Additional utilities
 aiofiles>=23.2.1
-
-# Local packages (in development mode)
--e /Users/anantmendiratta/Desktop/anant2/agent-builder/packages/commons
--e /Users/anantmendiratta/Desktop/anant2/agent-builder/packages/memory
--e /Users/anantmendiratta/Desktop/anant2/agent-builder/packages/retrieval
--e /Users/anantmendiratta/Desktop/anant2/agent-builder/packages/llm
