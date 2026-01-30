@@ -24,10 +24,10 @@ from retrieval.pipeline import RetrievalPipeline
 from retrieval.types import RetrievalConfig, RetrievalContext
 from llm.factory import LLMFactory, create_provider_from_env
 
-# Phase 6: SOTA Agentic Orchestrator (local imports)
-from .tools.registry import ToolRegistry
-from .tools.builtin.retrieval_tool import RetrievalTool
-from .agent_runtime.orchestrator import Orchestrator, AgentResult
+# Phase 6: SOTA Agentic Orchestrator (package imports)
+from tools.registry import ToolRegistry
+from tools.builtin.retrieval_tool import RetrievalTool
+from agent_runtime.orchestrator import Orchestrator, AgentResult
 
 from ..config import Settings
 from ..connections import connection_manager
@@ -123,14 +123,15 @@ class MessageService:
         # Phase 4: Initialize response validator
         self.response_validator = ResponseValidator(strict_mode=True)
         
-        # Phase 6: Initialize SOTA Orchestrator
+        # Phase 6: Initialize SOTA Orchestrator with Critic
         self.tool_registry = ToolRegistry()
         if self.retrieval_pipeline:
             self.tool_registry.register(RetrievalTool(self.retrieval_pipeline))
             
         self.orchestrator = Orchestrator(
             llm=self.llm_provider,
-            tools=self.tool_registry
+            tools=self.tool_registry,
+            critic=self.response_validator  # Enable autonomous self-correction
         )
 
         
@@ -305,6 +306,8 @@ class MessageService:
             )
             
             response_text = agent_result.answer
+            # Note: Validation now happens inside Orchestrator via Critic loop
+            # Check agent_result.metadata for validation_passed and validation_issues
             
             # 5. Store assistant response
             await self.short_term.add_message(

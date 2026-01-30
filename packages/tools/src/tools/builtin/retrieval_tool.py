@@ -3,7 +3,7 @@ Retrieval Tool - Wraps the RetrievalPipeline for agent use.
 """
 
 from typing import Optional, Dict, Any, List
-from .types import BaseTool, ToolResult
+from tools.types import BaseTool, ToolResult
 from retrieval.pipeline import RetrievalPipeline
 from retrieval.types import RetrievalContext
 

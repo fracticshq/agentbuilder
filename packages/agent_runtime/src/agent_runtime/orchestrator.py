@@ -30,11 +30,13 @@ class Orchestrator:
         self, 
         llm: LLMProvider, 
         tools: ToolRegistry,
-        max_iterations: int = 5
+        max_iterations: int = 5,
+        critic=None  # Optional ResponseValidator for self-correction
     ):
         self.llm = llm
         self.tools = tools
         self.max_iterations = max_iterations
+        self.critic = critic  # Critic for autonomous self-correction
         
     async def run(self, query: str, context: Optional[Dict] = None) -> AgentResult:
         """
@@ -102,11 +104,81 @@ class Orchestrator:
         # Aggregate results into a final answer
         final_answer = await self._synthesize_answer(query, scratchpad)
         
+        # 4. CRITIC / VERIFICATION PHASE (SOTA Self-Correction)
+        # If a Critic is available, validate the answer and retry if needed
+        validation_passed = True
+        validation_metadata = {}
+        
+        if self.critic:
+            try:
+                # Use critic to validate the synthesized answer
+                validation_result = await self.critic.validate_response(
+                    response=final_answer,
+                    query_intent="general",  # Could be enhanced with intent detection
+                    catalog_products=None,   # Would need to extract from tool results
+                    catalog_dealers=None
+                )
+                
+                validation_metadata = {
+                    "validation_confidence": validation_result.confidence,
+                    "validation_issues": validation_result.issues
+                }
+                
+                # If validation fails and we have iterations left, retry
+                if not validation_result.is_valid and len(results) < self.max_iterations:
+                    logger.warning(
+                        "critic_rejected_answer", 
+                        issues=validation_result.issues,
+                        confidence=validation_result.confidence
+                    )
+                    
+                    # Use sanitized response if available, or retry synthesis
+                    if validation_result.sanitized_response:
+                        logger.info("using_sanitized_response")
+                        final_answer = validation_result.sanitized_response
+                        validation_passed = True  # Sanitized is considered valid
+                    else:
+                        # Retry synthesis with critic feedback
+                        logger.info("retrying_synthesis_with_feedback")
+                        final_answer = await self._retry_with_feedback(
+                            query, 
+                            scratchpad, 
+                            validation_result.issues
+                        )
+                        
+                        # Re-validate the retried answer
+                        retry_validation = await self.critic.validate_response(
+                            response=final_answer,
+                            query_intent="general",
+                            catalog_products=None,
+                            catalog_dealers=None
+                        )
+                        
+                        validation_passed = retry_validation.is_valid
+                        validation_metadata = {
+                            "validation_confidence": retry_validation.confidence,
+                            "validation_issues": retry_validation.issues
+                        }
+                        
+                        if validation_passed:
+                            logger.info("critic_approved_retry", confidence=retry_validation.confidence)
+                        else:
+                            logger.warning("critic_rejected_retry", issues=retry_validation.issues)
+                            
+                else:
+                    logger.info("critic_approved_answer", confidence=validation_result.confidence)
+                    
+            except Exception as e:
+                logger.error("critic_validation_failed", error=str(e))
+                # Continue with original answer if critic fails
+        
         return AgentResult(
             answer=final_answer,
             metadata={
                 "plan": plan.dict(),
-                "steps_executed": len(results)
+                "steps_executed": len(results),
+                "validation_passed": validation_passed,
+                **validation_metadata
             }
         )
 
@@ -128,3 +200,20 @@ class Orchestrator:
         """fallback for when planning fails."""
         response = await self.llm.generate(f"Please answer this directly: {query}")
         return AgentResult(answer=response.content, metadata={"fallback": True}, success=True)
+
+    async def _retry_with_feedback(self, query: str, history: List[Dict], issues: List[str]) -> str:
+        """Re-synthesize answer with critic feedback."""
+        feedback_text = "\n".join([f"- {issue}" for issue in issues])
+        prompt = f"""
+        User Query: {query}
+        
+        Execution History:
+        {json.dumps(history, indent=2)}
+        
+        Your previous answer had the following issues:
+        {feedback_text}
+        
+        Please provide a corrected comprehensive answer addressing these issues.
+        """
+        response = await self.llm.generate(prompt)
+        return response.content
