@@ -29,14 +29,24 @@ class Orchestrator:
     def __init__(
         self, 
         llm: LLMProvider, 
-        tools: ToolRegistry,
-        max_iterations: int = 5,
-        critic=None  # Optional ResponseValidator for self-correction
+        tools: ToolRegistry, 
+        critic: Optional[Any] = None,  # ResponseValidator - using Any to avoid circular import
+        system_prompt: Optional[str] = None
     ):
+        """
+        Initialize the Orchestrator.
+        
+        Args:
+            llm: Language model provider for generating plans and responses
+            tools: Registry of available tools the orchestrator can use
+            critic: Optional ResponseValidator for autonomous self-correction
+            system_prompt: Optional system instructions to guide the agent's behavior
+        """
         self.llm = llm
         self.tools = tools
-        self.max_iterations = max_iterations
-        self.critic = critic  # Critic for autonomous self-correction
+        self.critic = critic
+        self.system_prompt = system_prompt or "You are a helpful AI assistant."
+        self.max_iterations = 3  # Default max retries for critic loop
         
     async def run(self, query: str, context: Optional[Dict] = None) -> AgentResult:
         """
@@ -46,11 +56,40 @@ class Orchestrator:
         scratchpad = []
         
         # 1. PLANNING PHASE
-        # In a real SOTA implementation, this would use a dedicated "Thinking Model" (e.g., o1)
-        # Here we simulate it with a specific planning prompt.
-        
         tool_schemas = json.dumps(self.tools.get_tool_schemas(), indent=2)
-        planning_prompt = PROMPT_PLANNING.format(query=query, tool_schemas=tool_schemas)
+        
+        # Inject system prompt to guide behavior
+        # The system_prompt contains brand-identity, categorization rules, and guardrails.
+        # We must ensure the Planning Agent respects these instructions.
+        planning_prompt = f"""{self.system_prompt}
+
+### Planning Phase
+You are now acting as the Planning Agent. Your goal is to break down the user's request into a step-by-step plan using the available tools, strictly following the rules and identity defined above.
+
+User Request: {query}
+
+Available Tools:
+{tool_schemas}
+
+Instructions:
+1. REVIEW the User Request and the rules above.
+2. If the request is a simple greeting or off-topic (as defined in the rules), use 'final_answer' immediately.
+3. If complex or product-related, break it down into steps.
+4. Each step must use a tool from the list above.
+5. You must output the plan in strict JSON format.
+
+Output JSON Format:
+{{
+  "goal": "Brief description of goal",
+  "steps": [
+    {{
+      "id": 1,
+      "thought": "Internal reasoning (e.g., 'Following Rule 1, I need to search for products...')",
+      "tool_name": "knowledge_search",
+      "tool_input": {{ "query": "..." }}
+    }}
+  ]
+}}"""
         
         try:
             plan_response = await self.llm.generate(planning_prompt)
@@ -178,6 +217,7 @@ class Orchestrator:
                 "plan": plan.dict(),
                 "steps_executed": len(results),
                 "validation_passed": validation_passed,
+                "tool_results": results,  # Expose tool results for product/dealer extraction
                 **validation_metadata
             }
         )

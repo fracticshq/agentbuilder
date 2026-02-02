@@ -1,11 +1,50 @@
-"""
-Application Configuration
-"""
-
 import os
-from typing import List
+import logging
+from typing import List, Optional
 from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
+
+def fetch_akv_secrets(vault_name: str) -> dict:
+    """Fetch secrets from Azure Key Vault."""
+    secrets = {}
+    try:
+        from azure.identity import DefaultAzureCredential
+        from azure.keyvault.secrets import SecretClient
+        
+        vault_url = f"https://{vault_name}.vault.azure.net/"
+        credential = DefaultAzureCredential()
+        client = SecretClient(vault_url=vault_url, credential=credential)
+        
+        # List of secrets we want to try and fetch if missing
+        secret_keys = [
+            "OPENAI-API-KEY",
+            "VOYAGE-API-KEY",
+            "MONGODB-URI",
+            "SECRET-KEY",
+            "PII-ENCRYPTION-KEY",
+            "JWT-SECRET",
+            "QWEN-API-KEY"
+        ]
+        
+        for key in secret_keys:
+            try:
+                # AKV uses dashes, envs use underscores
+                secret = client.get_secret(key)
+                env_key = key.replace("-", "_")
+                secrets[env_key] = secret.value
+                logger.info(f"Fetched {env_key} from Azure Key Vault")
+            except Exception:
+                # Secret might not exist or no permission
+                continue
+                
+    except ImportError:
+        logger.warning("Azure SDK not installed, skipping Key Vault fetch")
+    except Exception as e:
+        logger.error(f"Error fetching from Key Vault: {e}")
+        
+    return secrets
 
 
 class Settings(BaseSettings):
@@ -101,6 +140,18 @@ class Settings(BaseSettings):
     SUMMARY_MAX_TOKENS: int = 150
     SUMMARY_TEMPERATURE: float = 0.3
     
+    # Azure Key Vault Configuration
+    AZURE_KEYVAULT_NAME: Optional[str] = None
+    USE_AZURE_KEYVAULT: bool = False
+
+    def __init__(self, **values):
+        super().__init__(**values)
+        if self.USE_AZURE_KEYVAULT and self.AZURE_KEYVAULT_NAME:
+            akv_secrets = fetch_akv_secrets(self.AZURE_KEYVAULT_NAME)
+            for key, value in akv_secrets.items():
+                if not getattr(self, key, None):
+                    setattr(self, key, value)
+
     @field_validator("CORS_ALLOW_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, v):
@@ -109,7 +160,7 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
     
-    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", mode="before")
+    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", mode="before")
     @classmethod
     def parse_bool_fields(cls, v):
         """Parse boolean fields from string."""

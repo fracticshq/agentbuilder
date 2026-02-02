@@ -131,7 +131,8 @@ class MessageService:
         self.orchestrator = Orchestrator(
             llm=self.llm_provider,
             tools=self.tool_registry,
-            critic=self.response_validator  # Enable autonomous self-correction
+            critic=self.response_validator,  # Enable autonomous self-correction
+            system_prompt=None  # Will be loaded dynamically from DB
         )
 
         
@@ -170,6 +171,12 @@ class MessageService:
                     brand_id=brand_slug  # Use brand_slug instead of default brand_id
                 )
                 logger.info("retrieval_pipeline_reinitialized", brand_slug=brand_slug)
+                
+                # Update the RetrievalTool to use the new pipeline
+                # This is critical - the tool was registered with the old default pipeline
+                if self.tool_registry:
+                    self.tool_registry.register(RetrievalTool(self.retrieval_pipeline))
+                    logger.info("retrieval_tool_updated", brand_slug=brand_slug)
             
             # Initialize memory system with brand database
             self.short_term = ShortTermMemory(self.brand_db)
@@ -225,7 +232,15 @@ class MessageService:
                 self.agent_config = agent.get("configuration", {})
                 self.system_prompt = agent.get("system_prompt", "")
                 self.brand_id = agent.get("brand_slug", self.brand_id)
-                logger.info("agent_config_loaded", agent_id=agent_id, brand_id=self.brand_id)
+                
+                # Sync system prompt to Orchestrator
+                if self.orchestrator:
+                    self.orchestrator.system_prompt = self.system_prompt
+                
+                logger.info("agent_config_loaded", 
+                           agent_id=agent_id, 
+                           brand_id=self.brand_id,
+                           has_system_prompt=bool(self.system_prompt))
             else:
                 logger.warning("agent_not_found", agent_id=agent_id)
                 self.agent_config = {}
@@ -235,6 +250,8 @@ class MessageService:
             logger.error("agent_config_load_error", error=str(e))
             self.agent_config = {}
             self.system_prompt = ""
+            if self.orchestrator:
+                self.orchestrator.system_prompt = ""
 
     
     async def process_message(self, request: MessageRequest) -> MessageResponse:
@@ -369,7 +386,7 @@ class MessageService:
             # Store user message
             yield StreamingMessageResponse(
                 type="status",
-                content="Processing message...",
+                content="Thinking...",
                 conversation_id=conversation_id
             )
             
@@ -383,114 +400,45 @@ class MessageService:
                 }
             )
             
-            # Check for safety escalations
-            escalations = []
-            if self.memory_config.ENABLE_GRAPH_RULES:
-                escalations = await self.graph.check_escalation(request.message)
-                if escalations:
-                    # Send escalation warning as status
-                    yield StreamingMessageResponse(
-                        type="status",
-                        content=f"Safety escalation: {escalations[0].severity}",
-                        conversation_id=conversation_id
-                    )
-            
-            # Retrieve semantic context
+            # Phase 6: Use SOTA Orchestrator for Planning, Execution, and Critic loop
             yield StreamingMessageResponse(
                 type="status",
-                content="Retrieving context...",
+                content="Planning and searching...",
                 conversation_id=conversation_id
             )
             
-            retrieval_context = await self._retrieve_context(request)
+            agent_result = await self.orchestrator.run(request.message)
             
-            # Build memory context
-            yield StreamingMessageResponse(
-                type="status",
-                content="Loading memory...",
-                conversation_id=conversation_id
-            )
+            # Extract final answer
+            full_response = agent_result.answer
             
-            memory_context = await self._build_memory_context(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                query=request.message,
-                escalations=escalations,
-            )
-            
-            # Stream response generation
-            yield StreamingMessageResponse(
-                type="status",
-                content="Generating response...",
-                conversation_id=conversation_id
-            )
-            
-            response_chunks = []
-            async for chunk in self._stream_response(
-                message=request.message,
-                retrieval_context=retrieval_context,
-                memory_context=memory_context,
-                escalations=escalations,
-            ):
-                response_chunks.append(chunk)
+            # Stream the result word by word (to maintain UI experience)
+            words = full_response.split(' ')
+            for i, word in enumerate(words):
+                # Add space back if not the last word
+                display_word = word + (" " if i < len(words) - 1 else "")
                 yield StreamingMessageResponse(
                     type="content",
-                    content=chunk,
+                    content=display_word,
                     conversation_id=conversation_id
                 )
-            
-            # Combine full response
-            full_response = "".join(response_chunks)
+                # Small artificial delay to keep UI smooth
+                await asyncio.sleep(0.02)
             
             # Phase 4: Validate streaming response
-            query_intent = getattr(retrieval_context, 'query_intent', 'general')
-            catalog_products = None
-            catalog_dealers = None
-            
-            if query_intent == 'product_search':
-                catalog_products = self._extract_product_data(retrieval_context)
-            elif query_intent == 'dealer_search':
-                catalog_dealers = self._extract_dealer_data(retrieval_context)
-            
-            validation_result = await self.response_validator.validate_response(
-                response=full_response,
-                query_intent=query_intent,
-                catalog_products=catalog_products,
-                catalog_dealers=catalog_dealers,
-            )
-            
-            logger.info(
-                "streaming_response_validation",
-                conversation_id=conversation_id,
-                is_valid=validation_result.is_valid,
-                confidence=validation_result.confidence,
-                issues_count=len(validation_result.issues),
-            )
-            
-            # If validation failed, send warning to client
-            if validation_result.issues:
-                critical_count = len([i for i in validation_result.issues if "CRITICAL" in i])
-                if critical_count > 0:
-                    yield StreamingMessageResponse(
-                        type="status",
-                        content=f"⚠️ Response validation: {critical_count} issue(s) detected and corrected",
-                        conversation_id=conversation_id
-                    )
-            
-            # Store validated response
-            response_to_store = validation_result.sanitized_response if validation_result.issues else full_response
+            # Orchestrator already ran the Critic loop and self-correction
+            # So we just store the final answer and its metadata
             
             await self.short_term.add_message(
                 conversation_id=conversation_id,
                 role=MessageRole.ASSISTANT,
-                content=response_to_store,
+                content=full_response,
                 metadata={
                     "user_id": user_id,
-                    "validation": {
-                        "is_valid": validation_result.is_valid,
-                        "confidence": validation_result.confidence,
-                        "issues_count": len(validation_result.issues),
-                    }
+                    "agent_steps": agent_result.metadata.get("steps_executed", 0),
+                    "validation_passed": agent_result.metadata.get("validation_passed"),
+                    "validation_issues": agent_result.metadata.get("validation_issues", []),
+                    "plan": agent_result.metadata.get("plan")
                 }
             )
             
@@ -508,28 +456,45 @@ class MessageService:
                 if await self.short_term.should_summarize(conversation_id):
                     await self.short_term.trigger_summary(conversation_id)
             
-            # Send final metadata
-            citations = self._extract_citations(retrieval_context)
-            
-            # Phase 5: Extract products and dealers for UI cards
-            query_intent = getattr(retrieval_context, 'query_intent', None)
+            # Send final metadata (orchestrator handles retrieval internally)
+            # Extract tool results from orchestrator metadata for citations, products, and dealers
+            tool_results = agent_result.metadata.get("tool_results", {})
+            citations = []
             products = []
             dealers = []
             
-            if query_intent == 'product_search':
-                products = self._extract_product_data(retrieval_context)
-            elif query_intent == 'dealer_search':
-                dealers = self._extract_dealer_data(retrieval_context)
+            # tool_results is a dict mapping step_id -> ToolResult
+            for step_id, tool_result in tool_results.items():
+                if hasattr(tool_result, 'metadata') and tool_result.metadata:
+                    result_metadata = tool_result.metadata
+                    
+                    # Extract products and dealers
+                    if 'products' in result_metadata:
+                        products.extend(result_metadata['products'])
+                    if 'dealers' in result_metadata:
+                        dealers.extend(result_metadata['dealers'])
+                    
+                    # Extract citations from sources
+                    if 'sources' in result_metadata:
+                        for source in result_metadata['sources'][:5]:  # Top 5 citations
+                            citations.append({
+                                "source": source.get("title", "Unknown"),
+                                "page": source.get("page", 0),
+                            })
+            
+            # Deduplicate products and dealers by ID
+            unique_products = {p['id']: p for p in products if p.get('id')}.values()
+            unique_dealers = {d['id']: d for d in dealers if d.get('id')}.values()
             
             yield StreamingMessageResponse(
                 type="metadata",
                 content="",
                 conversation_id=conversation_id,
                 citations=citations,
-                context_used=len(retrieval_context.chunks) if hasattr(retrieval_context, 'chunks') else 0,
-                confidence_score=validation_result.confidence,  # Phase 4: Use validation confidence
-                products=products if products else None,  # Phase 5: Product cards
-                dealers=dealers if dealers else None,     # Phase 5: Dealer cards
+                context_used=len(tool_results),
+                confidence_score=agent_result.metadata.get("validation_confidence", 1.0),
+                products=list(unique_products),
+                dealers=list(unique_dealers)
             )
             
             duration = (datetime.now(timezone.utc) - start_time).total_seconds()
@@ -761,271 +726,35 @@ class MessageService:
             logger.error("llm_streaming_error", error=str(e))
             yield "I apologize, but I encountered an error while processing your request."
     
-    def _build_prompt(
+    async def _build_memory_context(
         self,
-        message: str,
-        retrieval_context: RetrievalContext,
-        memory_context: dict,
+        conversation_id: str,
+        user_id: str,
+        query: str,
         escalations: list,
-    ) -> str:
+    ) -> dict:
         """
-        Build comprehensive prompt with all context layers.
-        
-        Phase 3: Adds grounded prompt generation for product/dealer queries
-        with structured JSON and hallucination prevention.
-        
-        Includes:
-        - System instructions with brand voice
-        - Safety escalation warnings
-        - Knowledge base context (semantic memory)
-        - Structured product/dealer data (Phase 3)
-        - Hallucination prevention rules (Phase 3)
-        - Recent conversation (short-term memory)
-        - User preferences (episodic memory)
-        - Matched rules (graph memory)
+        Build memory context for the agent.
         """
-        prompt_parts = []
+        # Get recent messages
+        recent_messages = await self.short_term.get_recent_messages(conversation_id, limit=10)
         
-        # System instruction - use custom agent prompt if available
-        if self.system_prompt:
-            prompt_parts.append(self.system_prompt)
-        else:
-            # Fallback to generic prompt
-            prompt_parts.append(
-                "You are a helpful AI assistant for customer support. "
-                "Use the provided context to answer questions accurately and helpfully. "
-                "If you cannot find relevant information in the context, say so clearly. "
-                "Always cite your sources when possible."
-            )
+        # Get user facts
+        user_facts = await self.episodic.get_relevant_facts(user_id, query)
         
-        # Phase 3: Add hallucination prevention rules based on query intent
-        query_intent = getattr(retrieval_context, 'query_intent', None)
-        if query_intent in ['product_search', 'dealer_search']:
-            prompt_parts.append(self._get_grounding_rules(query_intent))
+        # Get summaries
+        summaries = await self.short_term.get_summaries(conversation_id)
         
-        # Add safety escalation warnings
-        if escalations:
-            prompt_parts.append("\n⚠️  SAFETY ALERT:")
-            for esc in escalations[:2]:  # Top 2 escalations
-                prompt_parts.append(
-                    f"- {esc.severity.upper()}: {', '.join(esc.trigger_keywords)} detected"
-                )
-                if esc.action.get("type") == "escalate_emergency":
-                    prompt_parts.append(
-                        "  → Recommend immediate action: " + esc.action.get("message", "Contact emergency services")
-                    )
-        
-        # Phase 3: Add structured product/dealer data if available
-        if query_intent == 'product_search':
-            products_json = self._extract_product_data(retrieval_context)
-            if products_json:
-                prompt_parts.append("\n🛍️  PRODUCT CATALOG (Structured Data):")
-                prompt_parts.append("IMPORTANT: Only mention products listed below. Do NOT invent SKUs, prices, or features.")
-                prompt_parts.append("```json")
-                import json
-                prompt_parts.append(json.dumps(products_json, indent=2, ensure_ascii=False))
-                prompt_parts.append("```")
-        
-        elif query_intent == 'dealer_search':
-            dealers_json = self._extract_dealer_data(retrieval_context)
-            if dealers_json:
-                prompt_parts.append("\n📍 DEALER DIRECTORY (Structured Data):")
-                prompt_parts.append("IMPORTANT: Only mention dealers listed below. Do NOT invent locations, phone numbers, or addresses.")
-                prompt_parts.append("```json")
-                import json
-                prompt_parts.append(json.dumps(dealers_json, indent=2, ensure_ascii=False))
-                prompt_parts.append("```")
-        
-        # Add knowledge base context (semantic memory) - text chunks
-        if retrieval_context.chunks:
-            # Filter out chunks we've already shown in structured format
-            text_chunks = [
-                chunk for chunk in retrieval_context.chunks
-                if not (query_intent in ['product_search', 'dealer_search'] and 
-                       chunk.content_type in ['product', 'dealer'])
-            ]
+        # Get matched rules
+        matched_rules = []
+        if self.memory_config.ENABLE_GRAPH_RULES:
+            matched_rules = await self.graph.get_matching_rules(query)
             
-            if text_chunks:
-                prompt_parts.append("\n📚 Knowledge Base Context:")
-                prompt_parts.append("Use the following information to answer the user's question accurately:")
-                for i, chunk in enumerate(text_chunks[:10]):  # Top 10 chunks
-                    citation = f"[{i+1}]"
-                    if chunk.title:
-                        citation += f" {chunk.title}"
-                    # Include more content - up to 500 chars per chunk
-                    content = chunk.content[:500] if len(chunk.content) > 500 else chunk.content
-                    prompt_parts.append(f"\n{citation}:\n{content}")
-        
-        # Add user preferences (episodic memory)
-        if memory_context.get("user_facts"):
-            facts = memory_context["user_facts"][:5]  # Top 5 facts
-            if facts:
-                prompt_parts.append("\n👤 User Preferences:")
-                for fact in facts:
-                    prompt_parts.append(f"- {fact.fact}")
-        
-        # Add conversation summaries (short-term memory)
-        if memory_context.get("summaries"):
-            summaries = memory_context["summaries"][:2]  # Latest 2 summaries
-            if summaries:
-                prompt_parts.append("\n📝 Previous Conversation Summary:")
-                for summary in summaries:
-                    prompt_parts.append(f"- {summary.get('summary_text', '')}")
-        
-        # Add recent conversation (short-term memory)
-        if memory_context.get("recent_messages"):
-            recent = memory_context["recent_messages"][-4:]  # Last 4 messages
-            if len(recent) > 1:  # More than just the current user message
-                prompt_parts.append("\n💬 Recent Conversation:")
-                for msg in recent[:-1]:  # Exclude the current message
-                    role = msg.role.value if hasattr(msg.role, 'value') else str(msg.role)
-                    prompt_parts.append(f"{role.capitalize()}: {msg.content}")
-        
-        # Add matched rules (graph memory)
-        if memory_context.get("matched_rules"):
-            rules = memory_context["matched_rules"][:2]  # Top 2 rules
-            if rules:
-                prompt_parts.append("\n📋 Relevant Policies:")
-                for rule in rules:
-                    prompt_parts.append(
-                        f"- {rule.name}: {rule.action.get('message', 'See documentation')}"
-                    )
-        
-        # Add current message
-        prompt_parts.append(f"\n👤 User: {message}")
-        prompt_parts.append("\n🤖 Assistant:")
-        
-        return "\n".join(prompt_parts)
-    
-    def _extract_citations(self, context: RetrievalContext) -> list:
-        """Extract citations from context."""
-        citations = []
-        for chunk in context.chunks:
-            if chunk.doc_id and chunk.title:
-                citations.append({
-                    "doc_id": chunk.doc_id,
-                    "title": chunk.title,
-                    "url": chunk.url,
-                    "confidence": chunk.score
-                })
-        return citations
-    
-    def _get_grounding_rules(self, query_intent: str) -> str:
-        """
-        Phase 3: Get hallucination prevention rules based on query intent.
-        
-        Args:
-            query_intent: Detected query intent (product_search, dealer_search, etc.)
-            
-        Returns:
-            Grounding rules text for the LLM
-        """
-        if query_intent == "product_search":
-            return """
-🚨 STRICT GROUNDING RULES FOR PRODUCT QUERIES:
-1. ONLY mention products explicitly listed in the PRODUCT CATALOG above
-2. NEVER invent or guess SKU codes, prices, or product names
-3. If a product is not in the catalog, say "I don't have information about that product"
-4. ALWAYS cite the exact SKU when mentioning a product
-5. NEVER approximate prices - use exact values from catalog or say "price not available"
-6. If asked about features not in the catalog, say "I don't have detailed specifications"
-7. Format prices with currency (e.g., ₹4,500 INR)
-"""
-        elif query_intent == "dealer_search":
-            return """
-🚨 STRICT GROUNDING RULES FOR DEALER QUERIES:
-1. ONLY mention dealers explicitly listed in the DEALER DIRECTORY above
-2. NEVER invent phone numbers, addresses, or dealer names
-3. If a dealer is not in the directory, say "I don't have dealer information for that location"
-4. ALWAYS provide complete contact information (phone, email, address) when available
-5. NEVER approximate addresses or phone numbers
-6. If asked about dealer hours or services not in the directory, say "Please contact the dealer directly"
-"""
-        else:
-            return ""
-    
-    def _extract_product_data(self, retrieval_context: RetrievalContext) -> list:
-        """
-        Phase 3: Extract structured product data from retrieval context.
-        
-        Args:
-            retrieval_context: Retrieval context with chunks
-            
-        Returns:
-            List of product data dictionaries
-        """
-        products = []
-        seen_skus = set()
-        
-        for chunk in retrieval_context.chunks:
-            # Only process product chunks with structured data
-            if chunk.content_type == "product" and chunk.product_data:
-                sku = chunk.product_data.get("sku")
-                
-                # Deduplicate by SKU
-                if sku and sku not in seen_skus:
-                    seen_skus.add(sku)
-                    
-                    # Extract validated product data
-                    product = {
-                        "sku": sku,
-                        "name": chunk.product_data.get("name", "Unknown Product"),
-                        "price": chunk.product_data.get("price"),
-                        "currency": chunk.product_data.get("currency", "INR"),
-                        "category": chunk.product_data.get("category", "Uncategorized"),
-                        "in_stock": chunk.product_data.get("in_stock", True),
-                    }
-                    
-                    # Optional fields
-                    if chunk.product_data.get("features"):
-                        product["features"] = chunk.product_data["features"]
-                    if chunk.product_data.get("image_url"):
-                        product["image_url"] = chunk.product_data["image_url"]
-                    if chunk.product_data.get("product_url"):
-                        product["product_url"] = chunk.product_data["product_url"]
-                    
-                    products.append(product)
-        
-        return products
-    
-    def _extract_dealer_data(self, retrieval_context: RetrievalContext) -> list:
-        """
-        Phase 3: Extract structured dealer data from retrieval context.
-        
-        Args:
-            retrieval_context: Retrieval context with chunks
-            
-        Returns:
-            List of dealer data dictionaries
-        """
-        dealers = []
-        seen_dealer_ids = set()
-        
-        for chunk in retrieval_context.chunks:
-            # Only process dealer chunks with structured data
-            if chunk.content_type == "dealer" and chunk.dealer_data:
-                dealer_id = chunk.dealer_data.get("dealer_id")
-                
-                # Deduplicate by dealer_id
-                if dealer_id and dealer_id not in seen_dealer_ids:
-                    seen_dealer_ids.add(dealer_id)
-                    
-                    # Extract validated dealer data
-                    dealer = {
-                        "dealer_id": dealer_id,
-                        "name": chunk.dealer_data.get("name", "Unknown Dealer"),
-                        "city": chunk.dealer_data.get("city", "Unknown"),
-                        "state": chunk.dealer_data.get("state"),
-                    }
-                    
-                    # Optional contact fields
-                    if chunk.dealer_data.get("phone"):
-                        dealer["phone"] = chunk.dealer_data["phone"]
-                    if chunk.dealer_data.get("email"):
-                        dealer["email"] = chunk.dealer_data["email"]
-                    if chunk.dealer_data.get("address"):
-                        dealer["address"] = chunk.dealer_data["address"]
-                    
-                    dealers.append(dealer)
-        
-        return dealers
+        return {
+            "recent_messages": recent_messages,
+            "user_facts": user_facts,
+            "summaries": summaries,
+            "matched_rules": matched_rules,
+            "escalations": escalations
+        }
+
