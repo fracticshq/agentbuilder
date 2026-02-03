@@ -635,7 +635,16 @@ MongoDB Atlas Cluster
 - **Semantic**: brand KB (chunked + embedded) — version by `doc_id+section`.
 - **Graph**: rules, policies, escalation.
 
-### Retrieval Algorithm
+### SOTA Agentic Loop (Orchestrator)
+The platform now uses a **Plan-and-Execute** orchestrator instead of a linear pipeline:
+
+1.  **Planning**: Decomposes user query into a step-by-step plan using a "Reasoning Model".
+2.  **Execution**: Iterates through the plan, invoking specialized Tools.
+    - **RetrievalTool**: Wraps the Hybrid RAG pipeline (Vector + BM25 + RRF).
+    - **ComputeTool**: (Future) For calculations.
+3.  **Refinement**: Aggregates results and self-corrects via a Critic/Reviewer step.
+
+### Retrieval Algorithm (via RetrievalTool)
 1) Normalize text + page‑intent terms  
 2) **Vector Search** (Voyage embeddings in **MongoDB Atlas Vector Search**)  
 3) **BM25** (Elastic/Lucene or equivalent)  

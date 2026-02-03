@@ -83,6 +83,9 @@ class BM25Search:
                 "section": 1,
                 "metadata": 1,
                 "created_at": 1,
+                "content_type": 1,  # Added for Phase 2
+                "product_data": 1,  # Added for Phase 2
+                "dealer_data": 1,   # Added for Phase 2
                 "score": {"$meta": "textScore"}
             }
             

@@ -1,12 +1,69 @@
-"""
-Application Configuration
-"""
-
 import os
-from typing import List
+import logging
+from typing import List, Optional, Union
 from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings
 
+logger = logging.getLogger(__name__)
+
+def fetch_akv_secrets(vault_name: str) -> dict:
+    """Fetch secrets from Azure Key Vault."""
+    secrets = {}
+    try:
+        from azure.identity import DefaultAzureCredential
+        from azure.keyvault.secrets import SecretClient
+        
+        vault_url = f"https://{vault_name}.vault.azure.net/"
+        credential = DefaultAzureCredential()
+        client = SecretClient(vault_url=vault_url, credential=credential)
+        
+        # List of secrets we want to try and fetch if missing
+        secret_keys = [
+            "OPENAI-API-KEY",
+            "VOYAGE-API-KEY",
+            "MONGODB-URI",
+            "SECRET-KEY",
+            "PII-ENCRYPTION-KEY",
+            "JWT-SECRET",
+            "QWEN-API-KEY"
+        ]
+        
+        for key in secret_keys:
+            try:
+                # AKV uses dashes, envs use underscores
+                secret = client.get_secret(key)
+                env_key = key.replace("-", "_")
+                secrets[env_key] = secret.value
+                logger.info(f"Fetched {env_key} from Azure Key Vault")
+            except Exception:
+                # Secret might not exist or no permission
+                continue
+                
+    except ImportError:
+        logger.warning("Azure SDK not installed, skipping Key Vault fetch")
+    except Exception as e:
+        logger.error(f"Error fetching from Key Vault: {e}")
+        
+    return secrets
+
+
+# Pre-load AKV secrets into environment BEFORE Settings class is defined
+# This ensures Pydantic picks them up during its normal env loading
+def _preload_akv_secrets():
+    """Load AKV secrets into environment before Settings initialization."""
+    use_akv = os.getenv("USE_AZURE_KEYVAULT", "false").lower() == "true"
+    vault_name = os.getenv("AZURE_KEYVAULT_NAME")
+    
+    if use_akv and vault_name:
+        logger.info(f"Pre-loading secrets from Azure Key Vault: {vault_name}")
+        secrets = fetch_akv_secrets(vault_name)
+        for key, value in secrets.items():
+            if not os.getenv(key):  # Only set if not already in environment
+                os.environ[key] = value
+                logger.info(f"Injected {key} into environment from AKV")
+
+# Execute at module load time
+_preload_akv_secrets()
 
 class Settings(BaseSettings):
     """Application settings."""
@@ -49,7 +106,7 @@ class Settings(BaseSettings):
     API_RELOAD: bool = True
     
     # CORS Configuration
-    CORS_ALLOW_ORIGINS: List[str] = [
+    CORS_ALLOW_ORIGINS: Union[str, List[str]] = [
         "http://localhost:3000",
         "http://localhost:3001",  # Admin Dashboard
         "http://localhost:5173",  # Widget
@@ -101,15 +158,24 @@ class Settings(BaseSettings):
     SUMMARY_MAX_TOKENS: int = 150
     SUMMARY_TEMPERATURE: float = 0.3
     
+    # Azure Key Vault Configuration
+    AZURE_KEYVAULT_NAME: Optional[str] = None
+    USE_AZURE_KEYVAULT: bool = False
+
+    # Note: AKV secrets are preloaded into os.environ at module load time
+    # See _preload_akv_secrets() function above
+
     @field_validator("CORS_ALLOW_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, v):
         """Parse CORS origins from string or list."""
+        if v is None or v == "":
+            return []
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
     
-    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", mode="before")
+    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", mode="before")
     @classmethod
     def parse_bool_fields(cls, v):
         """Parse boolean fields from string."""
@@ -142,5 +208,6 @@ class Settings(BaseSettings):
         return v
     
     class Config:
-        env_file = ".env"
+        # Load from root .env (2 levels up from app/config.py)
+        env_file = "../../.env"
         case_sensitive = True

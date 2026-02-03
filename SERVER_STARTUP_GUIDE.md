@@ -2,6 +2,30 @@
 
 This guide explains how to start all three servers for the Agent Builder Platform.
 
+## Azure Authentication (for Key Vault access)
+
+The API server needs to authenticate with Azure to access Key Vault secrets. Choose one of the following methods:
+
+### Option 1: Interactive Login (Simplest)
+1. Run `az login` and authenticate.
+2. The API will automatically pick up your credentials.
+
+### Option 2: Service Principal (Environment Variables)
+If you prefer not to use `az login` or are running in Docker/CI:
+
+1. **Create a Service Principal**:
+   ```bash
+   az ad sp create-for-rbac --name agentbuilder-sp --role "Key Vault Secrets User" --scopes /subscriptions/<sub-id>/resourceGroups/<rg-name>/providers/Microsoft.KeyVault/vaults/kv-agentbuilder-dev
+   ```
+
+2. **Configure Environment**:
+   Add the output values to your root `.env` file:
+   ```env
+   AZURE_CLIENT_ID=<appId>
+   AZURE_CLIENT_SECRET=<password>
+   AZURE_TENANT_ID=<tenant>
+   ```
+
 ## Quick Start (Recommended)
 
 Open **three separate terminal windows/tabs** and run each server in its own terminal:
@@ -110,11 +134,7 @@ bash start.sh
 
 If you see "Unauthorized" errors in the API logs:
 
-**Current Fix:** The system uses `agent-builder` as the system database (configured in `apps/api/.env`):
-
-```bash
-MONGO_SYSTEM_DB=agent-builder
-```
+**Current Fix:** The system uses `agent-builder` as the system database (configured in the root `.env`):
 
 **Permanent Fix:** Update MongoDB Atlas user permissions to access all databases.
 

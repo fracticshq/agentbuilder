@@ -27,6 +27,8 @@ openai>=1.23.6
 
 # Environment and configuration
 python-dotenv>=1.0.1
+azure-identity>=1.15.0
+azure-keyvault-secrets>=4.8.0
 
 # Additional utilities
 aiofiles>=23.2.1

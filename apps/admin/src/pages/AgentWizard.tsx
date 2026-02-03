@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, Brand, CreateAgentRequest } from '../api/client';
-import { ApiError, showErrorAlert } from '../api/errorHandler';
+import { showErrorAlert } from '../api/errorHandler';
 
 // Import wizard components
 import WizardNavigation from '../components/AgentWizard/WizardNavigation';
@@ -23,7 +23,7 @@ interface AgentData {
   brand_id: string;
   purpose: string;
   role: string;
-  
+
   // LLM Config
   provider: string;
   model: string;
@@ -32,13 +32,13 @@ interface AgentData {
   top_p: number;
   frequency_penalty: number;
   presence_penalty: number;
-  
+
   // System Prompt
   system_prompt: string;
   personality_traits: string[];
   communication_style: string;
   response_format: string;
-  
+
   // Knowledge Base
   documents: Array<{
     id: string;
@@ -51,7 +51,7 @@ interface AgentData {
   chunking_strategy: string;
   chunk_size: number;
   chunk_overlap: number;
-  
+
   // RAG Config
   rag_enabled: boolean;
   embedding_provider: string;
@@ -61,7 +61,7 @@ interface AgentData {
   rerank_enabled: boolean;
   rerank_top_k: number;
   context_window: number;
-  
+
   // Features
   websockets: boolean;
   file_upload: boolean;
@@ -83,7 +83,7 @@ const initialData: AgentData = {
   brand_id: '',
   purpose: '',
   role: '',
-  
+
   // LLM Config
   provider: '',
   model: '',
@@ -92,19 +92,19 @@ const initialData: AgentData = {
   top_p: 1.0,
   frequency_penalty: 0.0,
   presence_penalty: 0.0,
-  
+
   // System Prompt
   system_prompt: '',
   personality_traits: [],
   communication_style: '',
   response_format: '',
-  
+
   // Knowledge Base
   documents: [],
   chunking_strategy: 'semantic',
   chunk_size: 400,
   chunk_overlap: 50,
-  
+
   // RAG Config
   rag_enabled: false,
   embedding_provider: '',
@@ -114,7 +114,7 @@ const initialData: AgentData = {
   rerank_enabled: false,
   rerank_top_k: 3,
   context_window: 2000,
-  
+
   // Features
   websockets: true,
   file_upload: false,
@@ -143,7 +143,7 @@ export default function AgentWizard() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  
+
   const [currentStep, setCurrentStep] = useState(1);
   const [agentData, setAgentData] = useState<AgentData>(initialData);
   const [isDeploying, setIsDeploying] = useState(false);
@@ -194,7 +194,7 @@ export default function AgentWizard() {
       const loadDocuments = async () => {
         try {
           console.log('📄 Loading documents for agent:', id);
-          
+
           // Resolve agent -> brand_slug first
           // Agent might have brand_slug in response or just brand_id
           const brandSlug = (existingAgent as any).brand_slug || existingAgent.brand_id;
@@ -202,15 +202,15 @@ export default function AgentWizard() {
             console.warn('⚠️  Agent has no brand_slug or brand_id, cannot load documents');
             return;
           }
-          
+
           console.log('🔍 Using brand_slug for document query:', brandSlug);
-          
+
           // Use the new knowledge API endpoint
           const { knowledgeApi } = await import('../api/knowledge');
           const docs = await knowledgeApi.getDocuments(brandSlug);
-          
+
           console.log('📦 Raw documents from API:', docs);
-          
+
           // Map documents to wizard format
           const mappedDocs = docs.map(doc => ({
             id: doc.doc_id,
@@ -221,14 +221,14 @@ export default function AgentWizard() {
             chunks_count: doc.chunks_count,
             created_at: doc.created_at,
           }));
-          
+
           setAgentData(prev => ({ ...prev, documents: mappedDocs }));
           console.log(`✅ Loaded ${mappedDocs.length} documents into wizard`, mappedDocs);
         } catch (error) {
           console.error('❌ Failed to load documents:', error);
         }
       };
-      
+
       loadDocuments();
     }
   }, [id, existingAgent]);
@@ -255,7 +255,7 @@ export default function AgentWizard() {
     if (existingAgent) {
       console.log('📥 Loading existing agent into wizard:', existingAgent);
       console.log('📋 Agent metadata:', existingAgent.metadata);
-      
+
       // Extract configuration from the nested structure
       const config = existingAgent.configuration || {};
       const llm = config.llm || {};
@@ -263,7 +263,7 @@ export default function AgentWizard() {
       const rag = config.rag || {};
       const features = config.features || {};
       const security = config.security || {};
-      
+
       // Map backend structure to wizard state
       const mappedData: Partial<AgentData> = {
         // Basic Info
@@ -272,7 +272,7 @@ export default function AgentWizard() {
         brand_id: existingAgent.brand_id,
         purpose: existingAgent.metadata?.purpose || '',
         role: existingAgent.metadata?.role || '',
-        
+
         // LLM Config
         provider: llm.provider || '',
         model: llm.model || '',
@@ -281,13 +281,13 @@ export default function AgentWizard() {
         top_p: llm.top_p ?? 1.0,
         frequency_penalty: llm.frequency_penalty ?? 0.0,
         presence_penalty: llm.presence_penalty ?? 0.0,
-        
+
         // System Prompt
         system_prompt: existingAgent.system_prompt || '',
         personality_traits: personality.traits || [],
         communication_style: personality.communication_style || '',
         response_format: personality.response_format || '',
-        
+
         // RAG Config
         rag_enabled: rag.enabled ?? false,
         embedding_provider: rag.embedding?.provider || '',
@@ -300,7 +300,7 @@ export default function AgentWizard() {
         chunking_strategy: rag.chunking?.strategy || 'semantic',
         chunk_size: rag.chunking?.chunk_size ?? 400,
         chunk_overlap: rag.chunking?.chunk_overlap ?? 50,
-        
+
         // Features - with file_upload details
         websockets: features.websockets ?? true,
         file_upload: features.file_upload?.enabled ?? features.file_upload ?? false,
@@ -309,24 +309,24 @@ export default function AgentWizard() {
         response_streaming: features.response_streaming ?? true,
         allowed_file_types: features.file_upload?.allowed_types || [],
         max_file_size: features.file_upload?.max_size_mb ?? 10,
-        
+
         // Security
         rate_limiting: security.rate_limiting ?? true,
         content_filtering: security.content_filtering ?? true,
         session_timeout: security.session_timeout ?? 30,
         max_conversation_length: security.max_conversation_length ?? 50,
-        
+
         // Documents will be loaded separately
         documents: [],
       };
-      
+
       console.log('🔄 Mapped data to set:', {
         purpose: mappedData.purpose,
         role: mappedData.role,
         name: mappedData.name,
         brand_id: mappedData.brand_id
       });
-      
+
       setAgentData(prev => ({ ...prev, ...mappedData }));
       console.log('✅ Agent data loaded into wizard state');
     }
@@ -458,7 +458,7 @@ export default function AgentWizard() {
       console.log('🚀 Deploying agent with complete payload:', JSON.stringify(apiPayload, null, 2));
       const createdAgent = await createAgentMutation.mutateAsync(apiPayload);
       console.log('✅ Agent created successfully:', createdAgent);
-      
+
       // Upload documents if any exist with File objects
       console.log('📦 Checking documents:', agentData.documents);
       if (agentData.documents && agentData.documents.length > 0) {
@@ -469,9 +469,9 @@ export default function AgentWizard() {
             return !!doc.file;
           })
           .map(doc => doc.file);
-        
+
         console.log('📤 Files to upload:', filesToUpload.length, filesToUpload.map(f => f.name));
-        
+
         if (filesToUpload.length > 0) {
           console.log('📄 Uploading documents for agent:', createdAgent.id);
           try {
@@ -495,16 +495,16 @@ export default function AgentWizard() {
 
       // Clear the draft
       localStorage.removeItem('agent_wizard_draft');
-      
+
       // Navigate to agents list with deployment success state
-      navigate('/agents', { 
-        state: { 
+      navigate('/agents', {
+        state: {
           deployedAgent: {
             id: createdAgent.id,
             name: createdAgent.name,
             url: `http://localhost:5173/?agent_id=${createdAgent.id}`
           }
-        } 
+        }
       });
 
     } catch (error) {
@@ -570,7 +570,7 @@ export default function AgentWizard() {
         return (
           <StepReview
             data={agentData}
-            onTest={() => {}}
+            onTest={() => { }}
             onDeploy={handleDeploy}
             isDeploying={isDeploying}
             brands={brands}
