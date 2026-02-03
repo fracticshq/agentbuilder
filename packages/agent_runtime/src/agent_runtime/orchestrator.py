@@ -48,12 +48,24 @@ class Orchestrator:
         self.system_prompt = system_prompt or "You are a helpful AI assistant."
         self.max_iterations = 3  # Default max retries for critic loop
         
-    async def run(self, query: str, context: Optional[Dict] = None) -> AgentResult:
+    async def run(self, query: str, chat_history: Optional[List[Dict[str, Any]]] = None, context: Optional[Dict] = None) -> AgentResult:
         """
         Execute the agent loop for a query.
         """
         logger.info("orchestrator_start", query=query)
         scratchpad = []
+        
+        # Format history string
+        history_text = "None"
+        if chat_history:
+            formatted_msgs = []
+            for msg in chat_history[-6:]:  # Last 6 messages for context
+                # Handle dictionary format from ShortTermMemory
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                formatted_msgs.append(f"{role}: {content}")
+            if formatted_msgs:
+                history_text = "\n".join(formatted_msgs)
         
         # 1. PLANNING PHASE
         tool_schemas = json.dumps(self.tools.get_tool_schemas(), indent=2)
@@ -65,6 +77,9 @@ class Orchestrator:
 
 ### Planning Phase
 You are now acting as the Planning Agent. Your goal is to break down the user's request into a step-by-step plan using the available tools, strictly following the rules and identity defined above.
+
+Conversation History:
+{history_text}
 
 User Request: {query}
 

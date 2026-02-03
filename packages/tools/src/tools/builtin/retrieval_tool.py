@@ -89,48 +89,69 @@ class RetrievalTool(BaseTool):
             )
     
     def _extract_products(self, chunks: List[Any]) -> List[Dict[str, Any]]:
-        """Extract product data from retrieval chunks."""
+        """Extract product data from retrieval chunks.
+        
+        DocumentChunk has product_data as a top-level attribute, not inside metadata.
+        """
         products = []
         seen_ids = set()
         
         for chunk in chunks:
-            metadata = getattr(chunk, 'metadata', {})
-            if 'product_data' in metadata:
-                product = metadata['product_data']
-                product_id = product.get('id') or product.get('product_id')
+            # product_data is a top-level attribute on DocumentChunk
+            product_data = getattr(chunk, 'product_data', None)
+            
+            if product_data and isinstance(product_data, dict):
+                # Use SKU as the unique ID for deduplication
+                product_id = product_data.get('sku') or product_data.get('product_id') or product_data.get('id')
                 
                 if product_id and product_id not in seen_ids:
                     seen_ids.add(product_id)
-                    products.append({
+                    # Start with all product data
+                    product_item = product_data.copy()
+                    
+                    # Update with normalized keys expected by frontend
+                    product_item.update({
                         "id": product_id,
-                        "name": product.get('name'),
-                        "description": product.get('description'),
-                        "price": product.get('price'),
-                        "image": product.get('image_url'),
-                        "url": product.get('url')
+                        "sku": product_id,  # Ensure SKU is explicit
+                        "name": product_data.get('name'),
+                        "description": product_data.get('category', ''),
+                        "price": product_data.get('price'),
+                        "image": product_data.get('image_url'),
+                        "url": product_data.get('product_url')
                     })
+                    products.append(product_item)
         
         return products
     
     def _extract_dealers(self, chunks: List[Any]) -> List[Dict[str, Any]]:
-        """Extract dealer data from retrieval chunks."""
+        """Extract dealer data from retrieval chunks.
+        
+        DocumentChunk has dealer_data as a top-level attribute, not inside metadata.
+        """
         dealers = []
         seen_ids = set()
         
         for chunk in chunks:
-            metadata = getattr(chunk, 'metadata', {})
-            if 'dealer_data' in metadata:
-                dealer = metadata['dealer_data']
-                dealer_id = dealer.get('id') or dealer.get('dealer_id')
+            # dealer_data is a top-level attribute on DocumentChunk
+            dealer_data = getattr(chunk, 'dealer_data', None)
+            
+            if dealer_data and isinstance(dealer_data, dict):
+                dealer_id = dealer_data.get('dealer_id') or dealer_data.get('id')
                 
                 if dealer_id and dealer_id not in seen_ids:
                     seen_ids.add(dealer_id)
-                    dealers.append({
+                    
+                    # Start with all dealer data
+                    dealer_item = dealer_data.copy()
+                    
+                    # Update with normalized keys
+                    dealer_item.update({
                         "id": dealer_id,
-                        "name": dealer.get('name'),
-                        "address": dealer.get('address'),
-                        "phone": dealer.get('phone'),
-                        "location": dealer.get('location')
+                        "name": dealer_data.get('name'),
+                        "address": dealer_data.get('address'),
+                        "phone": dealer_data.get('phone'),
+                        "location": dealer_data.get('city')
                     })
+                    dealers.append(dealer_item)
         
         return dealers

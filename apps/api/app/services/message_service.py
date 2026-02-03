@@ -407,7 +407,32 @@ class MessageService:
                 conversation_id=conversation_id
             )
             
-            agent_result = await self.orchestrator.run(request.message)
+            # Retrieve recent history for context (last 6 messages)
+            recent_messages = await self.short_term.get_recent_messages(
+                conversation_id=conversation_id,
+                limit=6
+            )
+            
+            # Convert to list of dicts for orchestrator
+            chat_history = []
+            for msg in recent_messages:
+                # Skip the current user message effectively? 
+                # Actually, add_message stored it already. 
+                # So get_recent_messages includes the current message.
+                # Orchestrator prompt shows history THEN user request.
+                # So we might want to exclude the *last* message if it matches request.message?
+                # Or Orchestrator handles it.
+                # "Conversation History: ... User Request: ..."
+                # If history includes User Request, it's redundant but fine.
+                chat_history.append({
+                    "role": msg.role.value if hasattr(msg.role, "value") else str(msg.role),
+                    "content": msg.content
+                })
+            
+            agent_result = await self.orchestrator.run(
+                query=request.message,
+                chat_history=chat_history
+            )
             
             # Extract final answer
             full_response = agent_result.answer
@@ -474,12 +499,31 @@ class MessageService:
                     if 'dealers' in result_metadata:
                         dealers.extend(result_metadata['dealers'])
                     
-                    # Extract citations from sources
+                    
+                    # Extract citations from sources (sources are doc_id strings)
                     if 'sources' in result_metadata:
+                        # Log metadata for debugging products issue
+                        products_list = result_metadata.get('products', [])
+                        if products_list:
+                            logger.info("First product keys", keys=list(products_list[0].keys()))
+                            logger.info("First product sample", sample=str(products_list[0])[:200])
+                            
+                        logger.info("Tool result metadata", step_id=step_id, 
+                                   products_count=len(products_list),
+                                   dealers_count=len(result_metadata.get('dealers', [])),
+                                   sources_count=len(result_metadata.get('sources', [])))
+                        
+                        confidence = result_metadata.get('confidence', 1.0)
+                        
                         for source in result_metadata['sources'][:5]:  # Top 5 citations
+                            # source is just a doc_id string like "essco-bathware_product_EOS-CHR-491"
+                            doc_id = source if isinstance(source, str) else source.get("title", str(source))
                             citations.append({
-                                "source": source.get("title", "Unknown"),
-                                "page": source.get("page", 0),
+                                "doc_id": doc_id,
+                                "title": doc_id,
+                                "confidence": confidence,
+                                "url": None,
+                                "snippet": None
                             })
             
             # Deduplicate products and dealers by ID

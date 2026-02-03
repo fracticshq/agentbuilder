@@ -1,6 +1,6 @@
 import os
 import logging
-from typing import List, Optional
+from typing import List, Optional, Union
 from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings
 
@@ -47,6 +47,24 @@ def fetch_akv_secrets(vault_name: str) -> dict:
     return secrets
 
 
+# Pre-load AKV secrets into environment BEFORE Settings class is defined
+# This ensures Pydantic picks them up during its normal env loading
+def _preload_akv_secrets():
+    """Load AKV secrets into environment before Settings initialization."""
+    use_akv = os.getenv("USE_AZURE_KEYVAULT", "false").lower() == "true"
+    vault_name = os.getenv("AZURE_KEYVAULT_NAME")
+    
+    if use_akv and vault_name:
+        logger.info(f"Pre-loading secrets from Azure Key Vault: {vault_name}")
+        secrets = fetch_akv_secrets(vault_name)
+        for key, value in secrets.items():
+            if not os.getenv(key):  # Only set if not already in environment
+                os.environ[key] = value
+                logger.info(f"Injected {key} into environment from AKV")
+
+# Execute at module load time
+_preload_akv_secrets()
+
 class Settings(BaseSettings):
     """Application settings."""
     
@@ -88,7 +106,7 @@ class Settings(BaseSettings):
     API_RELOAD: bool = True
     
     # CORS Configuration
-    CORS_ALLOW_ORIGINS: List[str] = [
+    CORS_ALLOW_ORIGINS: Union[str, List[str]] = [
         "http://localhost:3000",
         "http://localhost:3001",  # Admin Dashboard
         "http://localhost:5173",  # Widget
@@ -144,18 +162,15 @@ class Settings(BaseSettings):
     AZURE_KEYVAULT_NAME: Optional[str] = None
     USE_AZURE_KEYVAULT: bool = False
 
-    def __init__(self, **values):
-        super().__init__(**values)
-        if self.USE_AZURE_KEYVAULT and self.AZURE_KEYVAULT_NAME:
-            akv_secrets = fetch_akv_secrets(self.AZURE_KEYVAULT_NAME)
-            for key, value in akv_secrets.items():
-                if not getattr(self, key, None):
-                    setattr(self, key, value)
+    # Note: AKV secrets are preloaded into os.environ at module load time
+    # See _preload_akv_secrets() function above
 
     @field_validator("CORS_ALLOW_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, v):
         """Parse CORS origins from string or list."""
+        if v is None or v == "":
+            return []
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
@@ -193,5 +208,6 @@ class Settings(BaseSettings):
         return v
     
     class Config:
-        env_file = ".env"
+        # Load from root .env (2 levels up from app/config.py)
+        env_file = "../../.env"
         case_sensitive = True

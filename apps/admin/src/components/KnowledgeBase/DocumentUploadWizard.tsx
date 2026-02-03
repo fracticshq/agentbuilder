@@ -51,18 +51,7 @@ export default function DocumentUploadWizard({
     }
   };
 
-  const handleNext = () => {
-    if (canGoNext() && currentStep < steps.length) {
-      setCurrentStep(currentStep + 1);
-    }
-  };
-
-  const handleBack = () => {
-    if (currentStep > 1) {
-      setCurrentStep(currentStep - 1);
-      setUploadError(null);
-    }
-  };
+  // Unused handlers removed
 
   const handleContentTypeSelect = (type: ContentType) => {
     setContentType(type);

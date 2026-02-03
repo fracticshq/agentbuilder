@@ -4,7 +4,7 @@ import { api, documentApi, Agent, KnowledgeDocument } from '../api/client';
 
 const DocumentTypeLabels = {
   product_data: 'Product Data',
-  category_data: 'Category Data', 
+  category_data: 'Category Data',
   faq_data: 'FAQ Data',
   dealer_data: 'Dealer Data',
   area_representative_data: 'Sales Rep Data',
@@ -31,8 +31,7 @@ export default function AgentDetail() {
   const [agent, setAgent] = useState<Agent | null>(null);
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
   const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<{[key: string]: number}>({});
+  const [uploadProgress, setUploadProgress] = useState<{ [key: string]: number }>({});
   const [selectedDocumentType, setSelectedDocumentType] = useState<string>('other');
 
   useEffect(() => {
@@ -44,7 +43,7 @@ export default function AgentDetail() {
 
   const loadAgentData = async () => {
     if (!id) return;
-    
+
     setLoading(true);
     try {
       const [agentData, docsData] = await Promise.all([
@@ -63,9 +62,8 @@ export default function AgentDetail() {
   const handleFileUpload = async (files: FileList) => {
     if (!id || !files.length) return;
 
-    setUploading(true);
     const fileArray = Array.from(files);
-    const newProgress: {[key: string]: number} = {};
+    const newProgress: { [key: string]: number } = {};
 
     try {
       // Initialize progress tracking
@@ -78,7 +76,7 @@ export default function AgentDetail() {
       // Simulate progress for demo (replace with real upload progress)
       const progressInterval = setInterval(() => {
         setUploadProgress(prev => {
-          const updated = {...prev};
+          const updated = { ...prev };
           Object.keys(updated).forEach(key => {
             if (updated[key] < 90) {
               updated[key] = Math.min(updated[key] + 15, 90);
@@ -98,7 +96,7 @@ export default function AgentDetail() {
       // Complete progress
       clearInterval(progressInterval);
       setUploadProgress(prev => {
-        const updated = {...prev};
+        const updated = { ...prev };
         Object.keys(updated).forEach(key => {
           updated[key] = 100;
         });
@@ -117,20 +115,20 @@ export default function AgentDetail() {
       console.error('Failed to upload files:', error);
       // Set error state
       setUploadProgress(prev => {
-        const updated = {...prev};
+        const updated = { ...prev };
         Object.keys(updated).forEach(key => {
           updated[key] = -1;
         });
         return updated;
       });
     } finally {
-      setUploading(false);
+      // Upload finished
     }
   };
 
   const handleDeleteDocument = async (docId: string) => {
     if (!window.confirm('Are you sure you want to delete this document?')) return;
-    
+
     try {
       await documentApi.deleteDocument(docId);
       setDocuments(prev => prev.filter(doc => doc.id !== docId));
@@ -143,7 +141,7 @@ export default function AgentDetail() {
     if (documentType && DocumentTypeIcons[documentType as keyof typeof DocumentTypeIcons]) {
       return DocumentTypeIcons[documentType as keyof typeof DocumentTypeIcons];
     }
-    
+
     switch (fileType) {
       case 'application/json': return '📊';
       case 'application/pdf': return '📄';
@@ -201,13 +199,12 @@ export default function AgentDetail() {
             <h1 className="text-3xl font-bold text-gray-900">{agent.name}</h1>
             <p className="text-lg text-gray-600 mt-2">{agent.description}</p>
             <div className="flex items-center space-x-6 mt-4">
-              <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                agent.status === 'active' 
-                  ? 'bg-green-100 text-green-800' 
-                  : agent.status === 'draft'
+              <span className={`px-3 py-1 rounded-full text-sm font-medium ${agent.status === 'active'
+                ? 'bg-green-100 text-green-800'
+                : agent.status === 'draft'
                   ? 'bg-yellow-100 text-yellow-800'
                   : 'bg-gray-100 text-gray-800'
-              }`}>
+                }`}>
                 {agent.status.charAt(0).toUpperCase() + agent.status.slice(1)}
               </span>
               <span className="text-sm text-gray-500">
@@ -222,7 +219,7 @@ export default function AgentDetail() {
             <button className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors">
               🧪 Test Agent
             </button>
-            <Link 
+            <Link
               to={`/agents/${id}/edit`}
               className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
             >
@@ -307,13 +304,12 @@ export default function AgentDetail() {
                       <div className="text-sm font-medium text-gray-700">{fileName}</div>
                       <div className="w-full bg-gray-200 rounded-full h-2 mt-1">
                         <div
-                          className={`h-2 rounded-full transition-all duration-300 ${
-                            progress === -1 
-                              ? 'bg-red-500' 
-                              : progress === 100 
-                              ? 'bg-green-500' 
+                          className={`h-2 rounded-full transition-all duration-300 ${progress === -1
+                            ? 'bg-red-500'
+                            : progress === 100
+                              ? 'bg-green-500'
                               : 'bg-blue-500'
-                          }`}
+                            }`}
                           style={{ width: `${Math.max(0, progress)}%` }}
                         />
                       </div>
@@ -341,7 +337,7 @@ export default function AgentDetail() {
               Uploaded Documents ({documents.length})
             </h3>
             {documents.length > 0 && (
-              <button 
+              <button
                 onClick={loadAgentData}
                 className="text-blue-600 hover:text-blue-800 text-sm font-medium"
               >
@@ -349,7 +345,7 @@ export default function AgentDetail() {
               </button>
             )}
           </div>
-          
+
           {documents.length === 0 ? (
             <div className="text-center py-12 text-gray-500">
               <div className="text-4xl mb-4">📂</div>
@@ -386,12 +382,11 @@ export default function AgentDetail() {
                           </span>
                         )}
                         {doc.embedding_status && (
-                          <span className={`px-2 py-1 text-xs rounded-full ${
-                            doc.embedding_status === 'completed' ? 'bg-green-100 text-green-800' :
+                          <span className={`px-2 py-1 text-xs rounded-full ${doc.embedding_status === 'completed' ? 'bg-green-100 text-green-800' :
                             doc.embedding_status === 'processing' ? 'bg-yellow-100 text-yellow-800' :
-                            doc.embedding_status === 'failed' ? 'bg-red-100 text-red-800' :
-                            'bg-gray-100 text-gray-800'
-                          }`}>
+                              doc.embedding_status === 'failed' ? 'bg-red-100 text-red-800' :
+                                'bg-gray-100 text-gray-800'
+                            }`}>
                             {doc.embedding_status}
                           </span>
                         )}
@@ -408,7 +403,7 @@ export default function AgentDetail() {
                     </div>
                   </div>
                   <div className="flex items-center space-x-2">
-                    <button 
+                    <button
                       className="text-blue-600 hover:text-blue-800 text-sm font-medium px-3 py-1 rounded border border-blue-200 hover:bg-blue-50"
                       onClick={() => {
                         // TODO: Implement document preview
@@ -417,7 +412,7 @@ export default function AgentDetail() {
                     >
                       👁️ Preview
                     </button>
-                    <button 
+                    <button
                       className="text-red-600 hover:text-red-800 text-sm font-medium px-3 py-1 rounded border border-red-200 hover:bg-red-50"
                       onClick={() => handleDeleteDocument(doc.id || doc.job_id || doc.filename)}
                     >
