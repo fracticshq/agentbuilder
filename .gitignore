@@ -428,7 +428,6 @@ apps/api/logs/
 
 # Development scripts
 start-dev.sh
-start-*.sh
 dev-*.sh
 
 # Widget Build
