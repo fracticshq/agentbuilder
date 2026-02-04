@@ -161,6 +161,9 @@ class Settings(BaseSettings):
     # Azure Key Vault Configuration
     AZURE_KEYVAULT_NAME: Optional[str] = None
     USE_AZURE_KEYVAULT: bool = False
+    AZURE_CLIENT_ID: Optional[str] = None
+    AZURE_CLIENT_SECRET: Optional[str] = None
+    AZURE_TENANT_ID: Optional[str] = None
 
     # Note: AKV secrets are preloaded into os.environ at module load time
     # See _preload_akv_secrets() function above
