@@ -801,4 +801,3 @@ class MessageService:
             "matched_rules": matched_rules,
             "escalations": escalations
         }
-
