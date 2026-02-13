@@ -8,6 +8,8 @@ pip install -e ../../packages/commons
 pip install -e ../../packages/memory
 pip install -e ../../packages/retrieval
 pip install -e ../../packages/llm
+pip install -e ../../packages/tools
+pip install -e ../../packages/agent_runtime
 cd ../..
 
 # Install Admin Dependencies

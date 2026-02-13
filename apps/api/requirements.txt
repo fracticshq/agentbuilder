@@ -32,3 +32,6 @@ azure-keyvault-secrets>=4.8.0
 
 # Additional utilities
 aiofiles>=23.2.1
+
+# Model Context Protocol (MCP) for external tool integrations
+mcp>=1.0.0

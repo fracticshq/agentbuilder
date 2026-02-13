@@ -81,7 +81,7 @@ _preload_akv_secrets()
 current_dir = Path(__file__).parent
 packages_dir = current_dir.parent.parent / "packages"
 
-for package in ["commons", "memory", "retrieval", "llm"]:
+for package in ["commons", "memory", "retrieval", "llm", "tools", "agent_runtime"]:
     package_path = packages_dir / package / "src"
     if package_path.exists():
         sys.path.insert(0, str(package_path))

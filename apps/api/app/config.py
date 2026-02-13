@@ -164,6 +164,13 @@ class Settings(BaseSettings):
     AZURE_CLIENT_ID: Optional[str] = None
     AZURE_CLIENT_SECRET: Optional[str] = None
     AZURE_TENANT_ID: Optional[str] = None
+    
+    # Shopify MCP Server Configuration
+    SHOPIFY_STOREFRONT_ACCESS_TOKEN: Optional[str] = None #shpat
+    SHOPIFY_SHOP_URL: Optional[str] = None
+    SHOPIFY_MCP_ENABLED: bool = False
+    SHOPIFY_STOREFRONT_TOKEN: Optional[str] = None
+    SHOPIFY_API_VERSION: str = "2026-10"
 
     # Note: AKV secrets are preloaded into os.environ at module load time
     # See _preload_akv_secrets() function above
@@ -178,7 +185,8 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
     
-    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", mode="before")
+    
+    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", "SHOPIFY_MCP_ENABLED", mode="before")
     @classmethod
     def parse_bool_fields(cls, v):
         """Parse boolean fields from string."""
@@ -214,3 +222,4 @@ class Settings(BaseSettings):
         # Load from root .env (2 levels up from app/config.py)
         env_file = "../../.env"
         case_sensitive = True
+        extra = "ignore"
