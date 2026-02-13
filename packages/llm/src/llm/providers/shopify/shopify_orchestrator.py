@@ -1,3 +1,5 @@
+# to run this file use: python -m llm.providers.shopify.shopify_orchestrator
+#from S G:\fractics\agentbuilder\packages\llm\src>
 import asyncio
 import json
 from typing import List, Dict, Any
@@ -116,7 +118,6 @@ class ShopifyAgent:
                 # Capture cart or add_to_cart state
                 self._capture_state(tool_name, result)
 
-                # --- Display cart contents nicely ---
                 if tool_name == "get_cart_tool":
                     lines = result.get("lines", {}).get("edges", [])
                     if lines:
@@ -126,9 +127,7 @@ class ShopifyAgent:
                             merchandise = item.get("merchandise", {})
                             product_title = merchandise.get("product", {}).get("title") or merchandise.get("title") or "Item"
                             qty = item.get("quantity", 1)
-                            # Price is not directly in the line; fetch from product if needed
-                            #price = getattr(merchandise, "price", "N/A")
-                            print(f"- {product_title} x{qty} | ₹{price}")
+                            print(f"- {product_title} x{qty}")
                     else:
                         print("🛒 Your cart is currently empty.")
 
