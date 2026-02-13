@@ -131,7 +131,8 @@ class ShopifyMCPClient:
 
     async def add_to_cart(self, cart_id: str, variant_id: str, quantity: int = 1) -> dict:
         # Strip ?key=... from cart ID — Shopify GraphQL doesn't accept it
-        cart_id = cart_id.split("?")[0]
+        #cart_id = cart_id.split("?")[0] 
+        #full cart id required
 
         gql = """
         mutation cartLinesAdd($cartId: ID!, $lines: [CartLineInput!]!) {
@@ -170,7 +171,7 @@ class ShopifyMCPClient:
         return cart
     async def get_cart(self, cart_id: str) -> dict:
         """Fetch current cart contents via Storefront API"""
-        cart_id = cart_id.split("?")[0]
+        #cart_id = cart_id.split("?")[0]
         gql = """
         query getCart($id: ID!) {
         cart(id: $id) {
@@ -236,6 +237,14 @@ class ShopifyMCPClient:
         """
         data = await self._graphql(gql)
         return data.get("data", {}).get("shop", {})
+    
+    # ---- Async connection interface ---- 
+    async def connect(self): 
+        """No-op for direct API client.""" 
+        pass 
+    async def disconnect(self): 
+        """No-op for direct API client.""" 
+        pass
 
 
 
