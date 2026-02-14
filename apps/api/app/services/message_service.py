@@ -28,6 +28,9 @@ from llm.factory import LLMFactory, create_provider_from_env
 from tools.registry import ToolRegistry
 from tools.builtin.retrieval_tool import RetrievalTool
 from agent_runtime.orchestrator import Orchestrator, AgentResult
+from llm.providers.shopify.shopify_mcp_client import ShopifyMCPClient
+from llm.providers.shopify.tools import ShopifyToolSet
+from llm.providers.shopify.shopify_orchestrator import ShopifyAgent
 
 from ..config import Settings
 from ..connections import connection_manager
@@ -217,7 +220,25 @@ class MessageService:
             self._memory_initialized = True
             logger.info("memory_indexes_initialized", layers=["short_term", "episodic", "graph", "procedural", "resource"])
     
-    async def _load_agent_config(self, agent_id: str):
+    async def _get_active_cart_id(self, conversation_id: str) -> Optional[str]:
+        """Retrieve active cart_id from recent conversation history."""
+        try:
+            if not self.short_term:
+                return None
+            
+            messages = await self.short_term.get_recent_messages(conversation_id, limit=10)
+            
+            for msg in reversed(messages):
+                if msg.role == MessageRole.ASSISTANT and msg.metadata:
+                    if msg.metadata.get("cart_id"):
+                        return msg.metadata["cart_id"]
+            
+            return None
+        except Exception as e:
+            logger.warning("failed_to_retrieve_cart_id", error=str(e))
+            return None
+    
+    async def _load_agent_config(self, agent_id: str, conversation_id: str = None):
         """Load agent configuration from system database."""
         try:
             # Initialize brand database first
@@ -233,14 +254,32 @@ class MessageService:
                 self.system_prompt = agent.get("system_prompt", "")
                 self.brand_id = agent.get("brand_slug", self.brand_id)
                 
-                # Sync system prompt to Orchestrator
-                if self.orchestrator:
-                    self.orchestrator.system_prompt = self.system_prompt
+                
+                # Use ShopifyAgent if Shopify is enabled, otherwise use generic Orchestrator
+                shopify_config = self.agent_config.get("shopify", {})
+                if shopify_config.get("enabled", False):
+                    # Replace with ShopifyAgent for better Shopify responses
+                    logger.info("switching_to_shopify_orchestrator")
+                    self.orchestrator = ShopifyAgent()
+                    
+                    # Restore cart_id if available
+                    cart_id = None
+                    if conversation_id:
+                        cart_id = await self._get_active_cart_id(conversation_id)
+                        if cart_id and hasattr(self.orchestrator, 'cart_id'):
+                            self.orchestrator.cart_id = cart_id
+                            logger.info("shopify_cart_restored", cart_id=cart_id)
+                            print(f"🛒 [MessageService] Restored Cart ID: {cart_id}")
+                else:
+                    # Use generic Orchestrator with system prompt
+                    if self.orchestrator:
+                        self.orchestrator.system_prompt = self.system_prompt
                 
                 logger.info("agent_config_loaded", 
                            agent_id=agent_id, 
                            brand_id=self.brand_id,
-                           has_system_prompt=bool(self.system_prompt))
+                           has_system_prompt=bool(self.system_prompt),
+                           orchestrator_type="shopify" if shopify_config.get("enabled", False) else "generic")
             else:
                 logger.warning("agent_not_found", agent_id=agent_id)
                 self.agent_config = {}
@@ -248,12 +287,37 @@ class MessageService:
                 
         except Exception as e:
             logger.error("agent_config_load_error", error=str(e))
-            self.agent_config = {}
-            self.system_prompt = ""
             if self.orchestrator:
                 self.orchestrator.system_prompt = ""
 
-    
+    async def _setup_shopify_tools(self, config: dict, cart_id: str = None):
+        """Conditionally register Shopify tools if enabled."""
+        shopify_config = config.get("shopify")
+        if not shopify_config or not shopify_config.get("enabled", False):
+            return
+        
+        try:
+            # Initialize client with agent credentials
+            client = ShopifyMCPClient(
+                shop_url=shopify_config.get("shop_url"),
+                storefront_token=shopify_config.get("storefront_token"),
+                admin_token=shopify_config.get("admin_token"),
+                cart_id=cart_id
+            )
+            
+            # Register tools
+            toolset = ShopifyToolSet(client)
+            for tool in toolset.get_tools():
+                self.tool_registry.register(tool)
+            
+            logger.info("shopify_tools_registered", 
+                       shop_url=shopify_config.get("shop_url"),
+                       tool_count=len(toolset.get_tools()),
+                       has_cart=bool(cart_id))
+        
+        except Exception as e:
+            logger.error("shopify_tools_init_failed", error=str(e))
+      
     async def process_message(self, request: MessageRequest) -> MessageResponse:
         """
         Process a single message with Phase 5 Memory System.
@@ -277,12 +341,9 @@ class MessageService:
             agent_id = request.agent_id or self.brand_id
             await self._load_agent_config(agent_id)
             
-            # Ensure memory is initialized
-            await self._ensure_memory_initialized()
-            
-            # Generate conversation ID if not provided
-            conversation_id = request.conversation_id or str(uuid.uuid4())
-            user_id = request.user_id or "anonymous"
+            # Load agent configuration with conversation context
+            agent_id = request.agent_id or self.brand_id
+            await self._load_agent_config(agent_id, conversation_id=conversation_id)
             
             logger.info(
                 "message_processing_start",
@@ -334,9 +395,11 @@ class MessageService:
                 metadata={
                     "user_id": user_id,
                     "agent_steps": agent_result.metadata.get("steps_executed", 0),
-                    "plan_goal": agent_result.metadata.get("plan", {}).get("goal")
+                    "plan_goal": agent_result.metadata.get("plan", {}).get("goal"),
+                    "cart_id": agent_result.metadata.get("cart_id")  # ✅ Persist cart ID
                 }
             )
+            print(f"🛒 [MessageService] Saved Cart ID: {agent_result.metadata.get('cart_id')}")
             
             # 6. Extract Facts & Auto-Summary (Async)
             if self.memory_config.ENABLE_FACT_EXTRACTION:
@@ -463,7 +526,8 @@ class MessageService:
                     "agent_steps": agent_result.metadata.get("steps_executed", 0),
                     "validation_passed": agent_result.metadata.get("validation_passed"),
                     "validation_issues": agent_result.metadata.get("validation_issues", []),
-                    "plan": agent_result.metadata.get("plan")
+                    "plan": agent_result.metadata.get("plan"),
+                    "cart_id": agent_result.metadata.get("cart_id")
                 }
             )
             
