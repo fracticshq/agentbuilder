@@ -20,3 +20,7 @@ api_router.include_router(status.router, prefix="/status", tags=["status"])
 
 # Include admin routers
 api_router.include_router(admin_router, prefix="/admin", tags=["admin"])
+
+# Include shopify router
+from .endpoints import shopify
+api_router.include_router(shopify.router, prefix="/shopify", tags=["shopify"])
