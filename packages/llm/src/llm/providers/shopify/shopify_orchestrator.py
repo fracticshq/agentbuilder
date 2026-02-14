@@ -21,9 +21,23 @@ AVAILABLE_TOOLS = [
 
     "add_to_cart_tool",
 
+    "get_cart_tool",
+
     "get_shop_info_tool",
+
+    "remove_from_cart_tool",
+
+    "update_cart_quantity_tool",
     ]
 
+
+try:
+    from agent_runtime.orchestrator import AgentResult
+except ImportError:
+    class AgentResult:
+        def __init__(self, answer: str, metadata: dict):
+            self.answer = answer
+            self.metadata = metadata
 
 class ShopifyAgent:
 
@@ -32,6 +46,33 @@ class ShopifyAgent:
         self.mcp = ShopifyMCPClient()
         self.conversation: List[Dict[str, Any]] = []
         self.cart_id = None
+        self.system_prompt = None # For compatibility with Orchestrator interface
+
+    async def run(self, query: str = None, chat_history: List[Dict] = None, **kwargs):
+        """Orchestrator interface compatibility."""
+        # Ensure connection (idempotent)
+        await self.mcp.connect()
+        
+        # Add user message
+        if query:
+            self.conversation.append({
+                "role": "user",
+                "content": query
+            })
+        
+        # Run agent loop in headless mode
+        response_text, tool_results = await self._agent_loop(headless=True)
+        
+        # Return standard AgentResult
+        return AgentResult(
+            answer=response_text,
+            metadata={
+                "steps_executed": 1, 
+                "tool_results": tool_results,
+                "plan": {"goal": query},
+                "cart_id": self.cart_id  # ✅ return cart_id so it can be persisted
+            }
+        )
 
     async def chat(self):
         print("🛍 Shopify AI Agent Ready (type 'exit' to quit)\n")
@@ -57,7 +98,9 @@ class ShopifyAgent:
             # ✅ CLEAN SHUTDOWN (fixes your async generator crash)
             await self.mcp.disconnect()
 
-    async def _agent_loop(self):
+    async def _agent_loop(self, headless: bool = False):
+        tool_results_map = {}
+        
         while True:
             # Ask LLM for next message
             response = await self.provider.generate(
@@ -74,16 +117,17 @@ class ShopifyAgent:
                 tool_input = tool_call["tool_input"] or {}
 
                 # Auto-inject cartId if missing
-                # if self.cart_id and isinstance(tool_input, dict):
-                #     if "cartId" in tool_input and not tool_input["cartId"]:
-                #         tool_input["cartId"] = self.cart_id
-                # Auto-inject cartId if missing
                 if self.cart_id and isinstance(tool_input, dict):
                     if "cartId" not in tool_input or not tool_input["cartId"]:  # ✅ Inject if missing OR empty
                         tool_input["cartId"] = self.cart_id
+                        if not headless:
+                            print(f"🔧 Injected Cart ID: {self.cart_id}")
+                        else:
+                            print(f"🔧 [Headless] Injected Cart ID: {self.cart_id}")
 
-                print(f"\n🔧 Calling Tool → {tool_name}")
-                print(f"📦 Input → {tool_input}")
+                if not headless:
+                    print(f"\n🔧 Calling Tool → {tool_name}")
+                    print(f"📦 Input → {tool_input}")
 
                 # --- Special handling for adding to cart ---
                 if tool_name == "add_to_cart_tool":
@@ -92,7 +136,8 @@ class ShopifyAgent:
                         cart = await self.mcp.call_tool("create_cart_tool", {})
                         #self.cart_id = cart.get("id", "").split("?")[0]
                         self.cart_id = cart.get("id", "")  # Keep the full ID including the key
-                        print(f"🛒 Created new cart → {self.cart_id}")
+                        if not headless:
+                            print(f"🛒 Created new cart → {self.cart_id}")
 
                     # Ensure variant ID exists
                     if not tool_input.get("merchandiseId") and tool_input.get("product"):
@@ -102,34 +147,47 @@ class ShopifyAgent:
                     # Ensure cartId is passed
                     tool_input["cartId"] = self.cart_id
 
-                    # Prompt user for quantity if missing
+                    # Prompt user for quantity if missing (handle headless)
                     if "quantity" not in tool_input or not tool_input["quantity"]:
-                        title = tool_input.get("product", {}).get("title", tool_input.get("merchandiseId", "item"))
-                        qty = input(f"How many of '{title}' would you like to add? ")
-                        try:
-                            tool_input["quantity"] = int(qty)
-                        except ValueError:
-                            tool_input["quantity"] = 1
-
+                        if headless:
+                             tool_input["quantity"] = 1 # Default for headless
+                        else:
+                            title = tool_input.get("product", {}).get("title", tool_input.get("merchandiseId", "item"))
+                            qty = input(f"How many of '{title}' would you like to add? ")
+                            try:
+                                tool_input["quantity"] = int(qty)
+                            except ValueError:
+                                tool_input["quantity"] = 1
 
                 # Call the tool
-                result = await self.mcp.call_tool(tool_name, tool_input)
+                if tool_name == "get_cart_tool" and not tool_input.get("cartId"):
+                    # ✅ Return empty cart if no ID exists (prevents crash)
+                    result = {"lines": {"edges": []}, "id": "", "checkoutUrl": ""}
+                else:
+                    result = await self.mcp.call_tool(tool_name, tool_input)
 
                 # Capture cart or add_to_cart state
                 self._capture_state(tool_name, result)
+                
+                # Store tool result for metadata return
+                tool_results_map[tool_name] = result
 
                 if tool_name == "get_cart_tool":
                     lines = result.get("lines", {}).get("edges", [])
                     if lines:
-                        print("\n🛒 Your cart contains:")
+                        cart_summary = "\n🛒 Your cart contains:\n"
                         for line in lines:
                             item = line["node"]
                             merchandise = item.get("merchandise", {})
                             product_title = merchandise.get("product", {}).get("title") or merchandise.get("title") or "Item"
                             qty = item.get("quantity", 1)
-                            print(f"- {product_title} x{qty}")
+                            cart_summary += f"- {product_title}\n"
+                        
+                        if not headless:
+                            print(cart_summary)
                     else:
-                        print("🛒 Your cart is currently empty.")
+                        if not headless:
+                            print("🛒 Your cart is currently empty.")
 
                 # Store tool output in conversation
                 self.conversation.append({
@@ -137,17 +195,22 @@ class ShopifyAgent:
                     "name": tool_name,
                     "content": json.dumps(result)
                 })
-
+                
                 continue  # Continue loop for next LLM reasoning
 
             else:
                 # Regular assistant output
-                print(f"\n {message}\n")
+                if not headless:
+                    print(f"\n {message}\n")
+                
                 self.conversation.append({
                     "role": "assistant",
                     "content": message
                 })
-                break
+                
+                if headless:
+                    return message, tool_results_map
+                return
 
 
 
@@ -203,6 +266,12 @@ class ShopifyAgent:
         1. search_products_tool
         2. create_cart_tool (if no cart exists)
         3. add_to_cart_tool using merchandiseId (variant ID)
+    - If user wants to remove items:
+        1. get_cart_tool (to find lineIds)
+        2. remove_from_cart_tool
+    - If user wants to update quantity:
+        1. get_cart_tool (to find lineId)
+        2. update_cart_quantity_tool (quantity=0 removes the item)
     - If no products are found, inform the user politely.
     - To view the cart → always use get_cart_tool
     - To view past orders → use search_orders_tool or get_order_tool
@@ -212,7 +281,8 @@ class ShopifyAgent:
     - You are connected to a live Shopify store.
     - All product knowledge must come from tool results.
     - Do not hallucinate products.
-    - Be proactive and complete the shopping flow automatically.
+    - When asked about a product, provide key details (price, variants) first.
+    - Only add items to the cart if the user explicitly asks to "add to cart" or "buy".
     """
 
 

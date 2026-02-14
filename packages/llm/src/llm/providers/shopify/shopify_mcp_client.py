@@ -15,10 +15,10 @@ load_dotenv(_root_env)
 class ShopifyMCPClient:
     """Direct Shopify Storefront and Admin API client."""
 
-    def __init__(self):
-        self.shop_url = os.getenv("SHOPIFY_SHOP_URL")
-        self.storefront_token = os.getenv("SHOPIFY_STOREFRONT_API_ACCESS_TOKEN")
-        self.admin_token = os.getenv("SHOPIFY_STOREFRONT_ADMIN_ACCESS_TOKEN")
+    def __init__(self, shop_url: str = None, storefront_token: str = None, admin_token: str = None, cart_id: str = None):
+        self.shop_url = shop_url or os.getenv("SHOPIFY_SHOP_URL")
+        self.storefront_token = storefront_token or os.getenv("SHOPIFY_STOREFRONT_API_ACCESS_TOKEN")
+        self.admin_token = admin_token or os.getenv("SHOPIFY_STOREFRONT_ADMIN_ACCESS_TOKEN")
 
 
         if not self.shop_url or not self.storefront_token:
@@ -37,7 +37,7 @@ class ShopifyMCPClient:
             }
 
         # Initialize cart_id so it's always available
-        self.cart_id = None
+        self.cart_id = cart_id
 
     # ---- GraphQL helper ----
     async def _graphql(self, query: str, variables: dict = None) -> dict:
@@ -169,6 +169,72 @@ class ShopifyMCPClient:
         if cart.get("checkoutUrl"):
             print(f"\n🔗 Checkout URL → {cart['checkoutUrl']}")
         return cart
+
+    async def remove_from_cart(self, cart_id: str, line_ids: list) -> dict:
+        gql = """
+        mutation cartLinesRemove($cartId: ID!, $lineIds: [ID!]!) {
+          cartLinesRemove(cartId: $cartId, lineIds: $lineIds) {
+            cart {
+              id
+              checkoutUrl
+              lines(first: 10) {
+                edges {
+                  node {
+                    id
+                    quantity
+                    merchandise {
+                      ... on ProductVariant {
+                        id
+                        title
+                        product { title }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        variables = {
+            "cartId": cart_id,
+            "lineIds": line_ids
+        }
+        data = await self._graphql(gql, variables)
+        return data["data"]["cartLinesRemove"]["cart"]
+
+    async def update_cart_quantity(self, cart_id: str, line_id: str, quantity: int) -> dict:
+        gql = """
+        mutation cartLinesUpdate($cartId: ID!, $lines: [CartLineUpdateInput!]!) {
+          cartLinesUpdate(cartId: $cartId, lines: $lines) {
+            cart {
+              id
+              checkoutUrl
+              lines(first: 10) {
+                edges {
+                  node {
+                    id
+                    quantity
+                    merchandise {
+                      ... on ProductVariant {
+                        id
+                        title
+                        product { title }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        variables = {
+            "cartId": cart_id,
+            "lines": [{"id": line_id, "quantity": quantity}]
+        }
+        data = await self._graphql(gql, variables)
+        return data["data"]["cartLinesUpdate"]["cart"]
     async def get_cart(self, cart_id: str) -> dict:
         """Fetch current cart contents via Storefront API"""
         #cart_id = cart_id.split("?")[0]
@@ -271,14 +337,15 @@ class ShopifyMCPClient:
         elif tool_name == "create_cart_tool":
             cart = await self.create_cart()
             # ✅ Store only global cart ID (strip ?key=...)
-            cart_id = cart.get("id", "").split("?")[0]
+            #cart_id = cart.get("id", "").split("?")[0]
+            cart_id = cart.get("id", "")
             self.cart_id = cart_id
             return cart
         
         elif tool_name == "add_to_cart_tool":
             cart_id = tool_input.get("cartId") or self.cart_id
-            if cart_id:
-                cart_id = cart_id.split("?")[0]
+            #if cart_id:
+            #    cart_id = cart_id.split("?")[0]
             variant_id = tool_input.get("merchandiseId") or tool_input.get("variant_id")
             quantity = tool_input.get("quantity", 1)
 
@@ -295,6 +362,24 @@ class ShopifyMCPClient:
         
         elif tool_name == "get_shop_info_tool":
             return await self.get_shop_info()
+
+        elif tool_name == "remove_from_cart_tool":
+            cart_id = tool_input.get("cartId") or self.cart_id
+            line_ids = tool_input.get("lineIds")
+            if not cart_id or not line_ids:
+                raise ValueError("remove_from_cart_tool requires 'cartId' and 'lineIds'")
+            # Ensure line_ids is a list
+            if isinstance(line_ids, str):
+                line_ids = [line_ids]
+            return await self.remove_from_cart(cart_id, line_ids)
+
+        elif tool_name == "update_cart_quantity_tool":
+            cart_id = tool_input.get("cartId") or self.cart_id
+            line_id = tool_input.get("lineId")
+            quantity = tool_input.get("quantity")
+            if not cart_id or not line_id or quantity is None:
+                raise ValueError("update_cart_quantity_tool requires 'cartId', 'lineId', and 'quantity'")
+            return await self.update_cart_quantity(cart_id, line_id, int(quantity))
         
         else:
             raise ValueError(f"Unknown tool: {tool_name}")
