@@ -61,7 +61,7 @@ export interface KnowledgeDocument {
   chunks_count?: number;
   created_at?: string;
   content_type?: string;
-  
+
   // Legacy fields (for compatibility)
   id?: string;
   file_type?: string;
@@ -124,7 +124,7 @@ export const brandApi = {
   list: () => apiClient.get<Brand[]>('/api/v1/admin/brands/'),
   get: (id: string) => apiClient.get<Brand>(`/api/v1/admin/brands/${id}`),
   create: (data: CreateBrandRequest) => apiClient.post<Brand>('/api/v1/admin/brands/', data),
-  update: (id: string, data: Partial<CreateBrandRequest>) => 
+  update: (id: string, data: Partial<CreateBrandRequest>) =>
     apiClient.put<Brand>(`/api/v1/admin/brands/${id}`, data),
   delete: (id: string) => apiClient.delete(`/api/v1/admin/brands/${id}`),
 };
@@ -137,7 +137,7 @@ export const agentApi = {
   },
   get: (id: string) => apiClient.get<Agent>(`/api/v1/admin/agents/${id}`),
   create: (data: CreateAgentRequest) => apiClient.post<Agent>('/api/v1/admin/agents/', data),
-  update: (id: string, data: Partial<UpdateAgentRequest>) => 
+  update: (id: string, data: Partial<UpdateAgentRequest>) =>
     apiClient.put<Agent>(`/api/v1/admin/agents/${id}`, data),
   delete: (id: string) => apiClient.delete(`/api/v1/admin/agents/${id}`),
 };
@@ -169,7 +169,7 @@ export const api = {
   deleteBrand: async (id: string) => {
     await brandApi.delete(id);
   },
-  
+
   // Agents
   getAgents: async (brandId?: string) => {
     const response = await agentApi.list(brandId);
@@ -196,7 +196,7 @@ export const api = {
 export const documentApi = {
   uploadDocuments: async (files: File[], metadata?: { category?: string; tags?: string[]; document_type?: string; agent_id?: string }) => {
     const formData = new FormData();
-    
+
     // Add files to FormData
     Array.from(files).forEach((file) => {
       // Set correct MIME type for JSON files
@@ -207,40 +207,40 @@ export const documentApi = {
         formData.append('files', file);
       }
     });
-    
+
     // Add metadata if provided (especially agent_id)
     if (metadata?.agent_id) {
       // Pass agent_id as query parameter for proper storage
       const params = new URLSearchParams();
       params.append('agent_id', metadata.agent_id);
-      
+
       const response = await apiClient.post(`/api/v1/ingest/documents?${params.toString()}`, formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
       });
-      
+
       return response.data;
     }
-    
+
     // If no agent_id, upload without it
     const response = await apiClient.post('/api/v1/ingest/documents', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
       },
     });
-    
+
     return response.data;
   },
 
   getKnowledgeDocuments: async (agentId?: string): Promise<KnowledgeDocument[]> => {
     const params = agentId ? { agent_id: agentId } : {};
     console.log('🔍 Fetching documents with params:', params);
-    
+
     const response = await apiClient.get<{ documents: any[], count: number }>('/api/v1/ingest/documents', { params });
-    
+
     console.log('📥 Documents API response:', response.data);
-    
+
     // Transform API response to match KnowledgeDocument interface
     const transformed = response.data.documents.map((doc: any) => ({
       id: doc._id || doc.filename,
@@ -258,7 +258,7 @@ export const documentApi = {
       created_at: doc.created_at || new Date().toISOString(),
       updated_at: doc.created_at || new Date().toISOString(),
     }));
-    
+
     console.log('✨ Transformed documents:', transformed);
     return transformed;
   },
@@ -271,4 +271,10 @@ export const documentApi = {
     const response = await apiClient.get(`/api/v1/ingest/status/${jobId}`);
     return response.data;
   },
+};
+
+// Shopify API
+export const shopifyApi = {
+  verify: (config: { shop_url: string; storefront_token: string; admin_token?: string }) =>
+    apiClient.post('/api/v1/shopify/verify', config),
 };

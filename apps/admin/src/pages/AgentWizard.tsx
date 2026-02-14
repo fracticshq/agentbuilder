@@ -12,6 +12,7 @@ import StepSystemPrompt from '../components/AgentWizard/StepSystemPrompt';
 import StepKnowledgeBase from '../components/AgentWizard/StepKnowledgeBase';
 import StepRAGConfig from '../components/AgentWizard/StepRAGConfig';
 import StepFeatures from '../components/AgentWizard/StepFeatures';
+import StepShopify from '../components/AgentWizard/StepShopify';
 import StepReview from '../components/AgentWizard/StepReview';
 
 type StepStatus = 'complete' | 'current' | 'upcoming';
@@ -74,6 +75,14 @@ interface AgentData {
   max_conversation_length: number;
   allowed_file_types: string[];
   max_file_size: number;
+
+  // Shopify Config
+  shopify_config: {
+    enabled: boolean;
+    shop_url: string;
+    storefront_token: string;
+    admin_token: string;
+  };
 }
 
 const initialData: AgentData = {
@@ -127,6 +136,14 @@ const initialData: AgentData = {
   max_conversation_length: 50,
   allowed_file_types: [],
   max_file_size: 10,
+
+  // Shopify Config
+  shopify_config: {
+    enabled: false,
+    shop_url: '',
+    storefront_token: '',
+    admin_token: '',
+  },
 };
 
 const steps = [
@@ -135,8 +152,9 @@ const steps = [
   { id: 3, name: 'System Prompt', description: 'Agent personality and behavior' },
   { id: 4, name: 'RAG Config', description: 'Retrieval settings' },
   { id: 5, name: 'Knowledge Base', description: 'Upload and manage documents' },
-  { id: 6, name: 'Features', description: 'Features and security' },
-  { id: 7, name: 'Review', description: 'Test and deploy' },
+  { id: 6, name: 'Shopify', description: 'E-commerce integration' },
+  { id: 7, name: 'Features', description: 'Features and security' },
+  { id: 8, name: 'Review', description: 'Test and deploy' },
 ];
 
 export default function AgentWizard() {
@@ -263,6 +281,7 @@ export default function AgentWizard() {
       const rag = config.rag || {};
       const features = config.features || {};
       const security = config.security || {};
+      const shopify = config.shopify || {};
 
       // Map backend structure to wizard state
       const mappedData: Partial<AgentData> = {
@@ -316,6 +335,14 @@ export default function AgentWizard() {
         session_timeout: security.session_timeout ?? 30,
         max_conversation_length: security.max_conversation_length ?? 50,
 
+        // Shopify
+        shopify_config: {
+          enabled: shopify.enabled ?? false,
+          shop_url: shopify.shop_url || '',
+          storefront_token: shopify.storefront_token || '',
+          admin_token: shopify.admin_token || '',
+        },
+
         // Documents will be loaded separately
         documents: [],
       };
@@ -348,7 +375,7 @@ export default function AgentWizard() {
   }));
 
   const nextStep = () => {
-    if (currentStep < 7) {
+    if (currentStep < 8) {
       setCurrentStep(currentStep + 1);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -452,6 +479,7 @@ export default function AgentWizard() {
             session_timeout: agentData.session_timeout,
             max_conversation_length: agentData.max_conversation_length,
           },
+          shopify: agentData.shopify_config,
         },
       };
 
@@ -561,12 +589,19 @@ export default function AgentWizard() {
         );
       case 6:
         return (
-          <StepFeatures
+          <StepShopify
             data={agentData}
             onChange={updateStepData}
           />
         );
       case 7:
+        return (
+          <StepFeatures
+            data={agentData}
+            onChange={updateStepData}
+          />
+        );
+      case 8:
         return (
           <StepReview
             data={agentData}
@@ -638,7 +673,7 @@ export default function AgentWizard() {
           >
             Previous
           </button>
-          {currentStep === 7 && (
+          {currentStep === 8 && (
             <button
               onClick={handleCancel}
               className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
@@ -648,7 +683,7 @@ export default function AgentWizard() {
           )}
         </div>
 
-        {currentStep < 7 && (
+        {currentStep < 8 && (
           <button
             onClick={nextStep}
             className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
