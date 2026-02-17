@@ -28,6 +28,8 @@ from llm.factory import LLMFactory, create_provider_from_env
 from tools.registry import ToolRegistry
 from tools.builtin.retrieval_tool import RetrievalTool
 from agent_runtime.orchestrator import Orchestrator, AgentResult
+
+#shopify mcp
 from llm.providers.shopify.shopify_mcp_client import ShopifyMCPClient
 from llm.providers.shopify.tools import ShopifyToolSet
 from llm.providers.shopify.shopify_orchestrator import ShopifyAgent
@@ -337,11 +339,11 @@ class MessageService:
         try:
             start_time = datetime.now(timezone.utc)
             
-            # Load agent configuration from request
-            agent_id = request.agent_id or self.brand_id
-            await self._load_agent_config(agent_id)
-            
-            # Load agent configuration with conversation context
+            # Initialize variables
+            conversation_id = request.conversation_id or str(uuid.uuid4())
+            user_id = request.user_id or "anonymous"
+
+            # Load agent configuration from request with context
             agent_id = request.agent_id or self.brand_id
             await self._load_agent_config(agent_id, conversation_id=conversation_id)
             
@@ -435,7 +437,8 @@ class MessageService:
             
             # Load agent configuration from request
             agent_id = request.agent_id or self.brand_id
-            await self._load_agent_config(agent_id)
+            #await self._load_agent_config(agent_id)
+            await self._load_agent_config(agent_id, conversation_id=conversation_id)
             logger.info("agent_config_loaded", agent_id=agent_id, has_system_prompt=bool(self.system_prompt))
             
             # Ensure memory initialized

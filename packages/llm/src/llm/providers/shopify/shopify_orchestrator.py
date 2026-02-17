@@ -10,23 +10,14 @@ from llm.providers.shopify.shopify_mcp_client import ShopifyMCPClient
 
 AVAILABLE_TOOLS = [
     "search_products_tool",
-
     "get_product_tool",
-
     "search_orders_tool",
-
     "get_order_tool",
-
     "create_cart_tool",
-
     "add_to_cart_tool",
-
     "get_cart_tool",
-
     "get_shop_info_tool",
-
     "remove_from_cart_tool",
-
     "update_cart_quantity_tool",
     ]
 
@@ -46,19 +37,59 @@ class ShopifyAgent:
         self.mcp = ShopifyMCPClient()
         self.conversation: List[Dict[str, Any]] = []
         self.cart_id = None
-        self.system_prompt = None # For compatibility with Orchestrator interface
+        self.system_prompt = None
 
-    async def run(self, query: str = None, chat_history: List[Dict] = None, **kwargs):
+    async def run(self, query: str = None, chat_history: List[Dict] = None, context: Dict = None, **kwargs):
         """Orchestrator interface compatibility."""
         # Ensure connection (idempotent)
         await self.mcp.connect()
+
+        # Only reset conversation if we're starting fresh (no existing state)
+        # This preserves tool results between requests
+        if not hasattr(self, 'conversation') or self.conversation is None:
+            self.conversation = []
+
+        # Build conversation from history if provided
+        if chat_history:
+             # Convert generic roles to Shopify agent roles
+            for msg in chat_history:
+                 # Include user, assistant, AND tool messages
+                if msg.get("role") not in ["user", "assistant", "tool"]:
+                    continue
+                
+                conv_msg = {
+                    "role": msg["role"],
+                    "content": msg["content"]
+                }
+                
+                # Tool messages need the 'name' field
+                if msg.get("role") == "tool" and msg.get("name"):
+                    conv_msg["name"] = msg["name"]
+                    
+                self.conversation.append(conv_msg)
         
-        # Add user message
+        # If context is provided (new memory system), try to extract recent messages
+        elif context and "memory" in context:
+             recent_messages = context["memory"].get("recent_messages", [])
+             for msg in recent_messages:
+                  # Handle Message object or dict
+                  role = msg.role.value if hasattr(msg, "role") else msg.get("role")
+                  content = msg.content if hasattr(msg, "content") else msg.get("content")
+                  
+                  if role == "user":
+                       self.conversation.append({"role": "user", "content": content})
+                  elif role == "assistant":
+                       self.conversation.append({"role": "assistant", "content": content})
+
+
+        # Add the current user query if it's not already the last message
         if query:
-            self.conversation.append({
-                "role": "user",
-                "content": query
-            })
+            # Check if last message is same as query (deduplication)
+            if not self.conversation or self.conversation[-1].get("content") != query or self.conversation[-1].get("role") != "user":
+                self.conversation.append({
+                    "role": "user",
+                    "content": query
+                })
         
         # Run agent loop in headless mode
         response_text, tool_results = await self._agent_loop(headless=True)
@@ -128,6 +159,9 @@ class ShopifyAgent:
                 if not headless:
                     print(f"\n🔧 Calling Tool → {tool_name}")
                     print(f"📦 Input → {tool_input}")
+                else:
+                    # Log in headless mode too for debugging
+                    print(f"🔧 [Headless] Tool: {tool_name} | Input: {tool_input}")
 
                 # --- Special handling for adding to cart ---
                 if tool_name == "add_to_cart_tool":
@@ -160,16 +194,25 @@ class ShopifyAgent:
                                 tool_input["quantity"] = 1
 
                 # Call the tool
-                if tool_name == "get_cart_tool" and not tool_input.get("cartId"):
-                    # ✅ Return empty cart if no ID exists (prevents crash)
-                    result = {"lines": {"edges": []}, "id": "", "checkoutUrl": ""}
-                else:
-                    result = await self.mcp.call_tool(tool_name, tool_input)
+                try:
+                    if tool_name == "get_cart_tool" and not tool_input.get("cartId"):
+                        result = {"lines": {"edges": []}, "id": "", "checkoutUrl": ""}
+                    else:
+                        result = await self.mcp.call_tool(tool_name, tool_input)
+                except Exception as e:
+                    # Gracefully handle tool errors allowing LLM to recover
+                    result = {"error": str(e), "success": False}
+                    if not headless:
+                        print(f"❌ Tool Error: {str(e)}")
 
                 # Capture cart or add_to_cart state
-                self._capture_state(tool_name, result)
+                is_success = True
+                if isinstance(result, dict) and result.get("success") is False:
+                    is_success = False
                 
-                # Store tool result for metadata return
+                if is_success:
+                    self._capture_state(tool_name, result)
+
                 tool_results_map[tool_name] = result
 
                 if tool_name == "get_cart_tool":
@@ -234,6 +277,18 @@ class ShopifyAgent:
 
         return f"""
     You are a Shopify store shopping assistant.
+    
+    ⚠️ MANDATORY TOOL USAGE - READ THIS FIRST ⚠️
+    You MUST call the appropriate tool BEFORE responding in these situations:
+    1. User mentions a product name (e.g., "socks", "pants") → MUST call search_products_tool and SHOW details. DO NOT add to cart unless explicitly asked.
+    2. User says "add [item] to cart" or "buy [item]" → MUST call search_products_tool then add_to_cart_tool
+    3. User says "cart details" or "show cart" → MUST call get_cart_tool
+    4. User says "remove [item]" or "remove all" → MUST call get_cart_tool to get lineIds, then remove_from_cart_tool
+    
+    DO NOT respond with text like "I have added..." or "I have removed..." UNLESS you just called the tool and saw the result.
+    If you respond without calling a tool first, you are HALLUCINATING and FAILING your task.
+
+     You are a Shopify store shopping assistant.
 
     IMPORTANT:
     You do NOT have access to product knowledge unless it is retrieved using tools.
@@ -289,11 +344,29 @@ class ShopifyAgent:
 
     def _parse_tool_call(self, message: str):
         try:
+            # First try parsing the whole message as JSON
             parsed = json.loads(message)
             if "tool_name" in parsed and "tool_input" in parsed:
                 return parsed
+        except json.JSONDecodeError:
+            pass
+
+        import re
+        try:
+            match = re.search(r"```json\s*({.*?})\s*```", message, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group(1))
+                if "tool_name" in parsed and "tool_input" in parsed:
+                    return parsed
+
+            match = re.search(r"({.*})", message, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group(1))
+                if "tool_name" in parsed and "tool_input" in parsed:
+                    return parsed
         except:
             return None
+        return None
         return None
 
     def _capture_state(self, tool_name: str, result: dict):
@@ -317,5 +390,5 @@ class ShopifyAgent:
 
 
 
-if __name__ == "__main__":
-    asyncio.run(ShopifyAgent().chat())
+# if __name__ == "__main__":
+#     asyncio.run(ShopifyAgent().chat())
