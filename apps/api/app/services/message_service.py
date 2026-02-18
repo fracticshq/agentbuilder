@@ -260,18 +260,24 @@ class MessageService:
                 # Use ShopifyAgent if Shopify is enabled, otherwise use generic Orchestrator
                 shopify_config = self.agent_config.get("shopify", {})
                 if shopify_config.get("enabled", False):
-                    # Replace with ShopifyAgent for better Shopify responses
-                    logger.info("switching_to_shopify_orchestrator")
-                    self.orchestrator = ShopifyAgent()
-                    
                     # Restore cart_id if available
                     cart_id = None
                     if conversation_id:
                         cart_id = await self._get_active_cart_id(conversation_id)
-                        if cart_id and hasattr(self.orchestrator, 'cart_id'):
-                            self.orchestrator.cart_id = cart_id
-                            logger.info("shopify_cart_restored", cart_id=cart_id)
-                            print(f"🛒 [MessageService] Restored Cart ID: {cart_id}")
+                    
+                    # Replace with ShopifyAgent for better Shopify responses
+                    logger.info("switching_to_shopify_orchestrator")
+                    self.orchestrator = ShopifyAgent(
+                        shop_url=shopify_config.get("shop_url"),
+                        storefront_token=shopify_config.get("storefront_token"),
+                        admin_token=shopify_config.get("admin_token"),
+                        cart_id=cart_id,
+                        system_prompt=self.system_prompt
+                    )
+                    
+                    if cart_id:
+                        logger.info("shopify_cart_restored", cart_id=cart_id)
+                        print(f"🛒 [MessageService] Restored Cart ID: {cart_id}")
                 else:
                     # Use generic Orchestrator with system prompt
                     if self.orchestrator:
