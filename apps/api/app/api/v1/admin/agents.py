@@ -6,6 +6,7 @@ from datetime import datetime
 import structlog
 
 from app.connections import connection_manager, get_system_db
+from memory.processors.pii_vault import get_pii_vault
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -44,6 +45,34 @@ def generate_slug(name: str) -> str:
     """Generate a URL-friendly slug from the agent name."""
     return name.lower().replace(' ', '-').replace('&', 'and')
 
+def validate_agent_configuration(configuration: dict):
+    """Validate Shopify configuration if present."""
+    if not configuration:
+        return
+        
+    shopify = configuration.get("shopify", {})
+    if shopify.get("enabled", False):
+        shop_url = shopify.get("shop_url")
+        if not shop_url:
+             raise HTTPException(status_code=400, detail="Shop URL is required when Shopify is enabled")
+        
+        # Clean and validate URL
+        clean_url = shop_url.strip().lower()
+        if not clean_url.endswith(".myshopify.com"):
+             raise HTTPException(
+                status_code=400, 
+                detail="Invalid Shop URL. Must be a '.myshopify.com' domain (e.g., your-store.myshopify.com)."
+            )
+        
+        # Token validation (Shopify tokens are typically > 20 chars)
+        storefront_token = shopify.get("storefront_token")
+        if not storefront_token or len(storefront_token) < 20:
+             raise HTTPException(status_code=400, detail="Valid Storefront Access Token is required (at least 20 characters)")
+             
+        admin_token = shopify.get("admin_token")
+        if admin_token and len(admin_token) < 20:
+             raise HTTPException(status_code=400, detail="Admin Access Token is too short (at least 20 characters)")
+
 def get_agents_collection():
     """Get MongoDB agents collection from system database."""
     if connection_manager.system_db is None:
@@ -57,6 +86,16 @@ async def list_agents(brand_id: Optional[str] = Query(None)):
         collection = get_agents_collection()
         query = {"brand_id": brand_id} if brand_id else {}
         agents = await collection.find(query).to_list(length=None)
+        
+        # Decrypt Shopify tokens for UI
+        vault = get_pii_vault()
+        for agent in agents:
+            if "configuration" in agent and "shopify" in agent["configuration"]:
+                agent["configuration"]["shopify"] = vault.unveault_dict(
+                    agent["configuration"]["shopify"],
+                    ["storefront_token", "admin_token"]
+                )
+        
         return [Agent(**{**agent, "_id": str(agent["_id"])}) for agent in agents]
     except Exception as e:
         logger.error("Failed to list agents", error=str(e))
@@ -70,6 +109,15 @@ async def get_agent(agent_id: str):
         agent = await collection.find_one({"id": agent_id})
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
+            
+        # Decrypt Shopify tokens for UI
+        if "configuration" in agent and "shopify" in agent["configuration"]:
+            vault = get_pii_vault()
+            agent["configuration"]["shopify"] = vault.unveault_dict(
+                agent["configuration"]["shopify"],
+                ["storefront_token", "admin_token"]
+            )
+            
         return Agent(**{**agent, "_id": str(agent["_id"])})
     except HTTPException:
         raise
@@ -81,6 +129,9 @@ async def get_agent(agent_id: str):
 async def create_agent(agent: AgentCreate):
     """Create a new agent."""
     try:
+        # Validate configuration
+        validate_agent_configuration(agent.configuration)
+        
         collection = get_agents_collection()
         brands_collection = connection_manager.get_system_db()["brands"]
         
@@ -101,7 +152,9 @@ async def create_agent(agent: AgentCreate):
         if existing:
             slug = f"{slug}-{agent_id[:8]}"
         
-        now = datetime.utcnow()
+        # Disable encryption for now as requested
+        config_to_save = agent.configuration
+
         agent_doc = {
             "id": agent_id,
             "brand_id": agent.brand_id,
@@ -110,7 +163,7 @@ async def create_agent(agent: AgentCreate):
             "name": agent.name,
             "description": agent.description,
             "system_prompt": agent.system_prompt,
-            "configuration": agent.configuration,
+            "configuration": config_to_save,
             "status": "draft",
             "created_at": now,
             "updated_at": now
@@ -135,14 +188,17 @@ async def update_agent(agent_id: str, agent_update: AgentUpdate):
         if not existing_agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         
+        # Validate configuration if being updated
+        if agent_update.configuration is not None:
+            validate_agent_configuration(agent_update.configuration)
+            
+        # Disable encryption for now as requested
         update_data = agent_update.dict(exclude_unset=True)
         
         # Update slug if name changed
         if "name" in update_data:
             update_data["slug"] = generate_slug(update_data["name"])
-        
-        update_data["updated_at"] = datetime.utcnow()
-        
+
         # Update in MongoDB
         await collection.update_one(
             {"id": agent_id},

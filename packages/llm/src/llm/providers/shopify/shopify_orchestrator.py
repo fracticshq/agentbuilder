@@ -1,9 +1,14 @@
 # to run this file use: python -m llm.providers.shopify.shopify_orchestrator
 #from S G:\fractics\agentbuilder\packages\llm\src>
+
+
+#Platform prompt: recommended. "You are Shopify Assistant. Your work is to recommend 
+# the products to the people and help them."
 import asyncio
 import json
 import re
 from typing import List, Dict, Any
+import structlog
 
 from llm.providers.shopify.shopify_config import get_openai_provider
 from llm.providers.shopify.shopify_mcp_client import ShopifyMCPClient
@@ -33,13 +38,14 @@ except ImportError:
 
 class ShopifyAgent:
 
-    def __init__(self, shop_url: str = None, storefront_token: str = None, admin_token: str = None, cart_id: str = None, system_prompt: str = None):
+    def __init__(self, shop_url: str = None, storefront_token: str = None, admin_token: str = None, cart_id: str = None, system_prompt: str = None, api_version: str = None):
         self.provider = get_openai_provider()
         self.mcp = ShopifyMCPClient(
             shop_url=shop_url,
             storefront_token=storefront_token,
             admin_token=admin_token,
-            cart_id=cart_id
+            cart_id=cart_id,
+            api_version=api_version
         )
         self.conversation: List[Dict[str, Any]] = []
         self.cart_id = cart_id
@@ -50,10 +56,7 @@ class ShopifyAgent:
         # Ensure connection (idempotent)
         await self.mcp.connect()
 
-        # Only reset conversation if we're starting fresh (no existing state)
-        # This preserves tool results between requests
-        if not hasattr(self, 'conversation') or self.conversation is None:
-            self.conversation = []
+        self.conversation = []
 
         # Build conversation from history if provided
         if chat_history:
@@ -73,8 +76,7 @@ class ShopifyAgent:
                     conv_msg["name"] = msg["name"]
                     
                 self.conversation.append(conv_msg)
-        
-        # If context is provided (new memory system), try to extract recent messages
+                
         elif context and "memory" in context:
              recent_messages = context["memory"].get("recent_messages", [])
              for msg in recent_messages:
@@ -110,7 +112,7 @@ class ShopifyAgent:
                 "steps_executed": 1, 
                 "tool_results": tool_results,
                 "plan": {"goal": query},
-                "cart_id": self.cart_id  # ✅ return cart_id so it can be persisted
+                "cart_id": self.cart_id
             }
         )
 
@@ -158,7 +160,7 @@ class ShopifyAgent:
 
                 # Auto-inject cartId if missing
                 if self.cart_id and isinstance(tool_input, dict):
-                    if "cartId" not in tool_input or not tool_input["cartId"]:  # ✅ Inject if missing OR empty
+                    if "cartId" not in tool_input or not tool_input["cartId"]:  # Inject if missing OR empty
                         # Clean cart_id if it has leading Junk (from some older logs)
                         clean_id = self.cart_id.lstrip("/")
                         tool_input["cartId"] = clean_id
@@ -179,10 +181,9 @@ class ShopifyAgent:
                     # Ensure cart exists
                     if not self.cart_id:
                         cart = await self.mcp.call_tool("create_cart_tool", {})
-                        #self.cart_id = cart.get("id", "").split("?")[0]
                         self.cart_id = cart.get("id", "")  # Keep the full ID including the key
                         if not headless:
-                            print(f"🛒 Created new cart → {self.cart_id}")
+                            logger.info("cart_created", cart_id=self.cart_id, headless=headless)
 
                     # Ensure variant ID exists
                     if not tool_input.get("merchandiseId") and tool_input.get("product"):

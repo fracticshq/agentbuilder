@@ -20,6 +20,7 @@ from memory.managers.graph import GraphMemory
 from memory.managers.procedural import ProceduralMemory
 from memory.managers.resource import ResourceMemory
 from memory.types import MessageRole, MemoryContext as MemoryContextType
+from memory.processors.pii_vault import get_pii_vault
 from retrieval.pipeline import RetrievalPipeline
 from retrieval.types import RetrievalConfig, RetrievalContext
 from llm.factory import LLMFactory, create_provider_from_env
@@ -260,6 +261,13 @@ class MessageService:
                 # Use ShopifyAgent if Shopify is enabled, otherwise use generic Orchestrator
                 shopify_config = self.agent_config.get("shopify", {})
                 if shopify_config.get("enabled", False):
+                    # Attempt to decrypt if tokens look like PIIField dicts
+                    # This allows existing encrypted agents to work while we transit back
+                    vault = get_pii_vault()
+                    shopify_config = vault.unveault_dict(
+                        shopify_config,
+                        ["storefront_token", "admin_token"]
+                    )
                     # Restore cart_id if available
                     cart_id = None
                     if conversation_id:
@@ -272,12 +280,12 @@ class MessageService:
                         storefront_token=shopify_config.get("storefront_token"),
                         admin_token=shopify_config.get("admin_token"),
                         cart_id=cart_id,
-                        system_prompt=self.system_prompt
+                        system_prompt=self.system_prompt,
+                        api_version=self.settings.SHOPIFY_API_VERSION
                     )
                     
                     if cart_id:
                         logger.info("shopify_cart_restored", cart_id=cart_id)
-                        print(f"🛒 [MessageService] Restored Cart ID: {cart_id}")
                 else:
                     # Use generic Orchestrator with system prompt
                     if self.orchestrator:
