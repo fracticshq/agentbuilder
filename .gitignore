@@ -264,6 +264,7 @@ dist
 # Vite build output
 dist/
 build/
+apps/widget/vite.config.ts.timestamp-1771400600320-2b3833b5e1751.mjs
 
 # Gatsby files
 .cache/
