@@ -166,10 +166,10 @@ class Settings(BaseSettings):
     AZURE_TENANT_ID: Optional[str] = None
     
     # Shopify MCP Server Configuration
-    SHOPIFY_STOREFRONT_ACCESS_TOKEN: Optional[str] = None #shpat
+    SHOPIFY_STOREFRONT_ACCESS_TOKEN: Optional[str] = None
+    SHOPIFY_ADMIN_ACCESS_TOKEN: Optional[str] = None
     SHOPIFY_SHOP_URL: Optional[str] = None
     SHOPIFY_MCP_ENABLED: bool = False
-    SHOPIFY_STOREFRONT_TOKEN: Optional[str] = None
     SHOPIFY_API_VERSION: str = "2026-10"
 
     # Note: AKV secrets are preloaded into os.environ at module load time
