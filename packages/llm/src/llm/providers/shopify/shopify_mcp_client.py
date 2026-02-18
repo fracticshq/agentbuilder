@@ -17,12 +17,12 @@ class ShopifyMCPClient:
 
     def __init__(self, shop_url: str = None, storefront_token: str = None, admin_token: str = None, cart_id: str = None):
         self.shop_url = shop_url or os.getenv("SHOPIFY_SHOP_URL")
-        self.storefront_token = storefront_token or os.getenv("SHOPIFY_STOREFRONT_API_ACCESS_TOKEN")
-        self.admin_token = admin_token or os.getenv("SHOPIFY_STOREFRONT_ADMIN_ACCESS_TOKEN")
+        self.storefront_token = storefront_token or os.getenv("SHOPIFY_STOREFRONT_ACCESS_TOKEN")
+        self.admin_token = admin_token or os.getenv("SHOPIFY_ADMIN_ACCESS_TOKEN")
 
 
         if not self.shop_url or not self.storefront_token:
-            raise ValueError(f"Missing SHOPIFY_SHOP_URL or token. Got: {self.shop_url}, {'***' if self.storefront_token else None}")
+            raise ValueError("Missing SHOPIFY_SHOP_URL or storefront_token")
 
         self.storefront_endpoint = f"https://{self.shop_url}/api/2026-01/graphql.json"
         self.storefront_headers = {
@@ -130,9 +130,7 @@ class ShopifyMCPClient:
         return cart
 
     async def add_to_cart(self, cart_id: str, variant_id: str, quantity: int = 1) -> dict:
-        # Strip ?key=... from cart ID — Shopify GraphQL doesn't accept it
-        #cart_id = cart_id.split("?")[0] 
-        #full cart id required
+        # full cart id required
 
         gql = """
         mutation cartLinesAdd($cartId: ID!, $lines: [CartLineInput!]!) {
@@ -156,6 +154,7 @@ class ShopifyMCPClient:
                 }
               }
             }
+            userErrors { field message }
           }
         }
         """
@@ -164,7 +163,11 @@ class ShopifyMCPClient:
             "lines": [{"merchandiseId": variant_id, "quantity": quantity}]
         }
         data = await self._graphql(gql, variables)
-        cart = data["data"]["cartLinesAdd"]["cart"]
+        result = data["data"]["cartLinesAdd"]
+        if result.get("userErrors"):
+            return {"error": result["userErrors"], "success": False}
+        
+        cart = result["cart"]
         # Show checkout URL after adding items
         if cart.get("checkoutUrl"):
             print(f"\n🔗 Checkout URL → {cart['checkoutUrl']}")
@@ -193,6 +196,7 @@ class ShopifyMCPClient:
                 }
               }
             }
+            userErrors { field message }
           }
         }
         """
@@ -201,7 +205,10 @@ class ShopifyMCPClient:
             "lineIds": line_ids
         }
         data = await self._graphql(gql, variables)
-        return data["data"]["cartLinesRemove"]["cart"]
+        result = data["data"]["cartLinesRemove"]
+        if result.get("userErrors"):
+            return {"error": result["userErrors"], "success": False}
+        return result["cart"]
 
     async def update_cart_quantity(self, cart_id: str, line_id: str, quantity: int) -> dict:
         gql = """
@@ -226,6 +233,7 @@ class ShopifyMCPClient:
                 }
               }
             }
+            userErrors { field message }
           }
         }
         """
@@ -234,10 +242,12 @@ class ShopifyMCPClient:
             "lines": [{"id": line_id, "quantity": quantity}]
         }
         data = await self._graphql(gql, variables)
-        return data["data"]["cartLinesUpdate"]["cart"]
+        result = data["data"]["cartLinesUpdate"]
+        if result.get("userErrors"):
+            return {"error": result["userErrors"], "success": False}
+        return result["cart"]
     async def get_cart(self, cart_id: str) -> dict:
         """Fetch current cart contents via Storefront API"""
-        #cart_id = cart_id.split("?")[0]
         gql = """
         query getCart($id: ID!) {
         cart(id: $id) {
@@ -267,7 +277,7 @@ class ShopifyMCPClient:
     async def search_orders(self, limit: int = 10) -> list:
         """Retrieve orders (Admin API required)."""
         if not self.admin_token:
-            raise ValueError("Missing SHOPIFY_STOREFRONT_ADMIN_ACCESS_TOKEN for order queries")
+            raise ValueError("Missing SHOPIFY_ADMIN_ACCESS_TOKEN for order queries")
         url = f"{self.admin_endpoint}/orders.json?limit={limit}"
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(url, headers=self.admin_headers)
@@ -336,16 +346,12 @@ class ShopifyMCPClient:
         
         elif tool_name == "create_cart_tool":
             cart = await self.create_cart()
-            # ✅ Store only global cart ID (strip ?key=...)
-            #cart_id = cart.get("id", "").split("?")[0]
             cart_id = cart.get("id", "")
             self.cart_id = cart_id
             return cart
         
         elif tool_name == "add_to_cart_tool":
             cart_id = tool_input.get("cartId") or self.cart_id
-            #if cart_id:
-            #    cart_id = cart_id.split("?")[0]
             variant_id = tool_input.get("merchandiseId") or tool_input.get("variant_id")
             quantity = tool_input.get("quantity", 1)
 
