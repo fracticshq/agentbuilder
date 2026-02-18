@@ -2,6 +2,7 @@
 #from S G:\fractics\agentbuilder\packages\llm\src>
 import asyncio
 import json
+import re
 from typing import List, Dict, Any
 
 from llm.providers.shopify.shopify_config import get_openai_provider
@@ -32,12 +33,17 @@ except ImportError:
 
 class ShopifyAgent:
 
-    def __init__(self):
+    def __init__(self, shop_url: str = None, storefront_token: str = None, admin_token: str = None, cart_id: str = None, system_prompt: str = None):
         self.provider = get_openai_provider()
-        self.mcp = ShopifyMCPClient()
+        self.mcp = ShopifyMCPClient(
+            shop_url=shop_url,
+            storefront_token=storefront_token,
+            admin_token=admin_token,
+            cart_id=cart_id
+        )
         self.conversation: List[Dict[str, Any]] = []
-        self.cart_id = None
-        self.system_prompt = None
+        self.cart_id = cart_id
+        self.system_prompt = system_prompt
 
     async def run(self, query: str = None, chat_history: List[Dict] = None, context: Dict = None, **kwargs):
         """Orchestrator interface compatibility."""
@@ -80,6 +86,9 @@ class ShopifyAgent:
                        self.conversation.append({"role": "user", "content": content})
                   elif role == "assistant":
                        self.conversation.append({"role": "assistant", "content": content})
+                  elif role == "tool":
+                       name = msg.name if hasattr(msg, "name") else msg.get("name")
+                       self.conversation.append({"role": "tool", "name": name, "content": content})
 
 
         # Add the current user query if it's not already the last message
@@ -150,9 +159,11 @@ class ShopifyAgent:
                 # Auto-inject cartId if missing
                 if self.cart_id and isinstance(tool_input, dict):
                     if "cartId" not in tool_input or not tool_input["cartId"]:  # ✅ Inject if missing OR empty
-                        tool_input["cartId"] = self.cart_id
+                        # Clean cart_id if it has leading Junk (from some older logs)
+                        clean_id = self.cart_id.lstrip("/")
+                        tool_input["cartId"] = clean_id
                         if not headless:
-                            print(f"🔧 Injected Cart ID: {self.cart_id}")
+                            print(f"🔧 Injected Cart ID: {clean_id}")
                         else:
                             print(f"🔧 [Headless] Injected Cart ID: {self.cart_id}")
 
@@ -275,8 +286,12 @@ class ShopifyAgent:
     def _system_prompt(self) -> str:
         tools_list = "\n".join([f"- {tool}" for tool in AVAILABLE_TOOLS])
 
+        base_prompt = self.system_prompt or "You are a Shopify store shopping assistant."
+
         return f"""
-    You are a Shopify store shopping assistant.
+    {base_prompt}
+    
+    Current Cart ID: {self.cart_id or "None"}
     
     ⚠️ MANDATORY TOOL USAGE - READ THIS FIRST ⚠️
     You MUST call the appropriate tool BEFORE responding in these situations:
@@ -343,52 +358,83 @@ class ShopifyAgent:
 
 
     def _parse_tool_call(self, message: str):
+        """
+        Extract and parse tool call JSON from LLM response.
+        Handles direct JSON, markdown blocks, and embedded JSON (including nested).
+        """
+        # 1. Try parsing the whole message as JSON
+        clean_msg = message.strip()
         try:
-            # First try parsing the whole message as JSON
-            parsed = json.loads(message)
+            parsed = json.loads(clean_msg)
             if "tool_name" in parsed and "tool_input" in parsed:
                 return parsed
         except json.JSONDecodeError:
             pass
 
-        import re
-        try:
-            match = re.search(r"```json\s*({.*?})\s*```", message, re.DOTALL)
-            if match:
+        # 2. Try finding JSON in markdown blocks
+        # First try non-greedy for simple blocks
+        match = re.search(r"```json\s*({.*?})\s*```", message, re.DOTALL)
+        if match:
+            try:
                 parsed = json.loads(match.group(1))
                 if "tool_name" in parsed and "tool_input" in parsed:
                     return parsed
+            except json.JSONDecodeError:
+                # If non-greedy failed, it might be nested. Try greedy within the block.
+                block_match = re.search(r"```json\s*({.*})\s*```", message, re.DOTALL)
+                if block_match:
+                    try:
+                        parsed = json.loads(block_match.group(1))
+                        if "tool_name" in parsed and "tool_input" in parsed:
+                            return parsed
+                    except json.JSONDecodeError:
+                        pass
 
-            match = re.search(r"({.*})", message, re.DOTALL)
-            if match:
-                parsed = json.loads(match.group(1))
-                if "tool_name" in parsed and "tool_input" in parsed:
-                    return parsed
-        except:
-            return None
-        return None
+        # 3. Try finding any JSON-like structure
+        # Find all starts of JSON objects
+        for start_match in re.finditer(r"{", message):
+            start_pos = start_match.start()
+            # Find all ends of JSON objects from the end of the string
+            for end_match in re.finditer(r"}", message[start_pos:]):
+                end_pos = start_pos + end_match.end()
+                try:
+                    candidate = message[start_pos:end_pos]
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict) and "tool_name" in parsed and "tool_input" in parsed:
+                        return parsed
+                except json.JSONDecodeError:
+                    continue
+
         return None
 
     def _capture_state(self, tool_name: str, result: dict):
-        if tool_name == "create_cart_tool":
+        """Monitor tool results to capture and persist state like Cart IDs."""
+        if not isinstance(result, dict):
+            return
+
+        # List of tools that return a cart object (Storefront API)
+        cart_tools = [
+            "create_cart_tool",
+            "add_to_cart_tool",
+            "get_cart_tool",
+            "remove_from_cart_tool",
+            "update_cart_quantity_tool"
+        ]
+
+        if tool_name in cart_tools:
             try:
-                cart_id = result["id"]
-                self.cart_id = cart_id
-                print(f"🛒 Stored Cart ID → {self.cart_id}")
+                # Storefront API cart objects have an 'id' and 'checkoutUrl'
+                if result.get("id"):
+                    # Clean the ID (strip leading slashes or formatting junk)
+                    self.cart_id = result["id"].lstrip("/")
+                    print(f"🛒 Syncing Cart ID → {self.cart_id}")
+                
                 if result.get("checkoutUrl"):
-                    print(f"🔗 Checkout → {result['checkoutUrl']}")
+                    # Optional: log for visibility but usually we want to keep it in the session
+                    # print(f"🔗 Checkout URL available")
+                    pass
             except Exception as e:
-                print(f"Failed to capture cart ID: {e}")
-
-        # Also capture cart ID from add_to_cart responses
-        if tool_name == "add_to_cart_tool" and isinstance(result, dict):
-            if result.get("id"):
-                self.cart_id = result["id"]
-                print(f"🛒 Updated Cart ID → {self.cart_id}")
-            if result.get("checkoutUrl"):
-                print(f"🔗 Checkout → {result['checkoutUrl']}")
+                print(f"Failed to capture cart state from {tool_name}: {e}")
 
 
 
-# if __name__ == "__main__":
-#     asyncio.run(ShopifyAgent().chat())
