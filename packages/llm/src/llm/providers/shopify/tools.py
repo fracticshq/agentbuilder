@@ -1,9 +1,7 @@
 """
 Shopify Tools - Wrapper for ShopifyMCPClient to be used by the Orchestrator.
 """
-from typing import Dict, Any, Type
-from pydantic import BaseModel, Field
-
+from typing import Dict, Any, List, Optional
 from tools.types import BaseTool, ToolResult
 from llm.providers.shopify.shopify_mcp_client import ShopifyMCPClient
 
@@ -64,7 +62,7 @@ class AddToCartTool(BaseTool):
     parameters_schema = {
         "type": "object",
         "properties": {
-            "cartId": {"type": "string", "description": "The ID of the cart (optional, will use existing or create new)"},
+            "cartId": {"type": "string", "description": "The ID of the cart (optional)"},
             "merchandiseId": {"type": "string", "description": "The variant ID of the product to add"},
             "quantity": {"type": "integer", "description": "Quantity to add (default 1)"}
         },
@@ -74,30 +72,22 @@ class AddToCartTool(BaseTool):
     def __init__(self, client: ShopifyMCPClient):
         self.client = client
 
-    async def run(self, merchandiseId: str, cartId: str = None, quantity: int = 1) -> ToolResult:
+    async def run(self, merchandiseId: str, cartId: Optional[str] = None, quantity: int = 1) -> ToolResult:
         try:
-            # 1. Use existing cart if provided, else use client's current cart
             target_cart_id = cartId or self.client.cart_id
-            
-            # 2. If still no cart, create one
             if not target_cart_id:
-                print("🛒 Auto-creating cart for AddToCart...")
                 new_cart = await self.client.create_cart()
                 target_cart_id = new_cart["id"]
                 self.client.cart_id = target_cart_id
             
-            # 3. Add item
             cart = await self.client.add_to_cart(target_cart_id, merchandiseId, quantity)
-            
-            # 4. Ensure client state is updated
             self.client.cart_id = cart["id"]
             
             return ToolResult(
                 success=True, 
                 data=cart,
                 metadata={
-                    "cart_updated": True, 
-                    "cart_id": cart["id"],  # Important for persistence
+                    "cart_id": cart["id"],
                     "checkout_url": cart.get("checkoutUrl"),
                     "lines": cart.get("lines", {}).get("edges", [])
                 }
@@ -108,7 +98,7 @@ class AddToCartTool(BaseTool):
 
 class GetCartTool(BaseTool):
     name = "get_cart_tool"
-    description = "Get the current contents of the cart."
+    description = "Get the current contents of the cart including line item IDs."
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -120,7 +110,7 @@ class GetCartTool(BaseTool):
     def __init__(self, client: ShopifyMCPClient):
         self.client = client
 
-    async def run(self, cartId: str = None) -> ToolResult:
+    async def run(self, cartId: Optional[str] = None) -> ToolResult:
         try:
             target_cart_id = cartId or self.client.cart_id
             if not target_cart_id:
@@ -139,6 +129,77 @@ class GetCartTool(BaseTool):
             return ToolResult(success=False, data=None, error=str(e))
 
 
+class RemoveFromCartTool(BaseTool):
+    name = "remove_from_cart_tool"
+    description = "Remove items from the cart using their line IDs."
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "cartId": {"type": "string", "description": "The ID of the cart"},
+            "lineIds": {"type": "array", "items": {"type": "string"}, "description": "List of line item IDs to remove"}
+        },
+        "required": ["cartId", "lineIds"]
+    }
+
+    def __init__(self, client: ShopifyMCPClient):
+        self.client = client
+
+    async def run(self, cartId: str, lineIds: List[str]) -> ToolResult:
+        try:
+            cart = await self.client.remove_from_cart(cartId, lineIds)
+            return ToolResult(
+                success=True, 
+                data=cart,
+                metadata={"cart_id": cart["id"], "checkout_url": cart.get("checkoutUrl")}
+            )
+        except Exception as e:
+            return ToolResult(success=False, data=None, error=str(e))
+
+
+class UpdateCartQuantityTool(BaseTool):
+    name = "update_cart_quantity_tool"
+    description = "Update the quantity of a line item in the cart."
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "cartId": {"type": "string", "description": "The ID of the cart"},
+            "lineId": {"type": "string", "description": "The ID of the line item"},
+            "quantity": {"type": "integer", "description": "New quantity (0 to remove)"}
+        },
+        "required": ["cartId", "lineId", "quantity"]
+    }
+
+    def __init__(self, client: ShopifyMCPClient):
+        self.client = client
+
+    async def run(self, cartId: str, lineId: str, quantity: int) -> ToolResult:
+        try:
+            cart = await self.client.update_cart_quantity(cartId, lineId, quantity)
+            return ToolResult(
+                success=True, 
+                data=cart,
+                metadata={"cart_id": cart["id"], "checkout_url": cart.get("checkoutUrl")}
+            )
+        except Exception as e:
+            return ToolResult(success=False, data=None, error=str(e))
+
+
+class GetShopInfoTool(BaseTool):
+    name = "get_shop_info_tool"
+    description = "Get status and information about the Shopify store."
+    parameters_schema = {"type": "object", "properties": {}, "required": []}
+
+    def __init__(self, client: ShopifyMCPClient):
+        self.client = client
+
+    async def run(self) -> ToolResult:
+        try:
+            info = await self.client.get_shop_info()
+            return ToolResult(success=True, data=info)
+        except Exception as e:
+            return ToolResult(success=False, data=None, error=str(e))
+
+
 class ShopifyToolSet:
     """Registry of all Shopify tools."""
     
@@ -148,7 +209,10 @@ class ShopifyToolSet:
             SearchProductsTool(client),
             CreateCartTool(client),
             AddToCartTool(client),
-            GetCartTool(client)
+            GetCartTool(client),
+            RemoveFromCartTool(client),
+            UpdateCartQuantityTool(client),
+            GetShopInfoTool(client)
         ]
 
     def get_tools(self):
