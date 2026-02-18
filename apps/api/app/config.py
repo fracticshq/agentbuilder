@@ -170,7 +170,7 @@ class Settings(BaseSettings):
     SHOPIFY_ADMIN_ACCESS_TOKEN: Optional[str] = None
     SHOPIFY_SHOP_URL: Optional[str] = None
     SHOPIFY_MCP_ENABLED: bool = False
-    SHOPIFY_API_VERSION: str = "2026-10"
+    SHOPIFY_API_VERSION: str = "2026-01"
 
     # Note: AKV secrets are preloaded into os.environ at module load time
     # See _preload_akv_secrets() function above
