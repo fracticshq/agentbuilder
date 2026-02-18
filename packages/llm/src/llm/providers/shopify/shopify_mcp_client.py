@@ -6,31 +6,35 @@ import os
 import json
 import httpx
 from dotenv import load_dotenv
+import structlog
 
 # Load .env from agentbuilder root
 _root_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../../.env"))
 load_dotenv(_root_env)
 
 
+logger = structlog.get_logger(__name__)
+
 class ShopifyMCPClient:
     """Direct Shopify Storefront and Admin API client."""
 
-    def __init__(self, shop_url: str = None, storefront_token: str = None, admin_token: str = None, cart_id: str = None):
+    def __init__(self, shop_url: str = None, storefront_token: str = None, admin_token: str = None, cart_id: str = None, api_version: str = None):
         self.shop_url = shop_url or os.getenv("SHOPIFY_SHOP_URL")
         self.storefront_token = storefront_token or os.getenv("SHOPIFY_STOREFRONT_ACCESS_TOKEN")
         self.admin_token = admin_token or os.getenv("SHOPIFY_ADMIN_ACCESS_TOKEN")
+        self.api_version = api_version or os.getenv("SHOPIFY_API_VERSION")
 
 
         if not self.shop_url or not self.storefront_token:
             raise ValueError("Missing SHOPIFY_SHOP_URL or storefront_token")
 
-        self.storefront_endpoint = f"https://{self.shop_url}/api/2026-01/graphql.json"
+        self.storefront_endpoint = f"https://{self.shop_url}/api/{self.api_version}/graphql.json"
         self.storefront_headers = {
             "Content-Type": "application/json",
             "X-Shopify-Storefront-Access-Token": self.storefront_token,
         }
         if self.admin_token:
-            self.admin_endpoint = f"https://{self.shop_url}/admin/api/2026-01"
+            self.admin_endpoint = f"https://{self.shop_url}/admin/api/{self.api_version}"
             self.admin_headers = {
                 "Content-Type": "application/json",
                 "X-Shopify-Access-Token": self.admin_token
@@ -126,7 +130,7 @@ class ShopifyMCPClient:
         cart = data["data"]["cartCreate"]["cart"]
         # Show checkout URL so user can see cart on web
         if cart.get("checkoutUrl"):
-            print(f"\n🔗 Checkout URL → {cart['checkoutUrl']}")
+            logger.info("checkout_url_available", url=cart['checkoutUrl'])
         return cart
 
     async def add_to_cart(self, cart_id: str, variant_id: str, quantity: int = 1) -> dict:
@@ -170,7 +174,7 @@ class ShopifyMCPClient:
         cart = result["cart"]
         # Show checkout URL after adding items
         if cart.get("checkoutUrl"):
-            print(f"\n🔗 Checkout URL → {cart['checkoutUrl']}")
+            logger.info("checkout_url_available", url=cart['checkoutUrl'])
         return cart
 
     async def remove_from_cart(self, cart_id: str, line_ids: list) -> dict:
