@@ -22,7 +22,7 @@ async def verify_shopify_connection(request: ShopifyVerifyRequest):
     """
     try:
         # Sanitize shop_url: remove protocol and trailing slash
-        clean_shop_url = request.shop_url.strip()
+        clean_shop_url = request.shop_url.strip().lower()
         if clean_shop_url.startswith("https://"):
             clean_shop_url = clean_shop_url[8:]
         elif clean_shop_url.startswith("http://"):
@@ -30,6 +30,26 @@ async def verify_shopify_connection(request: ShopifyVerifyRequest):
         
         if clean_shop_url.endswith("/"):
             clean_shop_url = clean_shop_url[:-1]
+            
+        # Strict validation: MUST be a .myshopify.com domain
+        if not clean_shop_url.endswith(".myshopify.com"):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Shop URL. Must be a '.myshopify.com' domain (e.g., your-store.myshopify.com)."
+            )
+
+        # Basic token validation (Shopify tokens are typically long strings)
+        if len(request.storefront_token) < 20:
+             raise HTTPException(
+                status_code=400,
+                detail="Invalid Storefront Access Token. Token is too short."
+            )
+        
+        if request.admin_token and len(request.admin_token) < 20:
+             raise HTTPException(
+                status_code=400,
+                detail="Invalid Admin Access Token. Token is too short."
+            )
             
         logger.info("verifying_shopify_credentials", shop_url=clean_shop_url)
         

@@ -37,10 +37,35 @@ export default function StepShopify({ data, onChange }: StepShopifyProps) {
         }
     };
 
+    const isValidUrl = (url: string) => {
+        const trimmed = url.trim().toLowerCase();
+        // Basic check: must end with .myshopify.com and have something before it
+        return trimmed.endsWith('.myshopify.com') && trimmed.length > '.myshopify.com'.length;
+    };
+
     const handleVerify = async () => {
-        if (!shopify_config.shop_url || !shopify_config.storefront_token) {
+        const cleanUrl = shopify_config.shop_url.trim();
+        if (!cleanUrl || !shopify_config.storefront_token) {
             setVerificationStatus('error');
             setVerificationMessage('Please enter Shop URL and Storefront Access Token');
+            return;
+        }
+
+        if (!isValidUrl(cleanUrl)) {
+            setVerificationStatus('error');
+            setVerificationMessage('Invalid Shop URL. Must be a ".myshopify.com" domain (e.g., your-store.myshopify.com).');
+            return;
+        }
+
+        if (shopify_config.storefront_token.length < 20) {
+            setVerificationStatus('error');
+            setVerificationMessage('Storefront Access Token is too short (minimum 20 characters).');
+            return;
+        }
+
+        if (shopify_config.admin_token && shopify_config.admin_token.length < 20) {
+            setVerificationStatus('error');
+            setVerificationMessage('Admin Access Token is too short (minimum 20 characters).');
             return;
         }
 
@@ -50,7 +75,7 @@ export default function StepShopify({ data, onChange }: StepShopifyProps) {
 
         try {
             const result = await shopifyApi.verify({
-                shop_url: shopify_config.shop_url,
+                shop_url: cleanUrl,
                 storefront_token: shopify_config.storefront_token,
                 admin_token: shopify_config.admin_token || undefined
             });
