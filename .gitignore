@@ -268,7 +268,7 @@ apps/widget/vite.config.ts.timestamp-1771400600320-2b3833b5e1751.mjs
 apps/widget/vite.config.ts.timestamp-1771485880417-4394a6ab7ed9f.mjs
 
 #to ignore Vite temporary config files
-vite.config.*.timestamp-*
+apps/widget/vite.config.ts.timestamp-*
 
 
 # Gatsby files
