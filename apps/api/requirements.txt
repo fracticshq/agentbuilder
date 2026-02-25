@@ -35,3 +35,6 @@ aiofiles>=23.2.1
 
 # Model Context Protocol (MCP) for external tool integrations
 mcp>=1.0.0
+
+httpx
+respx
