@@ -171,6 +171,10 @@ class Settings(BaseSettings):
     SHOPIFY_SHOP_URL: Optional[str] = None
     SHOPIFY_MCP_ENABLED: bool = False
     SHOPIFY_API_VERSION: str = "2026-01"
+    
+    # Phase 7: Strapi Logging
+    STRAPI_LOG_URL: str = "http://localhost:1337"
+    STRAPI_API_TOKEN: Optional[str] = None
 
     # Note: AKV secrets are preloaded into os.environ at module load time
     # See _preload_akv_secrets() function above
