@@ -38,6 +38,7 @@ from llm.providers.shopify.shopify_orchestrator import ShopifyAgent
 from ..config import Settings
 from ..connections import connection_manager
 from .response_validator import ResponseValidator  # Phase 4
+from .strapi_service import StrapiService # Strapi Logging Service
 
 logger = structlog.get_logger(__name__)
 
@@ -73,6 +74,9 @@ class MessageService:
         self.procedural: Optional[ProceduralMemory] = None
         self.resource: Optional[ResourceMemory] = None
         self._memory_initialized = False
+        
+        # Phase 7: Strapi Logging
+        self.strapi_service = StrapiService(settings=settings)
         
         logger.info(
             "memory_system_initialized",
@@ -240,6 +244,14 @@ class MessageService:
         except Exception as e:
             logger.warning("failed_to_retrieve_cart_id", error=str(e))
             return None
+
+    async def _log_strapi_message(self, conversation_id: str, message_content: str, role: str):
+        """Ensure session exists before logging message to Strapi."""
+        try:
+            await self.strapi_service.log_session(conversation_id)
+            await self.strapi_service.log_message(conversation_id, message_content, role)
+        except Exception as e:
+            logger.warning("strapi_logging_failed", error=str(e))
     
     async def _load_agent_config(self, agent_id: str, conversation_id: str = None):
         """Load agent configuration from system database."""
@@ -379,6 +391,9 @@ class MessageService:
                 }
             )
             
+            # Fire-and-forget Strapi logs
+            asyncio.create_task(self._log_strapi_message(conversation_id, request.message, "user"))
+            
             # 2. Check for safety rules
             escalations = []
             if self.memory_config.ENABLE_GRAPH_RULES:
@@ -416,6 +431,9 @@ class MessageService:
                 }
             )
             print(f"🛒 [MessageService] Saved Cart ID: {agent_result.metadata.get('cart_id')}")
+            
+            # Fire-and-forget Strapi log for agent
+            asyncio.create_task(self.strapi_service.log_message(conversation_id, response_text, "agent"))
             
             # 6. Extract Facts & Auto-Summary (Async)
             if self.memory_config.ENABLE_FACT_EXTRACTION:
@@ -479,6 +497,9 @@ class MessageService:
                     "page_context": request.page_context or {},
                 }
             )
+            
+            # Fire-and-forget Strapi logs
+            asyncio.create_task(self._log_strapi_message(conversation_id, request.message, "user"))
             
             # Phase 6: Use SOTA Orchestrator for Planning, Execution, and Critic loop
             yield StreamingMessageResponse(
@@ -547,6 +568,9 @@ class MessageService:
                     "cart_id": agent_result.metadata.get("cart_id")
                 }
             )
+            
+            # Fire-and-forget Strapi log for agent
+            asyncio.create_task(self.strapi_service.log_message(conversation_id, full_response, "agent"))
             
             # Extract episodic facts
             if self.memory_config.ENABLE_FACT_EXTRACTION:
