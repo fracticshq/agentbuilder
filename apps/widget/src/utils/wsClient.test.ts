@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WebSocketClient } from './wsClient';
 
 // MockWebSocket is installed globally in src/test/setup.ts
@@ -18,12 +18,14 @@ function lastWS(): MockWS {
 /**
  * Flush two microtask checkpoints so that:
  *   1. queueMicrotask(onopen) fires and resolves connect()'s inner Promise
- *   2. sendMessage's continuation after `await this.connect()` runs (sets onmessage + calls send)
+ *   2. sendMessage's continuation after `await this.connect()` runs (sets pending state)
  */
 const flushMicrotasks = async () => {
   await Promise.resolve();
   await Promise.resolve();
 };
+
+// ─── Existing tests ────────────────────────────────────────────────────────
 
 describe('WebSocketClient', () => {
   describe('URL conversion', () => {
@@ -34,6 +36,7 @@ describe('WebSocketClient', () => {
       expect(lastWS().url).toBe('ws://localhost:8000/api/v1/messages/ws');
       lastWS().simulateMessage({ type: 'metadata', content: '', conversation_id: 'c1' });
       await p;
+      client.disconnect();
     });
 
     it('converts https:// baseUrl to wss://', async () => {
@@ -43,6 +46,7 @@ describe('WebSocketClient', () => {
       expect(lastWS().url).toBe('wss://example.com/api/v1/messages/ws');
       lastWS().simulateMessage({ type: 'metadata', content: '', conversation_id: 'c1' });
       await p;
+      client.disconnect();
     });
   });
 
@@ -52,6 +56,7 @@ describe('WebSocketClient', () => {
     beforeEach(() => {
       client = new WebSocketClient('http://localhost:8000');
     });
+    afterEach(() => client.disconnect());
 
     it('opens a WebSocket connection on first call', async () => {
       const p = client.sendMessage({ content: 'hello' });
@@ -160,21 +165,20 @@ describe('WebSocketClient', () => {
     it('reuses the same WebSocket instance for a second sendMessage() call', async () => {
       const client = new WebSocketClient('http://localhost:8000');
 
-      // First call
       const p1 = client.sendMessage({ content: 'first' });
       await flushMicrotasks();
       const ws1 = lastWS();
       ws1.simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
       await p1;
 
-      // Second call — should reuse ws1 (readyState is still OPEN=1)
       const p2 = client.sendMessage({ content: 'second' });
-      // No new connect() await needed since ws is OPEN; onmessage set synchronously
       await flushMicrotasks();
       const ws2 = lastWS();
       expect(ws2).toBe(ws1);
       ws1.simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
       await p2;
+
+      client.disconnect();
     });
   });
 
@@ -182,21 +186,135 @@ describe('WebSocketClient', () => {
     it('opens a new connection if previous was closed before sendMessage()', async () => {
       const client = new WebSocketClient('http://localhost:8000');
 
-      // First call + close
       const p1 = client.sendMessage({ content: 'first' });
       await flushMicrotasks();
       const ws1 = lastWS();
       ws1.simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
       await p1;
-      ws1.simulateClose(); // marks readyState = 3 (CLOSED)
+      ws1.simulateClose();
 
-      // Second call — must open a fresh connection
       const p2 = client.sendMessage({ content: 'second' });
       await flushMicrotasks();
       const ws2 = lastWS();
       expect(ws2).not.toBe(ws1);
       ws2.simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
       await p2;
+
+      client.disconnect();
+    });
+  });
+
+  // ─── Heartbeat ───────────────────────────────────────────────────────────
+
+  describe('heartbeat', () => {
+    let client: WebSocketClient;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      client = new WebSocketClient('http://localhost:8000', {
+        heartbeatInterval: 1_000,
+        pongTimeout: 500,
+      });
+    });
+    afterEach(() => {
+      client.disconnect();
+      vi.useRealTimers();
+    });
+
+    it('sends ping after heartbeat interval', async () => {
+      const p = client.sendMessage({ content: 'hi' });
+      await flushMicrotasks();
+      const ws = lastWS();
+      ws.simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
+      await p;
+
+      ws.send.mockClear();
+      vi.advanceTimersByTime(1_000);
+      expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'ping' }));
+    });
+
+    it('does not close connection when pong is received within timeout', async () => {
+      const p = client.sendMessage({ content: 'hi' });
+      await flushMicrotasks();
+      const ws = lastWS();
+      ws.simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
+      await p;
+
+      vi.advanceTimersByTime(1_000);   // heartbeat fires → ping sent, pong timeout starts
+      ws.simulateMessage({ type: 'pong' }); // pong clears the timeout
+      vi.advanceTimersByTime(500);     // pong timeout would have fired — but it's cancelled
+      expect(ws.close).not.toHaveBeenCalled();
+    });
+
+    it('closes connection when pong is not received within timeout', async () => {
+      const p = client.sendMessage({ content: 'hi' });
+      await flushMicrotasks();
+      const ws = lastWS();
+      ws.simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
+      await p;
+
+      vi.advanceTimersByTime(1_000);  // heartbeat fires → ping sent
+      // no pong
+      vi.advanceTimersByTime(500);   // pong timeout fires → close
+      expect(ws.close).toHaveBeenCalled();
+    });
+  });
+
+  // ─── Auto-reconnect ──────────────────────────────────────────────────────
+
+  describe('auto-reconnect', () => {
+    let client: WebSocketClient;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      client = new WebSocketClient('http://localhost:8000', {
+        reconnectBaseDelay: 100,
+        heartbeatInterval: 60_000, // keep heartbeat out of the way
+      });
+    });
+    afterEach(() => {
+      client.disconnect();
+      vi.useRealTimers();
+    });
+
+    it('auto-reconnects after unexpected close', async () => {
+      const p = client.sendMessage({ content: 'hi' });
+      await flushMicrotasks();
+      const ws1 = lastWS();
+      ws1.simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
+      await p;
+
+      ws1.simulateClose();           // triggers scheduleReconnect (100ms delay)
+      vi.advanceTimersByTime(100);   // fires the reconnect timeout → new WebSocket created
+      await flushMicrotasks();       // drains queueMicrotask(onopen)
+
+      expect(lastWS()).not.toBe(ws1);
+    });
+
+    it('does not auto-reconnect after intentional disconnect()', async () => {
+      const p = client.sendMessage({ content: 'hi' });
+      await flushMicrotasks();
+      const ws1 = lastWS();
+      ws1.simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
+      await p;
+
+      client.disconnect();           // intentional — should NOT reconnect
+      vi.advanceTimersByTime(1_000);
+      await flushMicrotasks();
+
+      expect(lastWS()).toBe(ws1);    // no new WS created
+    });
+
+    it('rejects a pending stream promise when connection drops mid-stream', async () => {
+      const p = client.sendMessage({ content: 'hi' });
+      await flushMicrotasks();
+      const ws1 = lastWS();
+
+      // Partial stream content received, then connection drops
+      ws1.simulateMessage({ type: 'content', content: 'partial...', conversation_id: 'c' });
+      ws1.simulateClose();
+
+      await expect(p).rejects.toThrow('WebSocket connection closed');
     });
   });
 });

@@ -76,6 +76,10 @@ async def websocket_endpoint(
             data = await websocket.receive_text()
             try:
                 request_data = json.loads(data)
+                # Heartbeat ping — respond immediately and wait for next message
+                if request_data.get("type") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+                    continue
                 request = MessageRequest(**request_data)
             except (json.JSONDecodeError, ValueError) as e:
                 await websocket.send_text(json.dumps({
