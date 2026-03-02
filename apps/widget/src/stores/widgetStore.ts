@@ -1,12 +1,14 @@
 import { create } from 'zustand';
-import type { WidgetState, Message, WidgetConfig } from '../types';
+import type { WidgetState, Message, WidgetConfig, BrandTheme } from '../types';
 
 interface WidgetStore extends WidgetState {
   config: WidgetConfig | null;
   isExpanded: boolean;
-  
+  brandTheme: BrandTheme | null;
+
   // Actions
   setConfig: (config: WidgetConfig) => void;
+  setBrandTheme: (theme: BrandTheme) => void;
   toggleWidget: () => void;
   setOpen: (isOpen: boolean) => void;
   setIsOpen: (isOpen: boolean) => void;
@@ -37,6 +39,9 @@ export const useWidgetStore = create<WidgetStore>((set, get) => ({
   ...initialState,
   config: null,
   isExpanded: false,
+  brandTheme: null,
+
+  setBrandTheme: (theme: BrandTheme) => set({ brandTheme: theme }),
 
   setConfig: (config: WidgetConfig) => {
     set({ config });

@@ -1,8 +1,60 @@
+export type BrandMode = 'dark' | 'light';
+
+/** Resolved theme tokens used throughout the widget */
+export interface BrandThemeTokens {
+  mode: BrandMode;
+  panelBg: string;
+  sceneBorder: string;
+  sceneShad: string;
+  bubbleBg: string;
+  bubbleBorder: string;
+  bubbleShad: string;
+  bubbleRing: string;
+  orbBg: string;
+  titleColor: string;
+  subtitleColor: string;
+  accentColor: string;       // the primary brand accent (button fill, chip border, etc.)
+  chipBg: string;
+  chipBorder: string;
+  chipColor: string;
+  inputBg: string;
+  inputBorder: string;
+  inputColor: string;
+  dividerColor: string;
+  voiceBg: string;
+  voiceBorder: string;
+  voiceIconColor: string;
+  sendBg: string;
+  sendShad: string;
+  // User message bubble (uses accent)
+  userMsgBg: string;
+  userMsgColor: string;
+  // Assistant message bubble
+  assistantMsgBg: string;
+  assistantMsgColor: string;
+}
+
+/** Brand identity pulled from admin Brand.colors */
+export interface BrandTheme {
+  brandName: string;
+  primaryColor: string;
+  mode: BrandMode;
+  hideNovaLogo: boolean;
+  chatLogoDarkUrl?: string;
+  chatLogoLightUrl?: string;
+  heroTitle?: string;
+  heroSubtitle?: string;
+  suggestionChips: string[];
+  cyclingCategories?: string[];
+  darkBgGradient?: string;
+  lightBgGradient?: string;
+  tokens: BrandThemeTokens;
+}
+
 export interface WidgetConfig {
   apiUrl: string;
   userId: string;
-  agentId?: string;  // Agent ID for custom agent configuration
-  theme?: 'light' | 'dark';
+  agentId?: string;
   position?: 'bottom-right' | 'bottom-left' | 'sidebar';
   pageContext?: {
     extractContent?: boolean;
@@ -10,11 +62,6 @@ export interface WidgetConfig {
   };
   autoOpen?: boolean;
   greeting?: string;
-  branding?: {
-    primaryColor?: string;
-    logo?: string;
-    title?: string;
-  };
 }
 
 export interface Message {

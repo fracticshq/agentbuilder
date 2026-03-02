@@ -6,6 +6,10 @@ import { DealerCard } from './DealerCard';
 
 interface MessageBubbleProps {
   message: Message;
+  userMsgBg?: string;
+  userMsgColor?: string;
+  assistantMsgBg?: string;
+  assistantMsgColor?: string;
 }
 
 interface Product {
@@ -79,7 +83,13 @@ const fetchProductDetails = async (skus: string[], agentId: string): Promise<Pro
   }
 };
 
-export const MessageBubble: React.FC<MessageBubbleProps> = ({ message }) => {
+export const MessageBubble: React.FC<MessageBubbleProps> = ({
+  message,
+  userMsgBg = '#2563eb',
+  userMsgColor = '#ffffff',
+  assistantMsgBg = '#f3f4f6',
+  assistantMsgColor = '#111827',
+}) => {
   const isUser = message.role === 'user';
   const [extractedProducts, setExtractedProducts] = useState<Product[]>([]);
   
@@ -149,7 +159,13 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message }) => {
   
   return (
     <div className={`message-bubble ${isUser ? 'user' : 'assistant'}`}>
-      <div className={`message-content ${isUser ? 'user-message' : 'assistant-message'}`}>
+      <div
+        className={`message-content ${isUser ? 'user-message' : 'assistant-message'}`}
+        style={isUser
+          ? { background: userMsgBg, color: userMsgColor }
+          : { background: assistantMsgBg, color: assistantMsgColor }
+        }
+      >
         {isUser ? (
           <p className="message-text">{message.content}</p>
         ) : (

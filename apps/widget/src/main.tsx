@@ -9,7 +9,6 @@ const defaultConfig: WidgetConfig = {
   apiUrl: 'http://localhost:8000',
   userId: 'anonymous',
   // agentId is auto-fetched from API if not specified
-  theme: 'light',
   position: 'bottom-right',
   autoOpen: false,
 }
