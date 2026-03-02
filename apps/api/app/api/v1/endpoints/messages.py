@@ -87,7 +87,7 @@ async def websocket_endpoint(
             # Process message and stream response
             try:
                 async for chunk in message_service.stream_message(request):
-                    await websocket.send_text(json.dumps(chunk.dict()))
+                    await websocket.send_text(chunk.model_dump_json())
             except Exception as e:
                 logger.error("Error processing WebSocket message", error=str(e))
                 await websocket.send_text(json.dumps({
