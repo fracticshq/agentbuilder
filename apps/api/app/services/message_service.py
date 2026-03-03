@@ -39,6 +39,7 @@ from ..config import Settings
 from ..connections import connection_manager
 from .response_validator import ResponseValidator  # Phase 4
 from .strapi_service import StrapiService # Strapi Logging Service
+from ..websocket_manager import ws_manager
 
 logger = structlog.get_logger(__name__)
 
@@ -393,6 +394,24 @@ class MessageService:
             
             # Fire-and-forget Strapi logs
             asyncio.create_task(self._log_strapi_message(conversation_id, request.message, "user"))
+
+            if ws_manager.is_human_in_control(conversation_id):
+                logger.info("human_agent_in_control", conversation_id=conversation_id)
+                
+                # Broadcast user message to admin
+                await ws_manager.send_to_admin(conversation_id, {
+                    "type": "user_message",
+                    "content": request.message,
+                    "role": "user"
+                })
+                
+                return MessageResponse(
+                    message="",  # No AI message generated
+                    conversation_id=conversation_id,
+                    citations=[],
+                    context_used=0,
+                )
+
             
             # 2. Check for safety rules
             escalations = []
@@ -500,6 +519,25 @@ class MessageService:
             
             # Fire-and-forget Strapi logs
             asyncio.create_task(self._log_strapi_message(conversation_id, request.message, "user"))
+            
+            # Check if human agent is in control
+            if ws_manager.is_human_in_control(conversation_id):
+                logger.info("human_agent_in_control", conversation_id=conversation_id)
+                
+                # Broadcast user message to admin
+                await ws_manager.send_to_admin(conversation_id, {
+                    "type": "user_message",
+                    "content": request.message,
+                    "role": "user"
+                })
+                
+                yield StreamingMessageResponse(
+                    type="status",
+                    content="A human agent is currently responding...",
+                    conversation_id=conversation_id
+                )
+                return
+
             
             # Phase 6: Use SOTA Orchestrator for Planning, Execution, and Critic loop
             yield StreamingMessageResponse(
