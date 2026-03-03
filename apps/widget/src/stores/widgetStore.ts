@@ -4,7 +4,7 @@ import type { WidgetState, Message, WidgetConfig } from '../types';
 interface WidgetStore extends WidgetState {
   config: WidgetConfig | null;
   isExpanded: boolean;
-  
+
   // Actions
   setConfig: (config: WidgetConfig) => void;
   toggleWidget: () => void;
@@ -40,12 +40,12 @@ export const useWidgetStore = create<WidgetStore>((set, get) => ({
 
   setConfig: (config: WidgetConfig) => {
     set({ config });
-    
+
     // Auto-open if configured
     if (config.autoOpen) {
       set({ isOpen: true });
     }
-    
+
     // Add greeting message if configured
     if (config.greeting) {
       const greetingMessage: Message = {
@@ -59,52 +59,52 @@ export const useWidgetStore = create<WidgetStore>((set, get) => ({
   },
 
   toggleWidget: () => set((state) => ({ isOpen: !state.isOpen })),
-  
+
   setOpen: (isOpen: boolean) => set({ isOpen }),
-  
+
   setIsOpen: (isOpen: boolean) => set({ isOpen }),
-  
+
   setConnected: (isConnected: boolean) => set({ isConnected }),
-  
+
   setTyping: (isTyping: boolean) => set({ isTyping }),
-  
+
   setIsTyping: (isTyping: boolean) => set({ isTyping }),
-  
+
   addMessage: (message: Message) => set((state) => ({
     messages: [...state.messages, message]
   })),
-  
+
   updateMessage: (id: string, updates: Partial<Message>) => {
     console.log('[Store] updateMessage called:', { id, updates, currentMessages: get().messages.length });
     set((state) => {
-      const updatedMessages = state.messages.map(msg => 
+      const updatedMessages = state.messages.map(msg =>
         msg.id === id ? { ...msg, ...updates } : msg
       );
       console.log('[Store] Messages updated:', updatedMessages.find(m => m.id === id));
       return { messages: updatedMessages };
     });
   },
-  
+
   updateLastMessage: (content: string) => set((state) => {
     const messages = [...state.messages];
     const lastMessage = messages[messages.length - 1];
-    
+
     if (lastMessage && lastMessage.role === 'assistant') {
       lastMessage.content += content;
     }
-    
+
     return { messages };
   }),
-  
+
   setConversationId: (conversationId: string) => set({ conversationId }),
-  
+
   setError: (error: string | null) => set({ error: error || undefined }),
-  
+
   setExpanded: (isExpanded: boolean) => set({ isExpanded }),
-  
+
   toggleExpanded: () => set((state) => ({ isExpanded: !state.isExpanded })),
-  
+
   clearMessages: () => set({ messages: [], conversationId: undefined }),
-  
+
   reset: () => set({ ...initialState, config: get().config }),
 }));

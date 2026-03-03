@@ -58,7 +58,7 @@ export class APIClient {
     onStream: (chunk: StreamingMessage) => void
   ): Promise<Message> {
     console.log('[APIClient] Starting stream with body:', requestBody);
-    
+
     return new Promise((resolve, reject) => {
       // Use fetch API for POST streaming (EventSource doesn't support POST)
       fetch(`${this.baseUrl}/api/v1/messages/stream`, {
@@ -70,14 +70,14 @@ export class APIClient {
         body: JSON.stringify(requestBody),
       }).then(async (response) => {
         console.log('[APIClient] Stream response received:', response.status, response.statusText);
-        
+
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
-        
+
         if (!reader) {
           throw new Error('No response body');
         }
@@ -90,7 +90,7 @@ export class APIClient {
           console.log('[APIClient] Starting to read stream...');
           while (true) {
             const { done, value } = await reader.read();
-            
+
             if (done) {
               console.log('[APIClient] Stream complete');
               break;
@@ -102,7 +102,7 @@ export class APIClient {
             console.log('[APIClient] Buffer before split:', buffer.length, 'chars');
             buffer += chunk;
             console.log('[APIClient] Buffer after append:', buffer.length, 'chars');
-            
+
             // Process complete SSE messages (separated by \n\n)
             const lines = buffer.split('\n\n');
             console.log('[APIClient] Split into', lines.length, 'lines');
@@ -116,7 +116,7 @@ export class APIClient {
                 console.log('[APIClient] Skipping empty line');
                 continue;
               }
-              
+
               // SSE format is "data: <json>"
               if (!line.startsWith('data: ')) {
                 console.warn('[APIClient] Unexpected line format:', line);
@@ -125,17 +125,17 @@ export class APIClient {
 
               try {
                 const data = line.substring(6).trim(); // Remove 'data: ' prefix and trim
-                
+
                 // Skip empty data lines
                 if (!data) {
                   console.log('[APIClient] Skipping empty data');
                   continue;
                 }
-                
+
                 console.log('[APIClient] Parsing SSE data:', data);
                 const chunk: StreamingMessage = JSON.parse(data);
                 console.log('[APIClient] Parsed chunk:', chunk);
-                
+
                 if (chunk.type === 'content') {
                   fullMessage += chunk.content || '';
                   onStream(chunk);
@@ -172,7 +172,7 @@ export class APIClient {
             products: messageData.products || [],  // Phase 5: Product cards
             dealers: messageData.dealers || [],    // Phase 5: Dealer cards
           };
-          
+
           console.log('[APIClient] Resolving with final message:', finalMessage);
           resolve(finalMessage);
         } catch (error) {
@@ -199,16 +199,44 @@ export class APIClient {
   async healthCheck(): Promise<{ status: string; timestamp: string }> {
     try {
       const response = await fetch(`${this.baseUrl}/health`);
-      
+
       if (!response.ok) {
         throw new Error(`Health check failed: ${response.status}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error('Health check error:', error);
       throw this.handleError(error);
     }
+  }
+
+  connectWebSocket(
+    conversationId: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    onMessage: (data: any) => void
+  ): WebSocket {
+    const wsUrl = this.baseUrl.replace(/^http/, 'ws');
+    const ws = new WebSocket(`${wsUrl}/api/v1/messages/ws/chat/${conversationId}`);
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        onMessage(data);
+      } catch (e) {
+        console.error('[APIClient] Error parsing WebSocket message:', e);
+      }
+    };
+
+    ws.onopen = () => {
+      console.log('[APIClient] WebSocket connected for conversation:', conversationId);
+    };
+
+    ws.onclose = () => {
+      console.log('[APIClient] WebSocket disconnected');
+    };
+
+    return ws;
   }
 
   private handleError(error: unknown): APIError {
@@ -218,7 +246,7 @@ export class APIClient {
         status: 500,
       };
     }
-    
+
     return {
       message: 'An unknown error occurred',
       status: 500,

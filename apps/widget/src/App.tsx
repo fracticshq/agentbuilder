@@ -53,7 +53,7 @@ function App({ config }: AppProps) {
 
   React.useEffect(() => {
     // Priority: URL query param > config.agentId > data-agent-id attribute > fetch from API
-    
+
     // 1. Check URL query parameter (highest priority)
     const urlParams = new URLSearchParams(window.location.search);
     const urlAgentId = urlParams.get('agent_id');
@@ -119,6 +119,35 @@ function App({ config }: AppProps) {
     }
   }, [isOpen, conversationId, setConversationId]);
 
+  // Handle WebSocket connection for real-time admin messages
+  React.useEffect(() => {
+    if (!conversationId) return;
+
+    const ws = apiClient.connectWebSocket(conversationId, (data) => {
+      console.log('[App] WebSocket message received:', data);
+
+      if (data.type === 'admin_message') {
+        // Add new admin message as assistant
+        addMessage({
+          id: Date.now().toString(),
+          content: data.content,
+          role: 'assistant',
+          timestamp: new Date()
+        });
+
+        // Ensure typing indicator is cleared since a human answered
+        setIsTyping(false);
+      } else if (data.type === 'control_status') {
+        console.log('[App] Control status update:', data.is_human_in_control);
+        // Optionally update store if we want to show a UI indicator
+      }
+    });
+
+    return () => {
+      ws.close();
+    };
+  }, [conversationId, addMessage, setIsTyping]);
+
   const handleToggleWidget = () => {
     setIsOpen(!isOpen);
   };
@@ -150,20 +179,20 @@ function App({ config }: AppProps) {
     try {
       // Extract page context
       const context = extractPageContext();
-      
+
       // Use conversation ID from store (or create new one)
       const currentConvId = conversationId || `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       if (!conversationId) {
         setConversationId(currentConvId);
         sessionStorage.setItem('agent_widget_conversation_id', currentConvId);
       }
-      
+
       // Create placeholder message for streaming
       const assistantMessageId = (Date.now() + 1).toString();
       let streamedContent = '';  // Track streamed content
-      
+
       console.log('[App] Adding placeholder message:', assistantMessageId);
-      
+
       addMessage({
         id: assistantMessageId,
         content: '',
@@ -171,9 +200,9 @@ function App({ config }: AppProps) {
         timestamp: new Date(),
         citations: []
       });
-      
+
       console.log('[App] Calling sendMessage with streaming...');
-      
+
       // Send message to API with streaming enabled
       const response = await apiClient.sendMessage({
         content: text,
@@ -207,7 +236,7 @@ function App({ config }: AppProps) {
       });
     } catch (error) {
       console.error('Error sending message:', error);
-      
+
       // Add error message
       addMessage({
         id: (Date.now() + 1).toString(),
@@ -223,7 +252,7 @@ function App({ config }: AppProps) {
   return (
     <div className="widget-container">
       <WidgetButton onClick={handleToggleWidget} />
-      
+
       {isOpen && (
         <div className={`widget-overlay ${isExpanded ? 'expanded' : ''}`}>
           <ChatWindow
