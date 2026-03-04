@@ -7,6 +7,7 @@ from .services.message_service import MessageService
 from .services.ingestion_service import IngestionService
 from .services.health_service import HealthService
 from .services.knowledge_service import KnowledgeService
+from .services.activity_service import ActivityService
 from .config import Settings
 
 
@@ -38,3 +39,9 @@ def get_knowledge_service() -> KnowledgeService:
     """Get knowledge service instance."""
     settings = get_settings()
     return KnowledgeService(settings)
+
+
+def get_activity_service() -> ActivityService:
+    """Get activity service instance."""
+    settings = get_settings()
+    return ActivityService(settings)
