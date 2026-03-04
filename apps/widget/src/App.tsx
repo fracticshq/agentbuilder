@@ -7,6 +7,7 @@ import { APIClient } from './utils/apiClient';
 import { WebSocketClient } from './utils/wsClient';
 import { buildBrandTheme } from './utils/brandTheme';
 import { extractPageContext } from './utils/pageContext';
+import { trackEvent } from './utils/activityClient';
 import type { WidgetConfig } from './types';
 import './App.css';
 import './styles/responsive.css';
@@ -52,6 +53,8 @@ function App({ config }: AppProps) {
 
   const [agentId, setAgentId] = React.useState<string | null>(null);
   const [useWebSocket, setUseWebSocket] = React.useState(true);
+  // Holds the pending conversation lifecycle event type until agentId is ready.
+  const [convStartEvent, setConvStartEvent] = React.useState<'conversation_started' | 'conversation_resumed' | null>(null);
 
   // ── Resolve agent ID ──────────────────────────────────────────
   React.useEffect(() => {
@@ -113,13 +116,29 @@ function App({ config }: AppProps) {
       const stored = sessionStorage.getItem('agent_widget_conversation_id');
       if (stored) {
         setConversationId(stored);
+        setConvStartEvent('conversation_resumed');
       } else {
         const newConvId = `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         setConversationId(newConvId);
         sessionStorage.setItem('agent_widget_conversation_id', newConvId);
+        setConvStartEvent('conversation_started');
       }
     }
   }, [isOpen, conversationId, setConversationId]);
+
+  // ── Fire conversation lifecycle event once both IDs are ready ─
+  React.useEffect(() => {
+    if (!convStartEvent || !conversationId || !agentId) return;
+    trackEvent({
+      event_type: convStartEvent,
+      actor_type: 'user',
+      actor_id: userId,
+      agent_id: agentId,
+      conversation_id: conversationId,
+      page_context: extractPageContext(),
+    });
+    setConvStartEvent(null);
+  }, [convStartEvent, conversationId, agentId, userId]);
 
   const handleToggleWidget = () => setIsOpen(!isOpen);
 
@@ -136,6 +155,14 @@ function App({ config }: AppProps) {
 
     addMessage({ id: Date.now().toString(), content: text, role: 'user', timestamp: new Date() });
     setIsTyping(true);
+    trackEvent({
+      event_type: 'message_sent',
+      actor_type: 'user',
+      actor_id: userId,
+      agent_id: agentId,
+      conversation_id: conversationId || `conv_${Date.now()}`,
+      page_context: extractPageContext(),
+    });
 
     try {
       const context = extractPageContext();
@@ -168,6 +195,13 @@ function App({ config }: AppProps) {
         citations: response.citations,
         products: response.products,
         dealers: response.dealers,
+      });
+      trackEvent({
+        event_type: 'message_received',
+        actor_type: 'agent',
+        actor_id: agentId,
+        agent_id: agentId,
+        conversation_id: currentConvId,
       });
     } catch {
       addMessage({
