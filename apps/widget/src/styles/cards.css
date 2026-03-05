@@ -534,26 +534,23 @@
 /* ==================== Responsive Design ==================== */
 
 @media (max-width: 480px) {
-  .product-card-header,
   .dealer-card-header {
     padding: 10px;
   }
-  
-  .product-image,
-  .product-image-placeholder {
-    width: 70px;
-    height: 70px;
+
+  .product-image-container {
+    height: 120px;
   }
-  
+
   .product-name,
   .dealer-name {
     font-size: 14px;
   }
-  
+
   .product-price {
     font-size: 16px;
   }
-  
+
   .cards-grid {
     gap: 8px;
   }

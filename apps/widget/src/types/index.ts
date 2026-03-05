@@ -74,6 +74,7 @@ export interface Message {
   confidenceScore?: number;
   products?: ProductData[];  // Phase 5: Product cards
   dealers?: DealerData[];    // Phase 5: Dealer cards
+  feedback?: 'up' | 'down';
 }
 
 export interface Citation {

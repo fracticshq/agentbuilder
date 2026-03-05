@@ -1,6 +1,7 @@
 import React from 'react';
 import type { Message, BrandThemeTokens } from '../types';
 import { MessageBubble } from './MessageBubble';
+import { ThinkingIndicator } from './ThinkingIndicator';
 import { useWidgetStore } from '../stores/widgetStore';
 import { NOVA_LOGO } from '../utils/brandTheme';
 import { useCyclingText } from '../hooks/useCyclingText';
@@ -8,14 +9,35 @@ import { useCyclingText } from '../hooks/useCyclingText';
 interface ChatWindowProps {
   messages: Message[];
   isTyping: boolean;
+  typingStatus?: string;
   isExpanded?: boolean;
   isMobile?: boolean;
   onSendMessage: (text: string) => void;
   onClose: () => void;
   onToggleExpand?: () => void;
+  onRegenerate?: (id: string) => void;
+  onFeedback?: (id: string, feedback: 'up' | 'down' | null) => void;
 }
 
 // ── Icon components ────────────────────────────────────────────
+const ExpandIcon = ({ color }: { color: string }) => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="15 3 21 3 21 9" />
+    <polyline points="9 21 3 21 3 15" />
+    <line x1="21" y1="3" x2="14" y2="10" />
+    <line x1="3" y1="21" x2="10" y2="14" />
+  </svg>
+);
+
+const CompressIcon = ({ color }: { color: string }) => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="4 14 10 14 10 20" />
+    <polyline points="20 10 14 10 14 4" />
+    <line x1="10" y1="14" x2="3" y2="21" />
+    <line x1="21" y1="3" x2="14" y2="10" />
+  </svg>
+);
+
 const MicIcon = ({ color }: { color: string }) => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
@@ -103,10 +125,14 @@ const InputRow: React.FC<InputRowProps> = ({ value, onChange, onSubmit, placehol
 export const ChatWindow: React.FC<ChatWindowProps> = ({
   messages,
   isTyping,
+  typingStatus = '',
   isExpanded = false,
   isMobile = false,
   onSendMessage,
   onClose,
+  onToggleExpand,
+  onRegenerate,
+  onFeedback,
 }) => {
   const { brandTheme } = useWidgetStore();
   const [inputValue, setInputValue] = React.useState('');
@@ -115,6 +141,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const tk = brandTheme?.tokens;
   const mode = brandTheme?.mode ?? 'dark';
   const isLanding = messages.length === 0 && !isTyping;
+
+  // Only show the thinking indicator while the assistant hasn't started streaming content yet
+  const lastMsg = messages[messages.length - 1];
+  const showThinkingIndicator = isTyping && (!lastMsg || lastMsg.role !== 'assistant' || !lastMsg.content);
 
   const categories = brandTheme?.cyclingCategories ?? [];
   const { text: cyclingText, visible: cyclingVisible } = useCyclingText(categories);
@@ -170,14 +200,26 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             }}
           />
         )}
-        <button
-          className="chat-topbar-close"
-          onClick={onClose}
-          aria-label="Close chat"
-          style={{ color: topbarColor }}
-        >
-          <CloseIcon color={topbarColor} />
-        </button>
+        <div className="chat-topbar-actions">
+          {onToggleExpand && !isMobile && (
+            <button
+              className="chat-topbar-btn"
+              onClick={onToggleExpand}
+              aria-label={isExpanded ? 'Exit fullscreen' : 'Enter fullscreen'}
+              style={{ color: topbarColor }}
+            >
+              {isExpanded ? <CompressIcon color={topbarColor} /> : <ExpandIcon color={topbarColor} />}
+            </button>
+          )}
+          <button
+            className="chat-topbar-close"
+            onClick={onClose}
+            aria-label="Close chat"
+            style={{ color: topbarColor }}
+          >
+            <CloseIcon color={topbarColor} />
+          </button>
+        </div>
       </div>
 
       {/* Landing state: hero + chips + input */}
@@ -277,20 +319,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 userMsgColor={tk?.userMsgColor ?? '#fff'}
                 assistantMsgBg={tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)'}
                 assistantMsgColor={tk?.assistantMsgColor ?? '#fff'}
+                onRegenerate={onRegenerate}
+                onFeedback={onFeedback}
               />
             ))}
 
-            {isTyping && (
-              <div className="typing-indicator">
-                <div
-                  className="typing-dots"
-                  style={{ background: tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)' }}
-                >
-                  <span className="dot" style={{ background: tk?.assistantMsgColor ?? 'rgba(255,255,255,0.6)' }} />
-                  <span className="dot" style={{ background: tk?.assistantMsgColor ?? 'rgba(255,255,255,0.6)' }} />
-                  <span className="dot" style={{ background: tk?.assistantMsgColor ?? 'rgba(255,255,255,0.6)' }} />
-                </div>
-              </div>
+            {showThinkingIndicator && (
+              <ThinkingIndicator
+                statusText={typingStatus}
+                dotColor={tk?.assistantMsgColor ?? 'rgba(255,255,255,0.6)'}
+                bgColor={tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)'}
+              />
             )}
             <div ref={messagesEndRef} />
           </div>

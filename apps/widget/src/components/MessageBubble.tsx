@@ -1,5 +1,6 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import MarkdownIt from 'markdown-it';
+import { ThumbsUp, ThumbsDown, Copy, RotateCcw } from 'lucide-react';
 import type { Message } from '../types';
 import { ProductCard } from './ProductCard';
 import { DealerCard } from './DealerCard';
@@ -10,6 +11,8 @@ interface MessageBubbleProps {
   userMsgColor?: string;
   assistantMsgBg?: string;
   assistantMsgColor?: string;
+  onFeedback?: (id: string, feedback: 'up' | 'down' | null) => void;
+  onRegenerate?: (id: string) => void;
 }
 
 interface Product {
@@ -89,9 +92,12 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   userMsgColor = '#ffffff',
   assistantMsgBg = '#f3f4f6',
   assistantMsgColor = '#111827',
+  onFeedback,
+  onRegenerate,
 }) => {
   const isUser = message.role === 'user';
   const [extractedProducts, setExtractedProducts] = useState<Product[]>([]);
+  const [isHovered, setIsHovered] = useState(false);
   
   // Parse product info tags and fetch product details
   useEffect(() => {
@@ -157,8 +163,17 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     dealersCount: message.dealers?.length || 0,
   });
   
+  const handleFeedback = (feedback: 'up' | 'down') => {
+    const next = message.feedback === feedback ? null : feedback;
+    onFeedback?.(message.id, next);
+  };
+
   return (
-    <div className={`message-bubble ${isUser ? 'user' : 'assistant'}`}>
+    <div
+      className={`message-bubble ${isUser ? 'user' : 'assistant'} message-bubble-wrapper`}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+    >
       <div
         className={`message-content ${isUser ? 'user-message' : 'assistant-message'}`}
         style={isUser
@@ -249,12 +264,49 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           </div>
         )}
         <div className="message-timestamp">
-          {new Date(message.timestamp).toLocaleTimeString([], { 
-            hour: '2-digit', 
-            minute: '2-digit' 
+          {new Date(message.timestamp).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit'
           })}
         </div>
       </div>
+
+      {!isUser && (
+        <div className="message-actions" style={{ opacity: isHovered ? 1 : 0 }}>
+          <button
+            className="message-action-btn"
+            onClick={() => navigator.clipboard.writeText(message.content)}
+            title="Copy"
+            aria-label="Copy message"
+          >
+            <Copy size={14} />
+          </button>
+          <button
+            className={`message-action-btn${message.feedback === 'up' ? ' active' : ''}`}
+            onClick={() => handleFeedback('up')}
+            title="Helpful"
+            aria-label="Mark helpful"
+          >
+            <ThumbsUp size={14} />
+          </button>
+          <button
+            className={`message-action-btn${message.feedback === 'down' ? ' active' : ''}`}
+            onClick={() => handleFeedback('down')}
+            title="Not helpful"
+            aria-label="Mark not helpful"
+          >
+            <ThumbsDown size={14} />
+          </button>
+          <button
+            className="message-action-btn"
+            onClick={() => onRegenerate?.(message.id)}
+            title="Regenerate"
+            aria-label="Regenerate response"
+          >
+            <RotateCcw size={14} />
+          </button>
+        </div>
+      )}
     </div>
   );
 };

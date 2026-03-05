@@ -24,6 +24,8 @@ interface WidgetStore extends WidgetState {
   toggleExpanded: () => void;
   clearMessages: () => void;
   reset: () => void;
+  setMessageFeedback: (id: string, feedback: 'up' | 'down' | null) => void;
+  removeMessage: (id: string) => void;
 }
 
 const initialState: WidgetState = {
@@ -110,6 +112,14 @@ export const useWidgetStore = create<WidgetStore>((set, get) => ({
   toggleExpanded: () => set((state) => ({ isExpanded: !state.isExpanded })),
   
   clearMessages: () => set({ messages: [], conversationId: undefined }),
-  
+
   reset: () => set({ ...initialState, config: get().config }),
+
+  setMessageFeedback: (id, feedback) => set(state => ({
+    messages: state.messages.map(m => m.id === id ? { ...m, feedback: feedback ?? undefined } : m)
+  })),
+
+  removeMessage: (id) => set(state => ({
+    messages: state.messages.filter(m => m.id !== id)
+  })),
 }));

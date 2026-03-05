@@ -101,6 +101,13 @@
   text-transform: uppercase;
 }
 
+.chat-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chat-topbar-btn,
 .chat-topbar-close {
   width: 30px;
   height: 30px;
@@ -115,6 +122,7 @@
   opacity: 0.65;
   transition: opacity 0.15s;
 }
+.chat-topbar-btn:hover,
 .chat-topbar-close:hover { opacity: 1; }
 
 /* ── Hero / Landing ───────────────────────────────────────────── */
@@ -320,7 +328,8 @@
 }
 
 .message-bubble.assistant {
-  justify-content: flex-start;
+  flex-direction: column;
+  align-items: flex-start;
 }
 
 .message-content {
@@ -440,6 +449,56 @@
 
 .typing-dots .dot:nth-child(1) { animation-delay: -0.32s; }
 .typing-dots .dot:nth-child(2) { animation-delay: -0.16s; }
+
+.thinking-status-text {
+  font-size: 12px;
+  font-family: 'DM Sans', sans-serif;
+  opacity: 0.65;
+  white-space: nowrap;
+}
+
+/* ── Message Actions ──────────────────────────────────────────── */
+.message-bubble-wrapper {
+  position: relative;
+}
+
+.message-actions {
+  display: flex;
+  gap: 2px;
+  margin-top: 4px;
+  transition: opacity 0.15s ease;
+}
+
+.message-action-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 5px;
+  border-radius: 5px;
+  color: inherit;
+  opacity: 0.45;
+  transition: opacity 0.1s, background 0.1s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.message-action-btn:hover {
+  opacity: 0.85;
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.message-action-btn.active {
+  opacity: 1;
+  color: currentColor;
+}
+
+@media (max-width: 639px) {
+  .message-actions {
+    display: none;
+  }
+}
 
 /* ── Citations ────────────────────────────────────────────────── */
 .citations {

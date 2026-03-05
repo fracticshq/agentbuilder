@@ -34,7 +34,11 @@ function App({ config }: AppProps) {
     setConversationId,
     setExpanded,
     setBrandTheme,
+    setMessageFeedback,
+    removeMessage,
   } = useWidgetStore();
+
+  const [typingStatus, setTypingStatus] = React.useState<string>('');
 
   const { isExpanded: isFullscreen, toggleExpanded, isMobile } = useFullscreen();
 
@@ -183,7 +187,10 @@ function App({ config }: AppProps) {
         currentConvId,
         agentId,
         (chunk) => {
-          if (chunk.type === 'content' && chunk.content) {
+          if (chunk.type === 'status' && chunk.content) {
+            setTypingStatus(chunk.content);
+          } else if (chunk.type === 'content' && chunk.content) {
+            setTypingStatus('');
             streamedContent += chunk.content;
             updateMessage(assistantMessageId, { content: streamedContent });
           }
@@ -213,7 +220,24 @@ function App({ config }: AppProps) {
       });
     } finally {
       setIsTyping(false);
+      setTypingStatus('');
     }
+  };
+
+  const handleRegenerate = (messageId: string) => {
+    const msgIndex = messages.findIndex(m => m.id === messageId);
+    if (msgIndex < 0) return;
+    // Find the preceding user message
+    let userMsg: string | null = null;
+    for (let i = msgIndex - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        userMsg = messages[i].content;
+        break;
+      }
+    }
+    if (!userMsg) return;
+    removeMessage(messageId);
+    handleSendMessage(userMsg);
   };
 
   return (
@@ -225,11 +249,14 @@ function App({ config }: AppProps) {
           <ChatWindow
             messages={messages}
             isTyping={isTyping}
+            typingStatus={typingStatus}
             isExpanded={isExpanded}
             isMobile={isMobile}
             onSendMessage={handleSendMessage}
             onClose={() => setIsOpen(false)}
             onToggleExpand={toggleExpanded}
+            onRegenerate={handleRegenerate}
+            onFeedback={setMessageFeedback}
           />
         </div>
       )}
