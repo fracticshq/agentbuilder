@@ -47,10 +47,28 @@ def fetch_akv_secrets(vault_name: str) -> dict:
     return secrets
 
 
+def _load_dotenv_early(env_path: str | None = None):
+    """Manually parse .env so AKV flags are visible before Settings is instantiated."""
+    import pathlib
+    path = pathlib.Path(env_path) if env_path else (
+        pathlib.Path(__file__).resolve().parents[3] / ".env"
+    )
+    if not path.exists():
+        return
+    try:
+        from dotenv import dotenv_values
+        for k, v in dotenv_values(path).items():
+            if k not in os.environ:
+                os.environ[k] = v or ""
+    except ImportError:
+        pass  # python-dotenv not installed — skip silently
+
+
 # Pre-load AKV secrets into environment BEFORE Settings class is defined
 # This ensures Pydantic picks them up during its normal env loading
-def _preload_akv_secrets():
+def _preload_akv_secrets(env_path: str | None = None):
     """Load AKV secrets into environment before Settings initialization."""
+    _load_dotenv_early(env_path)  # must be first — reads .env so USE_AZURE_KEYVAULT is visible
     use_akv = os.getenv("USE_AZURE_KEYVAULT", "false").lower() == "true"
     vault_name = os.getenv("AZURE_KEYVAULT_NAME")
     
@@ -158,6 +176,10 @@ class Settings(BaseSettings):
     SUMMARY_MAX_TOKENS: int = 150
     SUMMARY_TEMPERATURE: float = 0.3
     
+    # Strapi Dashboard Integration
+    STRAPI_URL: str = "http://localhost:1337"
+    STRAPI_API_TOKEN: str = ""
+
     # Azure Key Vault Configuration
     AZURE_KEYVAULT_NAME: Optional[str] = None
     USE_AZURE_KEYVAULT: bool = False

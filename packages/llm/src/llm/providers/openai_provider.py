@@ -23,6 +23,11 @@ class OpenAIProvider(LLMProvider):
         super().__init__(config)
         if not AsyncOpenAI:
             raise ImportError("openai package not installed. Install with: pip install openai")
+        if not config.api_key or not config.api_key.strip():
+            raise ValueError(
+                "OPENAI_API_KEY is not set. "
+                "Add it to your .env file or store it as 'OPENAI-API-KEY' in Azure Key Vault."
+            )
         self.client = AsyncOpenAI(
             api_key=config.api_key,
             base_url=config.base_url if config.base_url else None

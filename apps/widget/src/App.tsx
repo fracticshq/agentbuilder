@@ -203,7 +203,8 @@ function App({ config }: AppProps) {
         agent_id: agentId,
         conversation_id: currentConvId,
       });
-    } catch {
+    } catch (err) {
+      console.error('[Widget] Chat error:', err);
       addMessage({
         id: (Date.now() + 1).toString(),
         content: 'Sorry, I encountered an error. Please try again.',

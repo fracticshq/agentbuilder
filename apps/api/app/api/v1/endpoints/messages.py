@@ -95,8 +95,9 @@ async def websocket_endpoint(
             except Exception as e:
                 logger.error("Error processing WebSocket message", error=str(e))
                 await websocket.send_text(json.dumps({
-                    "error": "Processing error",
-                    "detail": str(e)
+                    "type": "error",
+                    "content": f"Error: {str(e)}",
+                    "conversation_id": request.conversation_id or "",
                 }))
                 
     except WebSocketDisconnect:

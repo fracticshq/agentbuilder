@@ -5,6 +5,7 @@ Phase 4: Response validation to prevent hallucinations.
 """
 
 import asyncio
+import json
 import uuid
 from typing import AsyncGenerator, Optional
 from datetime import datetime, timezone
@@ -32,8 +33,22 @@ from agent_runtime.orchestrator import Orchestrator, AgentResult
 from ..config import Settings
 from ..connections import connection_manager
 from .response_validator import ResponseValidator  # Phase 4
+from .strapi_client import StrapiClient
 
 logger = structlog.get_logger(__name__)
+
+
+def _sanitize_for_json(data: dict) -> dict:
+    """Convert non-JSON-serializable values (ObjectId, datetime, etc.) to strings.
+
+    MongoDB documents often contain ObjectId/_id and datetime fields that Pydantic's
+    model_dump_json() cannot serialize. Running the dict through json.dumps/loads with
+    default=str coerces those to safe string representations.
+    """
+    try:
+        return json.loads(json.dumps(data, default=str))
+    except Exception:
+        return {}
 
 
 class MessageService:
@@ -114,11 +129,15 @@ class MessageService:
             api_key = settings.OPENAI_API_KEY
             model = settings.OPENAI_MODEL
             
-        self.llm_provider = create_provider_from_env(
-            provider_name=provider_name,
-            api_key=api_key,
-            model=model
-        )
+        try:
+            self.llm_provider = create_provider_from_env(
+                provider_name=provider_name,
+                api_key=api_key,
+                model=model
+            )
+        except ValueError as e:
+            logger.error("llm_provider_init_failed", error=str(e))
+            raise
         
         # Phase 4: Initialize response validator
         self.response_validator = ResponseValidator(strict_mode=True)
@@ -135,7 +154,12 @@ class MessageService:
             system_prompt=None  # Will be loaded dynamically from DB
         )
 
-        
+        # Strapi dashboard sync (fire-and-forget, non-blocking)
+        self.strapi = StrapiClient(
+            base_url=settings.STRAPI_URL,
+            api_token=settings.STRAPI_API_TOKEN,
+        )
+
         logger.info("message_service_initialized", brand_id=self.brand_id)
     
     async def _initialize_brand_database(self, agent_id: str):
@@ -467,6 +491,13 @@ class MessageService:
                 }
             )
             
+            # Sync to Strapi dashboard (fire-and-forget — never blocks streaming)
+            self.strapi.sync_conversation(
+                conversation_id=conversation_id,
+                user_message=request.message,
+                assistant_message=full_response,
+            )
+
             # Extract episodic facts
             if self.memory_config.ENABLE_FACT_EXTRACTION:
                 messages = await self.short_term.get_recent_messages(conversation_id, limit=10)
@@ -513,7 +544,7 @@ class MessageService:
                                    dealers_count=len(result_metadata.get('dealers', [])),
                                    sources_count=len(result_metadata.get('sources', [])))
                         
-                        confidence = result_metadata.get('confidence', 1.0)
+                        confidence = min(1.0, max(0.0, float(result_metadata.get('confidence', 1.0))))
                         
                         for source in result_metadata['sources'][:5]:  # Top 5 citations
                             # source is just a doc_id string like "essco-bathware_product_EOS-CHR-491"
@@ -526,17 +557,22 @@ class MessageService:
                                 "snippet": None
                             })
             
+            # Sanitize products/dealers: strip MongoDB ObjectId, datetime, and other
+            # non-JSON-serializable types before they reach model_dump_json().
+            safe_products = [_sanitize_for_json(p) for p in products]
+            safe_dealers  = [_sanitize_for_json(d) for d in dealers]
+
             # Deduplicate products and dealers by ID
-            unique_products = {p['id']: p for p in products if p.get('id')}.values()
-            unique_dealers = {d['id']: d for d in dealers if d.get('id')}.values()
-            
+            unique_products = {p['id']: p for p in safe_products if p.get('id')}.values()
+            unique_dealers  = {d['id']: d for d in safe_dealers  if d.get('id')}.values()
+
             yield StreamingMessageResponse(
                 type="metadata",
                 content="",
                 conversation_id=conversation_id,
                 citations=citations,
                 context_used=len(tool_results),
-                confidence_score=agent_result.metadata.get("validation_confidence", 1.0),
+                confidence_score=min(1.0, max(0.0, float(agent_result.metadata.get("validation_confidence", 1.0)))),
                 products=list(unique_products),
                 dealers=list(unique_dealers)
             )
