@@ -158,3 +158,45 @@ async def admin_websocket_endpoint(websocket: WebSocket, conversation_id: str):
         logger.error("Admin WebSocket error", error=str(e), conversation_id=conversation_id)
     finally:
         ws_manager.disconnect_admin(websocket, conversation_id)
+
+
+@router.websocket("/ws/widget/{conversation_id}")
+async def widget_control_channel(websocket: WebSocket, conversation_id: str):
+    """Widget control channel — registers widget with ws_manager so admin can push to it.
+
+    Handles two scenarios:
+    - Admin pushes (control_status, admin_message) arrive via ws_manager.send_to_widget()
+      and are forwarded to the widget over this connection.
+    - When a human agent is in control, user messages sent here are forwarded to the
+      admin instead of going to the AI.
+    """
+    await ws_manager.connect_widget(websocket, conversation_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = msg.get("type")
+
+            if msg_type == "ping":
+                await websocket.send_text(json.dumps({"type": "pong"}))
+
+            elif msg_type == "user_message":
+                # Only forward to admin; AI path uses the existing /ws endpoint
+                if ws_manager.is_human_in_control(conversation_id):
+                    content = msg.get("content", "")
+                    await ws_manager.send_to_admin(conversation_id, {
+                        "type": "user_message",
+                        "role": "user",
+                        "content": content,
+                    })
+
+    except WebSocketDisconnect:
+        logger.info("Widget control channel disconnected", conversation_id=conversation_id)
+    except Exception as e:
+        logger.error("Widget control channel error", error=str(e), conversation_id=conversation_id)
+    finally:
+        ws_manager.disconnect_widget(websocket, conversation_id)

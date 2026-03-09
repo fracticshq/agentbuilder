@@ -26,6 +26,7 @@ function App({ config }: AppProps) {
     isTyping,
     conversationId,
     isExpanded,
+    isHumanInControl,
     setIsOpen,
     addMessage,
     updateMessage,
@@ -34,11 +35,13 @@ function App({ config }: AppProps) {
     setConversationId,
     setExpanded,
     setBrandTheme,
+    setHumanInControl,
     setMessageFeedback,
     removeMessage,
   } = useWidgetStore();
 
   const [typingStatus, setTypingStatus] = React.useState<string>('');
+  const controlChannelRef = React.useRef<WebSocket | null>(null);
 
   const { isExpanded: isFullscreen, toggleExpanded, isMobile } = useFullscreen();
 
@@ -114,6 +117,47 @@ function App({ config }: AppProps) {
     if (config) setConfig(config);
   }, [config, setConfig]);
 
+  // ── Widget control channel (human takeover) ───────────────────
+  React.useEffect(() => {
+    if (!conversationId) return;
+
+    const ws = new WebSocket(`ws://localhost:8000/api/v1/messages/ws/widget/${conversationId}`);
+    controlChannelRef.current = ws;
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data as string);
+        if (msg.type === 'control_status') {
+          setHumanInControl(msg.is_human_in_control ?? false);
+        } else if (msg.type === 'admin_message') {
+          addMessage({
+            id: `admin_${Date.now()}`,
+            content: msg.content || '',
+            role: 'assistant',
+            timestamp: new Date(),
+          });
+        }
+      } catch {
+        // ignore malformed frames
+      }
+    };
+
+    ws.onerror = () => {};
+
+    const heartbeat = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 30_000);
+
+    return () => {
+      clearInterval(heartbeat);
+      ws.close();
+      controlChannelRef.current = null;
+      setHumanInControl(false);
+    };
+  }, [conversationId]);
+
   // ── Initialize conversation ID ────────────────────────────────
   React.useEffect(() => {
     if (isOpen && !conversationId) {
@@ -158,6 +202,16 @@ function App({ config }: AppProps) {
     }
 
     addMessage({ id: Date.now().toString(), content: text, role: 'user', timestamp: new Date() });
+
+    // If a human agent has taken control, route the message to them via the
+    // control channel instead of sending it to the AI.
+    if (isHumanInControl) {
+      const cc = controlChannelRef.current;
+      if (cc?.readyState === WebSocket.OPEN) {
+        cc.send(JSON.stringify({ type: 'user_message', content: text }));
+      }
+      return;
+    }
     setIsTyping(true);
     trackEvent({
       event_type: 'message_sent',

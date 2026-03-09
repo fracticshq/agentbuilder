@@ -5,10 +5,12 @@ interface WidgetStore extends WidgetState {
   config: WidgetConfig | null;
   isExpanded: boolean;
   brandTheme: BrandTheme | null;
+  isHumanInControl: boolean;
 
   // Actions
   setConfig: (config: WidgetConfig) => void;
   setBrandTheme: (theme: BrandTheme) => void;
+  setHumanInControl: (value: boolean) => void;
   toggleWidget: () => void;
   setOpen: (isOpen: boolean) => void;
   setIsOpen: (isOpen: boolean) => void;
@@ -42,8 +44,10 @@ export const useWidgetStore = create<WidgetStore>((set, get) => ({
   config: null,
   isExpanded: false,
   brandTheme: null,
+  isHumanInControl: false,
 
   setBrandTheme: (theme: BrandTheme) => set({ brandTheme: theme }),
+  setHumanInControl: (value: boolean) => set({ isHumanInControl: value }),
 
   setConfig: (config: WidgetConfig) => {
     set({ config });
