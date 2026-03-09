@@ -311,18 +311,48 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               ['--scrollbar-thumb' as string]: tk ? `${tk.accentColor}30` : 'rgba(255,255,255,0.1)',
             }}
           >
-            {messages.map(message => (
-              <MessageBubble
-                key={message.id}
-                message={message}
-                userMsgBg={tk?.userMsgBg ?? accentColor}
-                userMsgColor={tk?.userMsgColor ?? '#fff'}
-                assistantMsgBg={tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)'}
-                assistantMsgColor={tk?.assistantMsgColor ?? '#fff'}
-                onRegenerate={onRegenerate}
-                onFeedback={onFeedback}
-              />
-            ))}
+            {messages.map(message => {
+              if (message.role === 'system') {
+                const isHuman = message.content.toLowerCase().includes('human');
+                return (
+                  <div key={message.id} style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    margin: '10px 16px',
+                  }}>
+                    <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.08)' }} />
+                    <span style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      letterSpacing: '0.04em',
+                      textTransform: 'uppercase',
+                      padding: '3px 10px',
+                      borderRadius: 20,
+                      background: isHuman ? 'rgba(239,68,68,0.12)' : 'rgba(99,102,241,0.12)',
+                      color: isHuman ? '#ef4444' : accentColor,
+                      border: `1px solid ${isHuman ? 'rgba(239,68,68,0.25)' : `${accentColor}40`}`,
+                      whiteSpace: 'nowrap',
+                    }}>
+                      {message.content}
+                    </span>
+                    <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.08)' }} />
+                  </div>
+                );
+              }
+              return (
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  userMsgBg={tk?.userMsgBg ?? accentColor}
+                  userMsgColor={tk?.userMsgColor ?? '#fff'}
+                  assistantMsgBg={tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)'}
+                  assistantMsgColor={tk?.assistantMsgColor ?? '#fff'}
+                  onRegenerate={onRegenerate}
+                  onFeedback={onFeedback}
+                />
+              );
+            })}
 
             {showThinkingIndicator && (
               <ThinkingIndicator

@@ -89,16 +89,35 @@ async def websocket_endpoint(
                 }))
                 continue
             
+            # Mirror user message to any watching admin connections
+            conv_id = request.conversation_id or ""
+            if conv_id:
+                await ws_manager.send_to_admin(conv_id, {
+                    "type": "user_message",
+                    "role": "user",
+                    "content": request.message,
+                })
+
             # Process message and stream response
             try:
+                accumulated = ""
                 async for chunk in message_service.stream_message(request):
                     await websocket.send_text(chunk.model_dump_json())
+                    if chunk.type == "content" and chunk.content:
+                        accumulated += chunk.content
+                # Mirror completed AI response to admin
+                if conv_id and accumulated:
+                    await ws_manager.send_to_admin(conv_id, {
+                        "type": "assistant_message",
+                        "role": "assistant",
+                        "content": accumulated,
+                    })
             except Exception as e:
                 logger.error("Error processing WebSocket message", error=str(e))
                 await websocket.send_text(json.dumps({
                     "type": "error",
                     "content": f"Error: {str(e)}",
-                    "conversation_id": request.conversation_id or "",
+                    "conversation_id": conv_id,
                 }))
                 
     except WebSocketDisconnect:
@@ -128,9 +147,17 @@ async def admin_websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     "type": "control_status",
                     "is_human_in_control": True,
                 })
+                await ws_manager.send_to_admin(conversation_id, {
+                    "type": "system_notice",
+                    "content": "You took control of this conversation",
+                })
                 await ws_manager.send_to_widget(conversation_id, {
                     "type": "control_status",
                     "is_human_in_control": True,
+                })
+                await ws_manager.send_to_widget(conversation_id, {
+                    "type": "system_notice",
+                    "content": "Conversation switched to Human mode",
                 })
 
             elif msg_type == "release_control":
@@ -139,9 +166,17 @@ async def admin_websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     "type": "control_status",
                     "is_human_in_control": False,
                 })
+                await ws_manager.send_to_admin(conversation_id, {
+                    "type": "system_notice",
+                    "content": "Control returned to AI",
+                })
                 await ws_manager.send_to_widget(conversation_id, {
                     "type": "control_status",
                     "is_human_in_control": False,
+                })
+                await ws_manager.send_to_widget(conversation_id, {
+                    "type": "system_notice",
+                    "content": "Conversation switched to AI mode",
                 })
 
             elif msg_type == "admin_message":

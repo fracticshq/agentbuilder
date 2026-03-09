@@ -129,6 +129,13 @@ function App({ config }: AppProps) {
         const msg = JSON.parse(event.data as string);
         if (msg.type === 'control_status') {
           setHumanInControl(msg.is_human_in_control ?? false);
+        } else if (msg.type === 'system_notice') {
+          addMessage({
+            id: `sys_${Date.now()}`,
+            content: msg.content || '',
+            role: 'system',
+            timestamp: new Date(),
+          });
         } else if (msg.type === 'admin_message') {
           addMessage({
             id: `admin_${Date.now()}`,
