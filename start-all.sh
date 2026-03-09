@@ -44,7 +44,7 @@ echo "All services started!"
 echo "----------------------------------------"
 echo "API Server:      http://localhost:8000"
 echo "Admin Dashboard: http://localhost:3000"
-echo "Widget:          http://localhost:5173"
+echo "Widget:          http://localhost:5174"
 echo "----------------------------------------"
 echo "Press Ctrl+C to stop all services."
 

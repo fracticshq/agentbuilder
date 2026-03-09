@@ -14,6 +14,7 @@ from commons.types.requests import MessageRequest
 from commons.types.responses import MessageResponse, StreamingMessageResponse
 from ....dependencies import get_message_service
 from ....services.message_service import MessageService
+from ....websocket_manager import ws_manager
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -105,3 +106,55 @@ async def websocket_endpoint(
     except Exception as e:
         logger.error("WebSocket error", error=str(e))
         await websocket.close(code=1011, reason="Internal error")
+
+
+@router.websocket("/ws/admin/{conversation_id}")
+async def admin_websocket_endpoint(websocket: WebSocket, conversation_id: str):
+    """Admin WebSocket for human takeover and live conversation monitoring."""
+    await ws_manager.connect_admin(websocket, conversation_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = msg.get("type")
+
+            if msg_type == "take_control":
+                ws_manager.set_human_control(conversation_id, True)
+                await ws_manager.send_to_admin(conversation_id, {
+                    "type": "control_status",
+                    "is_human_in_control": True,
+                })
+                await ws_manager.send_to_widget(conversation_id, {
+                    "type": "control_status",
+                    "is_human_in_control": True,
+                })
+
+            elif msg_type == "release_control":
+                ws_manager.set_human_control(conversation_id, False)
+                await ws_manager.send_to_admin(conversation_id, {
+                    "type": "control_status",
+                    "is_human_in_control": False,
+                })
+                await ws_manager.send_to_widget(conversation_id, {
+                    "type": "control_status",
+                    "is_human_in_control": False,
+                })
+
+            elif msg_type == "admin_message":
+                content = msg.get("content", "")
+                await ws_manager.send_to_widget(conversation_id, {
+                    "type": "admin_message",
+                    "role": "assistant",
+                    "content": content,
+                })
+
+    except WebSocketDisconnect:
+        logger.info("Admin WebSocket disconnected", conversation_id=conversation_id)
+    except Exception as e:
+        logger.error("Admin WebSocket error", error=str(e), conversation_id=conversation_id)
+    finally:
+        ws_manager.disconnect_admin(websocket, conversation_id)

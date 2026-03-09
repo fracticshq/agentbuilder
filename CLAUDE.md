@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 apps/
   admin/   — React + Tailwind admin UI (Create React App, port 3000)
-  widget/  — React chat widget (Vite, port 5173)
+  widget/  — React chat widget (Vite, port 5174)
   api/     — FastAPI backend (Python, port 8000)
 packages/
   agent_runtime/  — Python agent/LLM orchestration
@@ -20,7 +20,7 @@ packages/
 # Start all services
 ./start-all.sh
 
-# Widget dev server
+# Widget dev server (port 5174 — Strapi owns 5173)
 cd apps/widget && npm run dev
 
 # Admin dev server

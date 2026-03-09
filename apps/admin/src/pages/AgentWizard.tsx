@@ -502,7 +502,7 @@ export default function AgentWizard() {
           deployedAgent: {
             id: createdAgent.id,
             name: createdAgent.name,
-            url: `http://localhost:5173/?agent_id=${createdAgent.id}`
+            url: `http://localhost:5174/?agent_id=${createdAgent.id}`
           }
         }
       });

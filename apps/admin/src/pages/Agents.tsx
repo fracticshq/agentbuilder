@@ -213,7 +213,7 @@ export default function Agents() {
                   {agent.status === 'active' && (
                     <div className="mb-3">
                       <a
-                        href={`http://localhost:5173/?agent_id=${agent.id}`}
+                        href={`http://localhost:5174/?agent_id=${agent.id}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-800 bg-blue-50 px-2.5 py-1.5 rounded-md border border-blue-200 hover:bg-blue-100 transition-colors"
