@@ -363,6 +363,88 @@ python scripts/verify_vector_index.py
 
 ---
 
+## 🐳 Docker Quick Start
+
+The fastest way to run the full stack — no local Python, Node, MongoDB, or Redis installs needed. One command brings up all services.
+
+### Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (macOS / Windows / Linux)
+
+### 1. Copy & fill the environment file
+
+```bash
+cp .env.docker.example .env
+```
+
+Open `.env` and fill in at minimum:
+
+| Variable | Description |
+|---|---|
+| `OPENAI_API_KEY` | Your OpenAI key (`sk-...`) |
+| `VOYAGE_API_KEY` | Voyage AI embeddings key (`pa-...`) |
+| `SECRET_KEY` | Random 32-char string (JWT signing) |
+| `PII_ENCRYPTION_KEY` | Random 32-char string (PII vault) |
+| `FIRECRAWL_API_KEY` | Optional — only needed for Scrape tab |
+
+> MongoDB and Redis are started automatically as containers — leave their URLs as-is.
+
+### 2. Build & start all services
+
+```bash
+docker compose up --build
+```
+
+First build takes ~3–5 minutes (downloads base images, installs deps). Subsequent starts are instant.
+
+### 3. Open the apps
+
+| Service | URL |
+|---|---|
+| Admin Dashboard | http://localhost:3000 |
+| Chat Widget | http://localhost:5174 |
+| API + Swagger docs | http://localhost:8000/docs |
+| MongoDB (Compass) | mongodb://localhost:27017 |
+| Redis | redis://localhost:6379 |
+
+### What each container does
+
+| Container | Image | Role |
+|---|---|---|
+| `agentbuilder-api` | Python 3.12 + FastAPI | Backend API, RAG, memory, streaming |
+| `agentbuilder-admin` | Node 20 build → nginx | React admin dashboard |
+| `agentbuilder-widget` | Node 20 build → nginx | React chat widget |
+| `agentbuilder-mongodb` | mongo:7 | Primary database |
+| `agentbuilder-redis` | redis:7-alpine | Caching & session store |
+
+### Useful Docker commands
+
+```bash
+# Run in background (detached)
+docker compose up --build -d
+
+# View logs for a specific service
+docker compose logs -f api
+docker compose logs -f admin
+
+# Stop all services (keeps data volumes)
+docker compose down
+
+# Stop and wipe all data (fresh slate)
+docker compose down -v
+
+# Rebuild a single service after code change
+docker compose up --build api
+```
+
+### Notes
+
+- **Strapi CMS** is a separate repository (`agentbuilder-strapi`) and is **not** included in this compose file. Run it independently if needed.
+- The `.env` file is never baked into any image — it's mounted at runtime via `env_file` so secrets stay local.
+- Data persists across restarts in named Docker volumes (`mongo_data`, `redis_data`). Use `down -v` only when you want a full reset.
+
+---
+
 ## 📖 Usage Guide
 
 ### Creating Your First Agent
