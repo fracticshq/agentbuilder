@@ -1,0 +1,22 @@
+{
+  "name": "shopify-mcp",
+  "version": "1.0.0",
+  "description": "Shopify Model Context Protocol Server",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.20.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "@shopify/shopify-api": "^10.0.0",
+    "express-session": "^1.18.0",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
