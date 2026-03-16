@@ -34,6 +34,7 @@ class ShopifyOrchestrator(Orchestrator):
 3. `get_cart(cart_id)` — Retrieve current cart. Use the `cart_id` from a previous `update_cart` response.
 4. `update_cart([cart_id], add_items)` — Add/update items in cart. `add_items` must be an array of objects with `product_variant_id` and `quantity`.
    - If no `cart_id`, a new cart is created. Extract the new `cart_id` from the result and carry it in future turns.
+   - If `quantity` is not specified by the user, ALWAYS default it to 1.
 
 **CART SESSION RULES:**
 - After calling `update_cart`, extract the `cart_id` from the response and note it in your reasoning.
@@ -209,6 +210,12 @@ Output JSON Format:
                 if not actual_input.get("add_items") and not actual_input.get("remove_line_ids"):
                     logger.warning("skipping_empty_update_cart", step_id=step.id)
                     continue
+                
+                # Default quantity to 1 if missing
+                if actual_input.get("add_items"):
+                    for item in actual_input["add_items"]:
+                        if not item.get("quantity"):
+                            item["quantity"] = 1
 
             def resolve(obj):
                 if isinstance(obj, str) and "{" in obj and "}" in obj:
