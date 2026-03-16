@@ -4,6 +4,7 @@ Integrates Phase 5 Memory System with retrieval and LLM generation.
 Phase 4: Response validation to prevent hallucinations.
 """
 
+import os
 import asyncio
 import json
 import uuid
@@ -29,6 +30,7 @@ from llm.factory import LLMFactory, create_provider_from_env
 from tools.registry import ToolRegistry
 from tools.builtin.retrieval_tool import RetrievalTool
 from agent_runtime.orchestrator import Orchestrator, AgentResult
+from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
 
 from ..config import Settings
 from ..connections import connection_manager
@@ -253,7 +255,8 @@ class MessageService:
             agent = await agents_collection.find_one({"id": agent_id})
             
             if agent:
-                self.agent_config = agent.get("configuration", {})
+                config = agent.get("configuration", {})
+                self.agent_config = config
                 self.system_prompt = agent.get("system_prompt", "")
                 self.brand_id = agent.get("brand_slug", self.brand_id)
                 
@@ -265,6 +268,66 @@ class MessageService:
                            agent_id=agent_id, 
                            brand_id=self.brand_id,
                            has_system_prompt=bool(self.system_prompt))
+                           
+                # Initialize remote MCP tools if Shopify is selected
+                if config.get("data_source") == "shopify":
+                    from tools.mcp_client import McpClient
+                    from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
+                    
+                    # For local development we assume port 3005 for the Shopify MCP Service
+                    # In production this would be loaded from settings
+                    mcp_endpoint = self.settings.SHOPIFY_MCP_URL if hasattr(self.settings, 'SHOPIFY_MCP_URL') else "http://localhost:3005/mcp"
+                    
+                    # Extract credentials from Agent Config (nested or top-level), with environment fallbacks
+                    # The Wizard UI saves them in a 'shopify' sub-object
+                    shopify_conf = config.get("shopify", {})
+                    shopify_url = (
+                        shopify_conf.get("shop_url") or 
+                        config.get("shopify_shop_url") or 
+                        self.settings.SHOPIFY_SHOP_URL
+                    )
+                    shopify_token = (
+                        shopify_conf.get("access_token") or
+                        config.get("shopify_access_token") or 
+                        config.get("shopify_admin_token") or 
+                        self.settings.SHOPIFY_STOREFRONT_ADMIN_ACCESS_TOKEN
+                    )
+
+                    if not shopify_url or not shopify_token:
+                        logger.warning("shopify_credentials_missing", agent_id=agent_id)
+                        
+                    mcp_headers = {
+                        "x-shopify-shop-url": str(shopify_url or ""),
+                        "x-shopify-admin-token": str(shopify_token or "")
+                    }
+                    
+                    # Also try to get a customer access token from config or settings
+                    customer_token = (
+                        shopify_conf.get("customer_access_token") or
+                        config.get("shopify_customer_access_token") or 
+                        self.settings.SHOPIFY_CUSTOMER_ACCESS_TOKEN
+                    )
+                    
+                    if customer_token:
+                        mcp_headers["x-customer-access-token"] = str(customer_token)
+                    
+                    mcp_client = McpClient(endpoint=mcp_endpoint, headers=mcp_headers)
+                    
+                    # Connect and discover remote tools using the conversation/user session
+                    remote_tools = await mcp_client.discover_tools()
+                    for tool in remote_tools:
+                        self.tool_registry.register(tool)
+                        
+                    logger.info("mcp_tools_registered", count=len(remote_tools), brand_id=self.brand_id)
+
+                    # Swap to ShopifyOrchestrator for Shopify-integrated agents
+                    self.orchestrator = ShopifyOrchestrator(
+                        llm=self.llm_provider,
+                        tools=self.tool_registry,
+                        critic=self.response_validator,
+                        system_prompt=self.system_prompt
+                    )
+                    logger.info("switched_to_shopify_orchestrator", agent_id=agent_id)
             else:
                 logger.warning("agent_not_found", agent_id=agent_id)
                 self.agent_config = {}
@@ -437,26 +500,64 @@ class MessageService:
                 limit=6
             )
             
-            # Convert to list of dicts for orchestrator
+            # Build chat history AND extract session state (e.g. cart_id) from
+            # previous assistant message metadata so the agent can reuse the cart.
             chat_history = []
+            session_state: dict = {}
             for msg in recent_messages:
-                # Skip the current user message effectively? 
-                # Actually, add_message stored it already. 
-                # So get_recent_messages includes the current message.
-                # Orchestrator prompt shows history THEN user request.
-                # So we might want to exclude the *last* message if it matches request.message?
-                # Or Orchestrator handles it.
-                # "Conversation History: ... User Request: ..."
-                # If history includes User Request, it's redundant but fine.
+                role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
                 chat_history.append({
-                    "role": msg.role.value if hasattr(msg.role, "value") else str(msg.role),
-                    "content": msg.content
+                    "role": role,
+                    "content": msg.content,
+                    "metadata": msg.metadata or {}
                 })
+                # The most recent assistant message that carried a cart_id wins.
+                if role == "assistant":
+                    cart_id_in_meta = (msg.metadata or {}).get("cart_id")
+                    if cart_id_in_meta:
+                        session_state["cart_id"] = cart_id_in_meta
             
-            agent_result = await self.orchestrator.run(
-                query=request.message,
-                chat_history=chat_history
-            )
+            from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
+            
+            if isinstance(self.orchestrator, ShopifyOrchestrator):
+                # Define a queue to capture status updates from the orchestrator
+                status_queue = asyncio.Queue()
+                
+                async def on_status(text: str):
+                    await status_queue.put(text)
+
+                # Run the orchestrator in a background task
+                orchestrator_task = asyncio.create_task(
+                    self.orchestrator.run(
+                        query=request.message,
+                        chat_history=chat_history,
+                        context={"session_state": session_state},
+                        on_status=on_status
+                    )
+                )
+
+                # While the orchestrator is running, yield any status updates
+                while not orchestrator_task.done() or not status_queue.empty():
+                    if not status_queue.empty():
+                        status_text = status_queue.get_nowait()
+                        yield StreamingMessageResponse(
+                            type="status",
+                            content=status_text,
+                            conversation_id=conversation_id
+                        )
+                    else:
+                        # Brief wait to avoid busy-waiting
+                        await asyncio.sleep(0.1)
+
+                # Get the final result
+                agent_result = await orchestrator_task
+            else:
+                # Standard execution for non-Shopify agents
+                agent_result = await self.orchestrator.run(
+                    query=request.message,
+                    chat_history=chat_history,
+                    context={"session_state": session_state}
+                )
             
             # Extract final answer
             full_response = agent_result.answer
@@ -478,6 +579,25 @@ class MessageService:
             # Orchestrator already ran the Critic loop and self-correction
             # So we just store the final answer and its metadata
             
+            # Extract cart_id from tool results for persistence across turns
+            saved_cart_id = None
+            for _, tool_result in agent_result.metadata.get("tool_results", {}).items():
+                if hasattr(tool_result, "metadata") and tool_result.metadata:
+                    cart = tool_result.metadata.get("cart")
+                    if cart and isinstance(cart, dict) and cart.get("cart_id"):
+                        saved_cart_id = cart["cart_id"]
+                        break
+            
+            # If we have an existing cart_id from session_state and no new one was created, keep it
+            if not saved_cart_id and session_state.get("cart_id"):
+                saved_cart_id = session_state["cart_id"]
+            
+            logger.info("cart_persistence_final_state", 
+                saved_cart_id=saved_cart_id, 
+                from_session=session_state.get("cart_id"),
+                newly_found=any("cart" in str(tr.metadata) for tr in agent_result.metadata.get("tool_results", {}).values() if hasattr(tr, 'metadata') and tr.metadata)
+            )
+
             await self.short_term.add_message(
                 conversation_id=conversation_id,
                 role=MessageRole.ASSISTANT,
@@ -487,9 +607,11 @@ class MessageService:
                     "agent_steps": agent_result.metadata.get("steps_executed", 0),
                     "validation_passed": agent_result.metadata.get("validation_passed"),
                     "validation_issues": agent_result.metadata.get("validation_issues", []),
-                    "plan": agent_result.metadata.get("plan")
+                    "plan": agent_result.metadata.get("plan"),
+                    "cart_id": saved_cart_id,
                 }
             )
+
             
             # Sync to Strapi dashboard (fire-and-forget — never blocks streaming)
             self.strapi.sync_conversation(
