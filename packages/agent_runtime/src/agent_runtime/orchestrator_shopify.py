@@ -1,18 +1,22 @@
 """
-Shopify Specialized Orchestrator - SOTA 2026 Plan-and-Execute Runtime.
+Shopify Specialized Orchestrator - SOTA 2026 Iterative Reasoning Loop.
 """
 
 import json
+import re
+import asyncio
 import structlog
-from typing import Dict, Any, List, Optional
+import inspect
+from typing import Dict, Any, List, Optional, Tuple
 from .orchestrator import Orchestrator, AgentResult
+from tools.types import ToolResult
 
 logger = structlog.get_logger(__name__)
 
 class ShopifyOrchestrator(Orchestrator):
     """
     Specialized Orchestrator for Shopify.
-    Handles Shopify-specific data structures and authentication requirements.
+    Handles Shopify-specific data structures, iterative tool chaining, and state management.
     """
     
     def __init__(
@@ -23,39 +27,10 @@ class ShopifyOrchestrator(Orchestrator):
         system_prompt: Optional[str] = None
     ):
         super().__init__(llm, tools, critic, system_prompt)
-        
-        # Add Shopify-specific instructions to the system prompt if not present
-        shopify_instructions = """
-### Shopify Agent Instructions
-
-**STOREFRONT TOOLS:**
-1. `search_shop_catalog(query, context)` — Find products. REQUIRED: both `query` AND `context` (brief description of user intent).
-2. `search_shop_policies_and_faqs(query, [context])` — Answer FAQs, return policies, store info.
-3. `get_cart(cart_id)` — Retrieve current cart. Use the `cart_id` from a previous `update_cart` response.
-4. `update_cart([cart_id], add_items)` — Add/update items in cart. `add_items` must be an array of objects with `product_variant_id` and `quantity`.
-   - If no `cart_id`, a new cart is created. Extract the new `cart_id` from the result and carry it in future turns.
-   - If `quantity` is not specified by the user, ALWAYS default it to 1.
-
-**CART SESSION RULES:**
-- After calling `update_cart`, extract the `cart_id` from the response and note it in your reasoning.
-- On subsequent cart calls (update or get), ALWAYS pass the same `cart_id` so items accumulate.
-- When the user says "add these", "add it", or similar, look at the conversation history for the previously discussed product's `variant_id`. NEVER guess or re-search unless the context is missing.
-
-**PRODUCT IDENTITY:**
-- When you search for products and find results, note the `product_variant_id` for each item.
-- For `update_cart`, always use the exact `product_variant_id` from the search result, NOT the `product_id`.
-
-
-**GENERAL:**
-- Do NOT show generic answers if tool results are available. Use the tool results only.
-- Only ask for confirmation before adding to cart if multiple products were found AND the user has NOT yet indicated which one they want. If the user has already said "yes", "the first one", "that one", or any clear affirmation in the current message or recent history, proceed directly to update_cart — do NOT re-search or re-confirm.
-- When the user specifies a variant attribute (color, size, etc.) like "white cricket socks" or "size L shirt", 
-  the plan MUST include BOTH the search step AND the update_cart step together. 
-  Never plan only the search step and stop — that causes a hallucinated response. 
-  Ambiguity only exists when NO variant is specified and multiple distinct variants are found.
-"""
-        if "Shopify Agent Instructions" not in self.system_prompt:
-            self.system_prompt += "\n" + shopify_instructions
+        # Context to track found products/variants for natural language reference
+        self.captured_ids: Dict[str, str] = {}
+        self.cart_id: Optional[str] = None
+        self.conversation: List[Dict[str, Any]] = []
 
     async def run(
         self, 
@@ -65,360 +40,347 @@ class ShopifyOrchestrator(Orchestrator):
         on_status: Optional[Any] = None
     ) -> AgentResult:
         """
-        Specialized Shopify Run loop with multi-step variable resolution.
+        Main entry point for the Shopify Orchestrator.
         """
-        logger.info("shopify_orchestrator_start", query=query)
-        scratchpad = []
+        logger.info("shopify_orchestrator_run", query=query)
         
-        if on_status:
-            await on_status("Planning actions...")
-
-        # 1. PLANNING PHASE
-        tool_schemas = json.dumps(self.tools.get_tool_schemas(), indent=2)
-        history_text = "None"
-        if chat_history:
-            formatted_msgs = [f"{m.get('role', 'u')}: {m.get('content', '')}" for m in chat_history[-6:]]
-            if formatted_msgs: history_text = "\n".join(formatted_msgs)
-
-        # Inject session state (like cart_id) into the planner
-        session_info = json.dumps(context.get("session_state", {}) if context else {}, indent=2)
-
-        planning_prompt = f"""{self.system_prompt}
-
-### Planning Phase
-You are now acting as the Planning Agent. Break down the user's request into a step-by-step plan.
-
-**SESSION STATE:**
-{session_info}
-(If a `cart_id` is present above, ALWAYS use it for cart-related tools.)
-
-**CHAINING RULES:**
-1. **MANDATORY CHAINING**: If the user specifies a variant (e.g., "white socks", "size L"), you MUST plan BOTH `search_shop_catalog` and `update_cart` in a single response. Never stop after search.
-2. **RESOLVE FIRST**: If `last_search_results` is in SESSION STATE and the user is confirming (e.g., "yes", "add it"), you MUST use the variant from session state directly and plan ONLY 1 step: `update_cart`.
-3. If the user wants to REMOVE an item, you MUST first call `get_cart` to find the correct line item ID (`line.id`) and then call `update_cart` with `remove_line_ids`.
-4. Use the `{{{{step_N.attribute}}}}` syntax to pass data between steps.
-   - Variant ID path: `{{{{step_1.products[0].variants[0].variant_id}}}}`
-   - Cart ID path: `{{{{step_1.cart.id}}}}`
-5. If a `cart_id` is provided in the **SESSION STATE** below, you MUST pass it to `update_cart` or `get_cart` to maintain the user's session.
-6. **STRICT PARAMETERS**: ALWAYS check the 'Available Tools' list below for correct parameters. For `update_cart`, use `add_items` (list of objects) or `remove_line_ids` (list of strings).
-
-**WHEN TO USE TOOLS:**
-- get_cart → trigger on when user want to get cart information or if user wants to remove any item from cart.
-  ALWAYS use cart_id from SESSION STATE. Never search catalog for cart queries.
-
-**EXAMPLES:**
-Query: "add white cricket socks to cart" (New Cart)
-1. tool_name: search_shop_catalog, tool_input: {{"query": "cricket socks", "context": "user wants white variant"}}
-2. tool_name: update_cart, tool_input: {{"add_items": [{{"product_variant_id": "{{{{step_1.products[0].variants[0].variant_id}}}}", "quantity": 1}}]}}
-
-Query: "add black cricket socks to cart" (Existing Cart: gid://shopify/Cart/ABC)
-1. tool_name: search_shop_catalog, tool_input: {{"query": "cricket socks", "context": "user wants black variant"}}
-2. tool_name: update_cart, tool_input: {{"cart_id": "gid://shopify/Cart/ABC", "add_items": [{{"product_variant_id": "{{{{step_1.products[0].variants[0].variant_id}}}}", "quantity": 1}}]}}
-
-Query: "add cricket socks to cart" (Ambiguous - Multiple variants exist)
-→ Search first, then ASK which variant before planning update_cart.
-1. tool_name: search_shop_catalog, tool_input: {{"query": "cricket socks", "context": "need to confirm variant"}}
-
-Query: "remove cricket socks from my cart"
-1. tool_name: get_cart, tool_input: {{"cart_id": "gid://shopify/Cart/123"}}
-2. tool_name: update_cart, tool_input: {{"cart_id": "gid://shopify/Cart/123", "remove_line_ids": ["{{{{step_1.cart.lines[0].id}}}}"]}}
-
-Query: "view cart" (Existing Cart: gid://shopify/Cart/ABC)
-1. tool_name: get_cart, tool_input: {{"cart_id": "gid://shopify/Cart/ABC"}}
-
-Query: "view cart" (No Cart in Session)
-→ Return steps: [] and reply "You don't have an active cart yet."
-
-Query: "yes" / "add the first one" (with last_search_results in SESSION STATE)
-→ Use concrete variant ID from history. DO NOT call search again.
-1. tool_name: update_cart, tool_input: {{"cart_id": "gid://shopify/Cart/ABC", "add_items": [{{"product_variant_id": "gid://shopify/ProductVariant/12345", "quantity": 1}}]}}
-
-**STRICT RULES:**
-- NEVER use placeholders like "<angle brackets>" or "PLACEHOLDER" in tool_input.
-- Dynamic values must use `{{{{step_N.path}}}}` or the literal ID from SESSION STATE.
-- If last_search_results exists and user affirms, exactly 1 step (update_cart) is required.
-- Do NOT plan a search step if the variant ID is already known from history or session.
-
-Conversation History:
-{history_text}
-
-User Request: {query}
-
-Available Tools:
-{tool_schemas}
-
-Output JSON Format:
-{{
-  "goal": "Description",
-  "steps": [
-    {{ "id": 1, "thought": "Reasoning", "tool_name": "...", "tool_input": {{ ... }} }}
-  ]
-}}"""
+        # 1. Reset/Initialize state for this turn
+        self._initialize_session_state(chat_history, context)
         
-        try:
-            plan_response = await self.llm.generate(planning_prompt)
-            content = plan_response.content.strip()
-            if content.startswith("```json"):
-                content = content[7:-3]
-            elif content.startswith("```"):
-                content = content[3:-3]
-            
-            logger.debug("shopify_plan_raw", content=content)
-            
-            try:
-                plan_data = json.loads(content)
-            except json.JSONDecodeError as je:
-                # Robust fallback: try to find the first '{' and last '}'
-                try:
-                    start = content.find('{')
-                    end = content.rfind('}')
-                    if start != -1 and end != -1:
-                        plan_data = json.loads(content[start:end+1])
-                    else: raise je
-                except:
-                    logger.error("shopify_json_parse_failed", content=content)
-                    raise je
-
-            # DEBUG: Log plan data
-            logger.info("shopify_plan_generated", steps=[
-                {"id": s.get("id"), "tool": s.get("tool_name"), "input": s.get("tool_input")} 
-                for s in plan_data.get("steps", [])
-            ])  
-
-            from llm.reasoning.planning import Plan # Import here to avoid issues
-            plan = Plan(**plan_data)
-        except Exception as e:
-            logger.error("planning_failed", error=str(e))
-            # Fallback to direct answer if planning fails
-            response = await self.llm.generate(f"Please answer this directly: {query}")
-            return AgentResult(answer=response.content, metadata={"fallback": True}, success=True)
-
-        # 2. EXECUTION PHASE
-        results = {}
-        for step in plan.steps:
-            if on_status:
-                msg = f"Executing: {step.tool_name}..."
-                if "search" in step.tool_name: msg = "Searching catalog..."
-                elif "cart" in step.tool_name: msg = "Updating your cart..."
-                await on_status(msg)
-
-            # Resolve variables ({{step_1.products[0].variants[0].variant_id}})
-            actual_input = step.tool_input.copy()
-            
-            # Validation: Ensure update_cart has required parameters
-            if step.tool_name == "update_cart":
-                if not actual_input.get("add_items") and not actual_input.get("remove_line_ids"):
-                    logger.warning("skipping_empty_update_cart", step_id=step.id)
-                    continue
-                
-                # Default quantity to 1 if missing
-                if actual_input.get("add_items"):
-                    for item in actual_input["add_items"]:
-                        if not item.get("quantity"):
-                            item["quantity"] = 1
-
-            def resolve(obj):
-                if isinstance(obj, str) and "{" in obj and "}" in obj:
-                    import re
-                    pattern = r"\{+(step_\d+)\.([^}]+?)\}+"
-                    
-                    def replacer(match):
-                        step_ref = match.group(1).strip()
-                        path_str = match.group(2).strip()
-                        path = [p.strip() for p in path_str.split(".")]
-                        try:
-                            step_id = int(step_ref.split("_")[1])
-                            if step_id not in results:
-                                return match.group(0)
-                            
-                            curr = results[step_id].data
-                            
-                            # DEBUG: Log raw data
-                            logger.debug("debug_resolve_step_data", step_id=step_id, raw_data=curr)
-
-                            if isinstance(curr, str):
-                                try: curr = json.loads(curr)
-                                except: pass
-                            
-                            # DEBUG: Internal helper to resolve path for logging
-                            def resolve_path(data, p_list):
-                                try:
-                                    c = data
-                                    for p in p_list:
-                                        if "[" in p:
-                                            name, rest = p.split("[", 1)
-                                            idx = int(rest[:-1])
-                                            c = c.get(name, [])[idx]
-                                        else: c = c.get(p)
-                                    return c
-                                except: return "PATH_NOT_FOUND"
-
-                            # Log specific paths as requested by user
-                            if step_id == 1:
-                                path1 = ["products[0]", "variants[0]", "variant_id"]
-                                path2 = ["products[0]", "product_variant_id"]
-                                logger.debug("debug_resolve_v1", resolved=resolve_path(curr, path1))
-                                logger.debug("debug_resolve_v2", resolved=resolve_path(curr, path2))
-
-                            for p in path:
-                                if "[" in p:
-                                    name, rest = p.split("[", 1)
-                                    idx = int(rest[:-1])
-                                    curr = curr.get(name, [])[idx]
-                                else:
-                                    curr = curr.get(p)
-                            return str(curr) if curr is not None else match.group(0)
-                        except Exception as ex:
-                            logger.warning("resolve_failed_exception", error=str(ex), ref=match.group(0))
-                            return match.group(0)
-                    
-                    # Exact match for type preservation
-                    exact_match = re.fullmatch(pattern, obj)
-                    if exact_match:
-                        step_ref = exact_match.group(1).strip()
-                        path = [p.strip() for p in exact_match.group(2).split(".")]
-                        try:
-                            step_id = int(step_ref.split("_")[1])
-                            
-                            logger.info("resolve_attempt", step_id=step_id, 
-                                data_type=type(results[step_id].data).__name__ if step_id in results else "MISSING",
-                                data_keys=list(results[step_id].data.keys()) if (step_id in results and isinstance(results[step_id].data, dict)) else "NOT_DICT"
-                            )
-
-                            curr = results[step_id].data
-                            if isinstance(curr, str):
-                                try: curr = json.loads(curr)
-                                except: pass
-                            for p in path:
-                                if "[" in p:
-                                    name, rest = p.split("[", 1)
-                                    idx = int(rest[:-1])
-                                    curr = curr.get(name, [])[idx]
-                                else:
-                                    curr = curr.get(p)
-                            return curr
-                        except: return obj
-                            
-                    return re.sub(pattern, replacer, obj)
-                elif isinstance(obj, dict): return {k: resolve(v) for k, v in obj.items()}
-                elif isinstance(obj, list): return [resolve(i) for i in obj]
-                return obj
-            
-            resolved_input = resolve(actual_input)
-            logger.debug("plan_step_resolved_input", resolved=resolved_input)
-
-            def clean_nulls(obj):
-                """Remove None values and unresolved template strings from tool input."""
-                if isinstance(obj, dict):
-                    return {
-                        k: clean_nulls(v) for k, v in obj.items()
-                        if v is not None
-                        and v != ""
-                        and not (isinstance(v, str) and "{" in v)
-                    }
-                elif isinstance(obj, list):
-                    return [clean_nulls(i) for i in obj]
-                return obj
-
-            resolved_input = clean_nulls(resolved_input)
-            logger.info("shopify_resolved_input", tool=step.tool_name, input=resolved_input)
-
-            logger.debug("clean_tool_input", tool=step.tool_name, input=resolved_input)
-
-            tool = self.tools.get(step.tool_name)
-            if not tool: continue
-
-            try:
-                result = await tool.run(**resolved_input)
-
-                data = result.data
-                if isinstance(data, str):
-                    try: data = json.loads(data)
-                    except: pass
-
-                # Re-wrap with parsed data — ToolResult is immutable so mutation silently fails
-                from tools.types import ToolResult
-                results[step.id] = ToolResult(success=result.success, data=data, error=result.error)
-                logger.info("tool_result_raw", tool=step.tool_name, data=data)
-                
-                scratchpad.append({
-                    "step": step.id, "thought": step.thought, "action": step.tool_name,
-                    "input": resolved_input, "observation": data
-                })
-
-                # 4. POST-PROCESSING (Extract and persist session state)
-                if result.success and context:
-                    # Persist search results
-                    if step.tool_name == "search_shop_catalog":
-                        if isinstance(data, dict) and "products" in data:
-                            context.setdefault("session_state", {})["last_search_results"] = data["products"]
-                            logger.info("last_search_results_persisted", count=len(data["products"]))
-                    
-                    # Persist cart_id
-                    if step.tool_name == "update_cart":
-                        new_cart_id = None
-                        if isinstance(data, dict):
-                            new_cart_id = (
-                                data.get("cart", {}).get("id") or
-                                data.get("cart_id") or
-                                data.get("id")
-                            )
-                        
-                        if new_cart_id:
-                            context.setdefault("session_state", {})["cart_id"] = new_cart_id
-                            logger.info("cart_id_persisted", cart_id=new_cart_id)
-                        else:
-                            logger.warning("cart_id_not_found_in_update_cart_response", data=data)
-
-            except Exception as e:
-                logger.error("tool_execution_failed", tool=step.tool_name, error=str(e), exc_info=True)
-                from tools.types import ToolResult
-                results[step.id] = ToolResult(success=False, data=None, error=str(e))
-
-        # 3. SYNTHESIS
-        if on_status: await on_status("Generating response...")
-        final_answer = await self._synthesize_answer(query, scratchpad)
+        # 2. Add current query
+        self.conversation.append({"role": "user", "content": query})
         
+        # 3. Execute the iterative agent loop
+        final_answer, tool_results = await self._agent_loop(on_status)
+        
+        # 4. Return standard AgentResult with persisted state in metadata
         return AgentResult(
             answer=final_answer,
-            metadata={"plan": plan.dict(), "steps_executed": len(results), "tool_results": results}
+            metadata={
+                "steps_executed": len(tool_results), 
+                "tool_results": tool_results,
+                "cart_id": self.cart_id,
+                "captured_ids": self.captured_ids
+            }
         )
 
-    async def _synthesize_answer(self, query: str, scratchpad: List[Dict]) -> str:
-        """
-        Overridden synthesis to specifically handle AuthRequired and Shopify product data.
-        """
-        # Check if any step returned an AuthRequired message
-        auth_url = None
-        for step in scratchpad:
-            obs = step.get("observation", "")
-            if isinstance(obs, str) and "Authentication required. Please log in:" in obs:
-                auth_url = obs.split("Please log in: ")[-1].strip()
-                break
+    def _initialize_session_state(self, chat_history: Optional[List[Dict]], context: Optional[Dict]):
+        """Load persistent state and reconstruct conversation history."""
+        session_state = (context or {}).get("session_state", {})
+        self.cart_id = session_state.get("cart_id")
+        self.captured_ids = session_state.get("captured_ids", {})
         
-        if auth_url:
-            return f"I need you to authenticate with Shopify to access that information. Please log in here: {auth_url}\n\nOnce you've logged in, I'll be able to help you further!"
+        self.conversation = []
+        if chat_history:
+            for msg in chat_history:
+                role = msg.get("role")
+                content = msg.get("content")
+                if role and content:
+                    conv_msg = {"role": role, "content": content}
+                    if role == "tool" and msg.get("name"):
+                        conv_msg["name"] = msg["name"]
+                    self.conversation.append(conv_msg)
 
-        # Otherwise use standard synthesis but with Shopify-aware prompt
-        prompt = f"""
-{self.system_prompt}
+    async def _agent_loop(self, on_status: Optional[Any] = None) -> Tuple[str, Dict[str, ToolResult]]:
+        """Core iterative loop for reasoning and acting."""
+        tool_results_map: Dict[str, ToolResult] = {}
+        iteration = 0
+        max_iterations = 6
+        last_tool_call = None
 
-User Query: {query}
+        while iteration < max_iterations:
+            iteration += 1
+            try:
+                logger.info("shopify_agent_loop_iteration", iteration=iteration)
+                
+                # A. Get next action from LLM
+                message, tool_call = await self._get_next_action()
+                logger.info("shopify_agent_thought", iteration=iteration, message=message, tool_call=tool_call)
 
-Execution History (ONLY source of truth):
-{json.dumps(scratchpad, indent=2)}
+                if not tool_call:
+                    # No tool call - this is the final final answer
+                    logger.info("shopify_final_answer_reached")
+                    self.conversation.append({"role": "assistant", "content": message})
+                    return message, tool_results_map
 
-STRICT RULES — violations are unacceptable:
-1. ONLY use data from Execution History above. Never invent product names, 
-   sizes, quantities, prices, or cart contents not present in tool results.
-2. If update_cart succeeded, confirm ONLY the product name and variant from 
-   that tool's result. Do NOT summarize the full cart unless get_cart was called.
-3. If get_cart was called, show cart contents EXACTLY as returned by the tool.
-4. If a tool returned an error, report it honestly. Never pretend it succeeded.
-5. If no tool was called, answer conversationally without mentioning products.
-6. NEVER describe an action that will happen in the future (e.g. "I'll add it now", 
-   "Let me do that"). Only describe what the tools have ALREADY done. 
-   If update_cart was not called, do NOT say anything was added to the cart.
+                # B. Execute the tool call
+                if tool_call == last_tool_call:
+                    logger.warning("shopify_loop_detected", tool=tool_call["tool_name"])
+                    break
+                last_tool_call = tool_call
+
+                tool_name = tool_call["tool_name"]
+                tool_input = tool_call.get("tool_input") or {}
+
+                if on_status and callable(on_status):
+                    try:
+                        res = on_status(self._get_status_message(tool_name))
+                        if res is not None:
+                            if inspect.isawaitable(res):
+                                await res
+                    except Exception as status_err:
+                        logger.warning("status_callback_failed", error=str(status_err))
+
+                # C. Perform action & capture results
+                tool_result = await self._execute_tool_action(tool_name, tool_input)
+                tool_results_map[tool_name] = tool_result
+                logger.info("shopify_tool_result", tool=tool_name, success=tool_result.success, error=tool_result.error)
+
+                # D. Record interaction
+                self.conversation.append({"role": "assistant", "content": message})
+                
+                # Use error message if success is false
+                content = tool_result.error if not tool_result.success else self._format_tool_output(tool_result.data)
+                self.conversation.append({
+                    "role": "tool",
+                    "name": tool_name,
+                    "content": content
+                })
+            except Exception as loop_err:
+                logger.error("shopify_agent_loop_error", iteration=iteration, error=str(loop_err))
+                # Feed error back to LLM to allow one last chance to recover
+                self.conversation.append({"role": "tool", "name": "system", "content": f"System Error: {str(loop_err)}"})
+                if iteration >= max_iterations:
+                    break
+
+        logger.warning("shopify_agent_loop_max_iterations_or_loop")
+        return "I've run into an issue processing your request. Could you please specify which product or action you'd like me to take?", tool_results_map
+
+    async def _get_next_action(self) -> Tuple[str, Optional[Dict]]:
+        """Consult the LLM to decide the next step."""
+        prompt = self._build_reasoning_prompt()
+        system_prompt = self._get_combined_system_prompt()
+        
+        logger.debug("shopify_generating_action", prompt=prompt)
+        response = await self.llm.generate(prompt=prompt, system_prompt=system_prompt)
+        message = response.content.strip()
+        
+        return message, self._parse_tool_call(message)
+
+    async def _execute_tool_action(self, tool_name: str, tool_input: Dict[str, Any]) -> ToolResult:
+        """Preprocess, execute, and postprocess a tool call."""
+        try:
+            # 1. Resolve IDs from cache and inject cart_id
+            self._preprocess_input(tool_name, tool_input)
+            
+            logger.info("shopify_executing_tool", tool=tool_name, input=tool_input)
+            
+            # 2. Call the registry
+            tool = self.tools.get(tool_name)
+            if not tool:
+                logger.error("shopify_tool_not_found", tool_name=tool_name)
+                return ToolResult(success=False, data=None, error=f"Tool '{tool_name}' not found.")
+                
+            result = await tool.run(**tool_input)
+            logger.info("shopify_tool_result_raw", tool=tool_name, success=result.success, error=result.error)
+            
+            # 3. Capture state from result (cart_id, products, etc.)
+            if result.success:
+                self._capture_result_state(tool_name, result)
+            return result
+        except Exception as e:
+            logger.error("shopify_tool_execution_failed", tool=tool_name, error=str(e))
+            return ToolResult(success=False, data=None, error=str(e))
+
+    def _preprocess_input(self, tool_name: str, tool_input: Dict[str, Any]):
+        """Inject state and resolve natural language references to GIDs."""
+        if self.cart_id:
+            for key in ["cart_id", "cartId"]:
+                if key in tool_input and not tool_input[key]:
+                    tool_input[key] = self.cart_id
+            if tool_name in ["update_cart", "get_cart"] and "cart_id" not in tool_input:
+                tool_input["cart_id"] = self.cart_id
+        
+        # If calling get_cart/update_cart without a cart_id, it might fail or create a new one.
+        # We handle this by letting the tool itself decide, but we log a warning.
+        if tool_name in ["get_cart", "update_cart"] and not tool_input.get("cart_id"):
+            logger.warning("shopify_executing_without_cart_id", tool=tool_name, current_input=tool_input)
+        
+        # 2. Resolve IDs and normalize keys for update_cart
+        if tool_name == "update_cart":
+            # The Shopify MCP tool expects 'add_items' (List) and 'product_variant_id' (GID)
+            items = tool_input.get("add_items") or tool_input.get("lines")
+            if items and isinstance(items, list):
+                tool_input["add_items"] = items
+                tool_input.pop("lines", None)
+                
+                for item in items:
+                    if not isinstance(item, dict): continue
+                    
+                    # Detect existing variant ID
+                    existing_id = None
+                    for key in ["product_variant_id", "merchandiseId", "merchandise_id", "variant_id", "variantId", "id"]:
+                        val = item.get(key)
+                        if val and isinstance(val, str) and val.startswith("gid://"):
+                            existing_id = val
+                            break
+                    
+                    # Resolution logic if no GID found
+                    if not existing_id:
+                        item_str = str(item).lower()
+                        for title, gid in self.captured_ids.items():
+                            if title in item_str or any(word in title for word in item_str.split()):
+                                existing_id = gid
+                                logger.info("shopify_resolved_id", title=title, gid=gid)
+                                break
+                        
+                        if not existing_id and len(self.captured_ids) == 1:
+                            existing_id = list(self.captured_ids.values())[0]
+                            logger.info("shopify_fallback_id")
+
+                    # Final normalization to 'product_variant_id'
+                    if existing_id:
+                        item["product_variant_id"] = existing_id
+                        # Cleanup other keys
+                        for key in ["lines", "merchandiseId", "merchandise_id", "variant_id", "variantId", "id"]:
+                            if key != "product_variant_id":
+                                item.pop(key, None)
+                    else:
+                        logger.warning("shopify_missing_id_for_item", item=item)
+
+                    # Ensure quantity is integer
+                    if "quantity" in item:
+                        try: item["quantity"] = int(item["quantity"])
+                        except: item["quantity"] = 1
+                
+                # Final validation pass
+                for item in tool_input["add_items"]:
+                    pvid = item.get("product_variant_id")
+                    if not pvid or not str(pvid).startswith("gid://"):
+                        product_name = item.get("title") or item.get("product_name") or "the product"
+                        raise ValueError(f"Missing variant ID for '{product_name}'. You MUST call 'search_shop_catalog' first to find the correct variant ID.")
+
+        # 3. Strip any remaining None/null/empty strings to prevent tool failures
+        # Specifically target 'cart_id' and 'cartId' if they are invalid
+        for key in ["cart_id", "cartId"]:
+            val = tool_input.get(key)
+            if val is None or val == "" or str(val).lower() == "none" or str(val).lower() == "null":
+                tool_input.pop(key, None)
+                logger.info("shopify_stripped_invalid_cart_id", key=key)
+
+        # General strip for any other None values
+        keys_to_remove = [k for k, v in tool_input.items() if v is None or v == "null"]
+        if keys_to_remove:
+            logger.info("shopify_stripping_keys", keys=keys_to_remove)
+        for k in keys_to_remove:
+            tool_input.pop(k, None)
+
+    def _capture_result_state(self, tool_name: str, result: ToolResult):
+        """Update orchestrator state based on tool outputs."""
+        metadata = result.metadata or {}
+        
+        # Capture Cart ID
+        cart = metadata.get("cart")
+        if cart and isinstance(cart, dict):
+            new_id = cart.get("cart_id") or cart.get("id")
+            if new_id:
+                self.cart_id = str(new_id)
+
+        # Capture Product/Variant IDs for future reference
+        products = metadata.get("products", [])
+        for p in products:
+            if not isinstance(p, dict): continue
+            name = str(p.get("name") or p.get("title") or "").lower()
+            v_id = p.get("variant_id") or p.get("id")
+            if name and v_id:
+                self.captured_ids[name] = str(v_id)
+
+    def _build_reasoning_prompt(self) -> str:
+        """Construct the few-shot prompting context."""
+        text = ""
+        # Keep last 10 messages for focus
+        for msg in self.conversation[-10:]:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "user":
+                text += f"User: {content}\n"
+            elif role == "assistant":
+                text += f"Assistant: {content}\n"
+            elif role == "tool":
+                text += f"Tool ({msg.get('name', 'unknown')}): {content}\n"
+        
+        text += "\nAssistant:"
+        return text
+
+    def _get_combined_system_prompt(self) -> str:
+        """Combine base system prompt with Shopify-specific rules."""
+        base_prompt = self.system_prompt or "You are a helpful AI assistant."
+        
+        shopify_rules = f"""
+You are a Shopify assistant. You help users find products, answer questions about policies, and manage their shopping cart.
+Current Cart ID: {self.cart_id or "None"}
+
+⚠️ MANDATORY TOOL USAGE RULES ⚠️
+1. ALWAYS verify the current cart state by calling `get_cart` before answering any questions about what is in the cart. DO NOT rely on your memory or previous turns.
+2. To browse products → Use `search_shop_catalog(query, context)`.
+3. To check policies/FAQs/shipping/returns → Use `search_shop_policies_and_faqs(query, context)`.
+4. To see the current cart items (e.g. "what's in my cart?", "cart info") → Use `get_cart(cart_id)`.
+5. To add or remove items → Use `update_cart(cart_id, add_items)`.
+
+STRICT OUTPUT FORMAT:
+1. To call a tool → You MUST return ONLY a JSON object. No conversational text.
+   Example: {{"tool_name": "search_shop_catalog", "tool_input": {{"query": "socks", "context": "browsing"}}}}
+2. For the final answer → You MUST return natural language. DO NOT return raw JSON.
+   Example: "I found some white cricket socks for you! Would you like me to add them to your cart?"
+
+CRITICAL GUIDELINES:
+- **IMMEDIATE ACTION**: If the user says "add [product] to cart", "buy [product]", or "add it", and you have found the product/variant → You MUST call `update_cart` immediately in the VERY NEXT iteration. DO NOT ask "Would you like me to add these?". Just do it.
+- DO NOT say "Done" or "I have added..." UNLESS you have executed `update_cart` in a previous iteration of THIS turn and received a successful response.
+- DO NOT report cart items UNLESS you have executed `get_cart` in THIS turn.
+- IF a user asks to add something you haven't searched for yet (e.g. "add socks") → You MUST first call `search_shop_catalog`.
+- IF a user asks to remove something → You MUST first call `get_cart`, then call `update_cart` with a negative quantity for that specific variant ID.
+- IF you do not have a Cart ID yet and need to add an item → Omit the `cart_id` parameter entirely from `update_cart` to create a new cart.
+- ONLY add items to the cart if the user explicitly says "add", "buy", "yes" (after you suggested adding), or "I want this".
+- NEVER ask the user for "GIDs" or "IDs". Use the names you see in the tool results.
+
+CHAINING EXAMPLES:
+1. User: "Add white socks" -> Action: `search_shop_catalog` -> (Observes result) -> Thought: I see the variant ID. Now I'll add it. -> Action: `update_cart` -> (Observes result) -> Final Answer: "Done! I've added them."
+2. User: "What's in my cart?" -> Action: `get_cart` -> (Observes result) -> Final Answer: "You have white socks in your cart."
 """
-        response = await self.llm.generate(prompt)
-        return response.content
+        return f"{base_prompt}\n\n{shopify_rules}"
+
+    def _get_status_message(self, tool_name: str) -> str:
+        """Map tool names to user-friendly status updates."""
+        if "search" in tool_name: return "Searching catalog..."
+        if "cart" in tool_name: return "Updating your cart..."
+        if "details" in tool_name: return "Fetching product details..."
+        return f"Executing {tool_name}..."
+
+    def _format_tool_output(self, data: Any) -> str:
+        """Format data for LLM consumption."""
+        if isinstance(data, str): return data
+        return json.dumps(data)
+
+    def _parse_tool_call(self, message: str) -> Optional[Dict]:
+        """Extract JSON tool call from LLM response."""
+        clean_msg = message.strip()
+        
+        # 1. Direct JSON
+        try:
+            parsed = json.loads(clean_msg)
+            if isinstance(parsed, dict) and "tool_name" in parsed: 
+                return parsed
+        except: pass
+
+        # 2. Markdown Block
+        match = re.search(r"```json\s*({.*?})\s*```", message, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(1))
+                if isinstance(parsed, dict) and "tool_name" in parsed: 
+                    return parsed
+            except: pass
+            
+        # 3. Embedded JSON
+        start_idx = message.find('{')
+        if start_idx != -1:
+            end_idx = message.rfind('}')
+            if end_idx > start_idx:
+                try:
+                    candidate = message[start_idx:end_idx+1]
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict) and "tool_name" in parsed:
+                        return parsed
+                except: pass
+        
+        return None
