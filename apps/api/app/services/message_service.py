@@ -402,17 +402,68 @@ class MessageService:
                 escalations=escalations,
             )
             
+            # Retrieve recent history for context (last 6 messages)
+            recent_messages = await self.short_term.get_recent_messages(
+                conversation_id=conversation_id,
+                limit=6
+            )
+            
+            # Build chat history AND extract session state (e.g. cart_id) from
+            # previous assistant message metadata so the agent can reuse the cart.
+            chat_history = []
+            session_state: dict = {}
+            for msg in recent_messages:
+                role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
+                chat_history.append({
+                    "role": role,
+                    "content": msg.content,
+                    "metadata": msg.metadata or {}
+                })
+                # The most recent assistant message that carried session state wins.
+                if role == "assistant":
+                    meta = msg.metadata or {}
+                    if "cart_id" in meta:
+                        session_state["cart_id"] = meta["cart_id"]
+                    if "captured_ids" in meta:
+                        session_state["captured_ids"] = meta.get("captured_ids", {})
+                    if "last_searched" in meta:
+                        session_state["last_searched"] = meta.get("last_searched", {})
+
+            context_dict = {"memory": memory_context, "session_state": session_state}
+            
             # 4. RUN SOTA ORCHESTRATOR LOOP
             # Instead of linear retrieve->generate, let the agent plan and execute.
-            agent_result = await self.orchestrator.run(
-                query=request.message,
-                context={"memory": memory_context}
-            )
+            from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
+            
+            if isinstance(self.orchestrator, ShopifyOrchestrator):
+                agent_result = await self.orchestrator.run(
+                    query=request.message,
+                    chat_history=chat_history,
+                    context=context_dict
+                )
+            else:
+                agent_result = await self.orchestrator.run(
+                    query=request.message,
+                    context={"memory": memory_context}
+                )
             
             response_text = agent_result.answer
             # Note: Validation now happens inside Orchestrator via Critic loop
             # Check agent_result.metadata for validation_passed and validation_issues
             
+            # Extract cart_id from tool results for persistence across turns
+            saved_cart_id = None
+            for _, tool_result in agent_result.metadata.get("tool_results", {}).items():
+                if hasattr(tool_result, "metadata") and tool_result.metadata:
+                    cart = tool_result.metadata.get("cart")
+                    if cart and isinstance(cart, dict) and cart.get("cart_id"):
+                        saved_cart_id = cart["cart_id"]
+                        break
+            
+            # If we have an existing cart_id from session_state and no new one was created, keep it
+            if not saved_cart_id and session_state.get("cart_id"):
+                saved_cart_id = session_state["cart_id"]
+
             # 5. Store assistant response
             await self.short_term.add_message(
                 conversation_id=conversation_id,
@@ -421,7 +472,12 @@ class MessageService:
                 metadata={
                     "user_id": user_id,
                     "agent_steps": agent_result.metadata.get("steps_executed", 0),
-                    "plan_goal": agent_result.metadata.get("plan", {}).get("goal")
+                    "validation_passed": agent_result.metadata.get("validation_passed"),
+                    "validation_issues": agent_result.metadata.get("validation_issues", []),
+                    "plan": agent_result.metadata.get("plan"),
+                    "cart_id": saved_cart_id,
+                    "captured_ids": agent_result.metadata.get("captured_ids"),
+                    "last_searched": agent_result.metadata.get("last_searched"),
                 }
             )
             
@@ -511,11 +567,17 @@ class MessageService:
                     "content": msg.content,
                     "metadata": msg.metadata or {}
                 })
-                # The most recent assistant message that carried a cart_id wins.
+                # The most recent assistant message that carried session state wins.
                 if role == "assistant":
-                    cart_id_in_meta = (msg.metadata or {}).get("cart_id")
-                    if cart_id_in_meta:
-                        session_state["cart_id"] = cart_id_in_meta
+                    meta = msg.metadata or {}
+                    if "cart_id" in meta:
+                        session_state["cart_id"] = meta["cart_id"]
+                    if "checkout_url" in meta:
+                        session_state["checkout_url"] = meta["checkout_url"]
+                    if "captured_ids" in meta:
+                        session_state["captured_ids"] = meta.get("captured_ids", {})
+                    if "last_searched" in meta:
+                        session_state["last_searched"] = meta.get("last_searched", {})
             
             from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
             
@@ -609,6 +671,9 @@ class MessageService:
                     "validation_issues": agent_result.metadata.get("validation_issues", []),
                     "plan": agent_result.metadata.get("plan"),
                     "cart_id": saved_cart_id,
+                    "checkout_url": agent_result.metadata.get("checkout_url"),
+                    "captured_ids": agent_result.metadata.get("captured_ids"),
+                    "last_searched": agent_result.metadata.get("last_searched"),
                 }
             )
 
