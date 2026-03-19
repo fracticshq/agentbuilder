@@ -17,10 +17,13 @@ services:
       REDIS_URL: redis://redis:6379
       API_HOST: "0.0.0.0"
       API_PORT: "8000"
+      SHOPIFY_MCP_URL: "http://shopify:3005/mcp"
     depends_on:
       mongodb:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      shopify:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -59,6 +62,23 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+
+  # ── Shopify MCP ──────────────────────────────────────────────────────────────
+  shopify:
+    build:
+      context: ./apps/shopify-mcp
+      dockerfile: Dockerfile
+    image: agentbuilder-shopify
+    container_name: agentbuilder-shopify
+    ports:
+      - "3005:3005"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # ── MongoDB ──────────────────────────────────────────────────────────────────
   mongodb:
