@@ -4,14 +4,9 @@
 #   docker build -f apps/api/Dockerfile -t agentbuilder-api .
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM python:3.12-slim
+FROM python:3.12
 
 WORKDIR /app
-
-# System deps needed to compile some Python packages
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libffi-dev \
-    && rm -rf /var/lib/apt/lists/*
 
 # ── Install local packages first (better layer caching) ───────────────────────
 COPY packages/commons    /app/packages/commons

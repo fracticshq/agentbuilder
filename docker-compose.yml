@@ -10,13 +10,7 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - .env                            # your secrets — never baked into the image
-    environment:
-      # Override DB URLs to use Docker service names instead of localhost
-      MONGODB_URI: mongodb://mongodb:27017
-      REDIS_URL: redis://redis:6379
-      API_HOST: "0.0.0.0"
-      API_PORT: "8000"
+      - .env.docker
     depends_on:
       mongodb:
         condition: service_healthy
