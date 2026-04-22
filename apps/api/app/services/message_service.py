@@ -4,7 +4,6 @@ Integrates Phase 5 Memory System with retrieval and LLM generation.
 Phase 4: Response validation to prevent hallucinations.
 """
 
-import os
 import asyncio
 import json
 import uuid
@@ -36,6 +35,7 @@ from ..config import Settings
 from ..connections import connection_manager
 from .response_validator import ResponseValidator  # Phase 4
 from .strapi_client import StrapiClient
+from .runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger(__name__)
 
@@ -119,6 +119,7 @@ class MessageService:
         # Agent configuration (will be loaded on first message)
         self.agent_config = None
         self.system_prompt = None
+        self.runtime_settings_service = RuntimeSettingsService(settings)
         
         # Memory system will be initialized after database is set
         self.memory_config = MemoryConfig()
@@ -138,8 +139,8 @@ class MessageService:
             graph_rules=self.memory_config.ENABLE_GRAPH_RULES,
         )
         
-        # Initialize retrieval pipeline with configuration
-        retrieval_config = RetrievalConfig(
+        # Initialize retrieval pipeline configuration.
+        self.retrieval_config = RetrievalConfig(
             vector_enabled=True,
             vector_top_k=50,
             similarity_threshold=0.7,
@@ -152,33 +153,15 @@ class MessageService:
             page_boost_enabled=True,
             dedup_enabled=True
         )
-        
-        try:
-            self.retrieval_pipeline = RetrievalPipeline(
-                config=retrieval_config,
-                brand_id=brand_id
-            )
-            logger.info("retrieval_pipeline_initialized", brand_id=brand_id)
-        except Exception as e:
-            logger.warning("retrieval_pipeline_init_failed", error=str(e))
-            self.retrieval_pipeline = None
-        
-        self.llm_provider = self._build_llm_provider()
+        self.retrieval_pipeline = None
+        self.llm_provider = None
         
         # Phase 4: Initialize response validator
         self.response_validator = ResponseValidator(strict_mode=True)
         
         # Phase 6: Initialize SOTA Orchestrator with Critic
         self.tool_registry = ToolRegistry()
-        if self.retrieval_pipeline:
-            self.tool_registry.register(RetrievalTool(self.retrieval_pipeline))
-            
-        self.orchestrator = Orchestrator(
-            llm=self.llm_provider,
-            tools=self.tool_registry,
-            critic=self.response_validator,  # Enable autonomous self-correction
-            system_prompt=None  # Will be loaded dynamically from DB
-        )
+        self.orchestrator = None
 
         # Strapi dashboard sync (fire-and-forget, non-blocking)
         self.strapi = StrapiClient(
@@ -188,31 +171,17 @@ class MessageService:
 
         logger.info("message_service_initialized", brand_id=self.brand_id)
 
-    def _build_llm_provider(self, provider_name: Optional[str] = None, model: Optional[str] = None):
-        """Build an LLM provider from env-backed credentials and optional agent overrides."""
-        resolved_provider = provider_name or self.settings.DEFAULT_LLM_PROVIDER or "openai"
-
-        if resolved_provider == "openai":
-            api_key = self.settings.OPENAI_API_KEY
-            resolved_model = model or self.settings.OPENAI_MODEL
-            provider_kwargs = {"base_url": self.settings.OPENAI_BASE_URL}
-        elif resolved_provider == "azure_openai":
-            api_key = self.settings.AZURE_OPENAI_API_KEY
-            resolved_model = model or self.settings.AZURE_OPENAI_MODEL
-            provider_kwargs = {
-                "api_version": self.settings.AZURE_OPENAI_API_VERSION,
-                "azure_endpoint": self.settings.AZURE_OPENAI_ENDPOINT,
-                "deployment_name": self.settings.AZURE_OPENAI_DEPLOYMENT or resolved_model,
-            }
-        elif resolved_provider == "qwen":
-            api_key = self.settings.QWEN_API_KEY
-            resolved_model = model or self.settings.QWEN_MODEL
-            provider_kwargs = {"base_url": self.settings.QWEN_BASE_URL}
-        else:
-            api_key = self.settings.OPENAI_API_KEY
-            resolved_model = model or self.settings.OPENAI_MODEL
-            provider_kwargs = {"base_url": self.settings.OPENAI_BASE_URL}
-
+    def _build_llm_provider(self, runtime_config: dict[str, Optional[str]]):
+        """Build an LLM provider from resolved runtime settings."""
+        resolved_provider = runtime_config.get("provider_name") or "openai"
+        api_key = runtime_config.get("api_key") or ""
+        resolved_model = runtime_config.get("model") or ""
+        provider_kwargs = {
+            "base_url": runtime_config.get("base_url"),
+            "api_version": runtime_config.get("api_version"),
+            "azure_endpoint": runtime_config.get("azure_endpoint"),
+            "deployment_name": runtime_config.get("deployment_name"),
+        }
         try:
             provider = create_provider_from_env(
                 provider_name=resolved_provider,
@@ -225,6 +194,46 @@ class MessageService:
         except ValueError as e:
             logger.error("llm_provider_init_failed", provider=resolved_provider, model=resolved_model, error=str(e))
             raise
+
+    async def _configure_retrieval_pipeline(self, brand_slug: Optional[str]) -> None:
+        voyage_config = await self.runtime_settings_service.get_voyage_runtime_config()
+        try:
+            self.retrieval_pipeline = RetrievalPipeline(
+                config=self.retrieval_config,
+                brand_id=brand_slug,
+                voyage_api_key=voyage_config["api_key"] or None,
+                voyage_model=voyage_config["model"],
+                rerank_api_key=voyage_config["api_key"] or None,
+            )
+            logger.info("retrieval_pipeline_initialized", brand_id=brand_slug)
+        except Exception as e:
+            logger.warning("retrieval_pipeline_init_failed", brand_id=brand_slug, error=str(e))
+            self.retrieval_pipeline = None
+
+        self.tool_registry = ToolRegistry()
+        if self.retrieval_pipeline:
+            self.tool_registry.register(RetrievalTool(self.retrieval_pipeline))
+
+    async def _configure_runtime_dependencies(
+        self,
+        *,
+        provider_name: Optional[str] = None,
+        model: Optional[str] = None,
+        brand_slug: Optional[str] = None,
+    ) -> None:
+        await self._configure_retrieval_pipeline(brand_slug)
+
+        runtime_config = await self.runtime_settings_service.get_llm_runtime_config(
+            provider_name=provider_name,
+            model=model,
+        )
+        self.llm_provider = self._build_llm_provider(runtime_config)
+        self.orchestrator = Orchestrator(
+            llm=self.llm_provider,
+            tools=self.tool_registry,
+            critic=self.response_validator,
+            system_prompt=self.system_prompt,
+        )
     
     async def _initialize_brand_database(self, agent_id: str):
         """Initialize brand-specific database and memory system."""
@@ -239,32 +248,8 @@ class MessageService:
             if agent and agent.get("brand_slug"):
                 brand_slug = agent["brand_slug"]
                 
-                # Reinitialize retrieval pipeline with correct brand_slug
-                retrieval_config = RetrievalConfig(
-                    vector_enabled=True,
-                    vector_top_k=50,
-                    similarity_threshold=0.7,
-                    bm25_enabled=True,
-                    bm25_top_k=50,
-                    rrf_k=60,
-                    rerank_enabled=True,
-                    rerank_top_k=12,
-                    brand_boost_enabled=True,
-                    page_boost_enabled=True,
-                    dedup_enabled=True
-                )
-                
-                self.retrieval_pipeline = RetrievalPipeline(
-                    config=retrieval_config,
-                    brand_id=brand_slug  # Use brand_slug instead of default brand_id
-                )
+                await self._configure_retrieval_pipeline(brand_slug)
                 logger.info("retrieval_pipeline_reinitialized", brand_slug=brand_slug)
-                
-                # Update the RetrievalTool to use the new pipeline
-                # This is critical - the tool was registered with the old default pipeline
-                if self.tool_registry:
-                    self.tool_registry.register(RetrievalTool(self.retrieval_pipeline))
-                    logger.info("retrieval_tool_updated", brand_slug=brand_slug)
             
             # Initialize memory system with brand database
             self.short_term = ShortTermMemory(self.brand_db)
@@ -324,13 +309,11 @@ class MessageService:
                 llm_config = config.get("llm", {})
                 llm_provider_name = llm_config.get("provider")
                 llm_model = llm_config.get("model")
-                if llm_provider_name or llm_model:
-                    self.llm_provider = self._build_llm_provider(
-                        provider_name=llm_provider_name,
-                        model=llm_model,
-                    )
-                    if self.orchestrator:
-                        self.orchestrator.llm = self.llm_provider
+                await self._configure_runtime_dependencies(
+                    provider_name=llm_provider_name,
+                    model=llm_model,
+                    brand_slug=self.brand_id,
+                )
                 
                 # Sync system prompt to Orchestrator
                 if self.orchestrator:
@@ -404,6 +387,9 @@ class MessageService:
                 logger.warning("agent_not_found", agent_id=agent_id)
                 self.agent_config = {}
                 self.system_prompt = ""
+                await self._configure_runtime_dependencies(
+                    brand_slug=self.brand_id,
+                )
                 
         except Exception as e:
             logger.error("agent_config_load_error", error=str(e))
@@ -775,6 +761,8 @@ class MessageService:
                 conversation_id=conversation_id,
                 user_message=request.message,
                 assistant_message=full_response,
+                brand_slug=self.brand_id,
+                agent_id=agent_id,
             )
 
             # Extract episodic facts

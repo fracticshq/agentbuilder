@@ -9,6 +9,7 @@ from fastapi.concurrency import run_in_threadpool
 from azure.identity import DefaultAzureCredential
 
 from ..config import Settings
+from .runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger()
 
@@ -31,14 +32,16 @@ class AzureDeploymentRequestError(RuntimeError):
 class AzureOpenAIDeploymentService:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.runtime_settings_service = RuntimeSettingsService(settings)
+        self._arm_config: dict[str, str] = {}
 
-    def _ensure_arm_config(self) -> None:
+    def _ensure_arm_config(self, config: dict[str, str]) -> None:
         missing = [
             key
             for key, value in {
-                "AZURE_SUBSCRIPTION_ID": self.settings.AZURE_SUBSCRIPTION_ID,
-                "AZURE_RESOURCE_GROUP": self.settings.AZURE_RESOURCE_GROUP,
-                "AZURE_OPENAI_ACCOUNT_NAME": self.settings.AZURE_OPENAI_ACCOUNT_NAME,
+                "AZURE_SUBSCRIPTION_ID": config.get("subscription_id"),
+                "AZURE_RESOURCE_GROUP": config.get("resource_group"),
+                "AZURE_OPENAI_ACCOUNT_NAME": config.get("account_name"),
             }.items()
             if not value
         ]
@@ -58,18 +61,19 @@ class AzureOpenAIDeploymentService:
             ) from exc
         return token.token
 
-    def _build_deployments_url(self) -> str:
+    def _build_deployments_url(self, config: dict[str, str] | None = None) -> str:
+        config = config or self._arm_config
         return (
             "https://management.azure.com/subscriptions/"
-            f"{self.settings.AZURE_SUBSCRIPTION_ID}/resourceGroups/"
-            f"{self.settings.AZURE_RESOURCE_GROUP}/providers/Microsoft.CognitiveServices/accounts/"
-            f"{self.settings.AZURE_OPENAI_ACCOUNT_NAME}/deployments"
+            f"{config['subscription_id']}/resourceGroups/"
+            f"{config['resource_group']}/providers/Microsoft.CognitiveServices/accounts/"
+            f"{config['account_name']}/deployments"
             f"?api-version={ARM_API_VERSION}"
         )
 
-    async def _fetch_deployments_payload(self) -> dict[str, Any]:
+    async def _fetch_deployments_payload(self, config: dict[str, str] | None = None) -> dict[str, Any]:
         token = await self._get_arm_token()
-        url = self._build_deployments_url()
+        url = self._build_deployments_url(config)
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -140,11 +144,13 @@ class AzureOpenAIDeploymentService:
         return deployments
 
     async def list_deployments(self) -> dict[str, Any]:
-        self._ensure_arm_config()
+        arm_config = await self.runtime_settings_service.get_azure_arm_config()
+        self._arm_config = arm_config
+        self._ensure_arm_config(arm_config)
         payload = await self._fetch_deployments_payload()
         deployments = self._parse_deployments(payload)
         return {
             "provider": "azure_openai",
-            "default_deployment": self.settings.AZURE_OPENAI_DEPLOYMENT or None,
+            "default_deployment": arm_config.get("default_deployment") or None,
             "deployments": deployments,
         }
