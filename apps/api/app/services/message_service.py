@@ -53,6 +53,50 @@ def _sanitize_for_json(data: dict) -> dict:
         return {}
 
 
+def _extract_tool_result_metadata(tool_results: dict) -> tuple[list[dict], list[dict], list[dict]]:
+    """Normalize citations, products, and dealers from orchestrator tool metadata."""
+    citations: list[dict] = []
+    products: list[dict] = []
+    dealers: list[dict] = []
+
+    for step_id, tool_result in tool_results.items():
+        if not hasattr(tool_result, "metadata") or not tool_result.metadata:
+            continue
+
+        result_metadata = tool_result.metadata
+
+        if "products" in result_metadata:
+            products.extend(result_metadata["products"])
+        if "dealers" in result_metadata:
+            dealers.extend(result_metadata["dealers"])
+
+        if "sources" not in result_metadata:
+            continue
+
+        confidence = min(1.0, max(0.0, float(result_metadata.get("confidence", 1.0))))
+        for source in result_metadata["sources"][:5]:
+            doc_id = source if isinstance(source, str) else source.get("title", str(source))
+            citations.append({
+                "doc_id": doc_id,
+                "title": doc_id,
+                "confidence": confidence,
+                "url": None,
+                "snippet": None,
+            })
+
+        logger.info(
+            "tool_result_metadata",
+            step_id=step_id,
+            products_count=len(result_metadata.get("products", [])),
+            dealers_count=len(result_metadata.get("dealers", [])),
+            sources_count=len(result_metadata.get("sources", [])),
+        )
+
+    safe_products = [_sanitize_for_json(product) for product in products]
+    safe_dealers = [_sanitize_for_json(dealer) for dealer in dealers]
+    return citations, safe_products, safe_dealers
+
+
 class MessageService:
     """
     Service for processing chat messages with Phase 5 Memory System.
@@ -483,15 +527,32 @@ class MessageService:
             
             # 6. Extract Facts & Auto-Summary (Async)
             if self.memory_config.ENABLE_FACT_EXTRACTION:
-                # Fire and forget / background task desirable here
-                pass 
+                messages = await self.short_term.get_recent_messages(conversation_id, limit=10)
+                await self.episodic.extract_and_store_facts(
+                    user_id=user_id,
+                    messages=messages,
+                    conversation_id=conversation_id,
+                )
+
+            if self.memory_config.ENABLE_AUTO_SUMMARY:
+                if await self.short_term.should_summarize(conversation_id):
+                    await self.short_term.trigger_summary(conversation_id)
+
+            tool_results = agent_result.metadata.get("tool_results", {})
+            citations, _products, _dealers = _extract_tool_result_metadata(tool_results)
+            duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
                 
             # Return response
             return MessageResponse(
                 message=response_text,
                 conversation_id=conversation_id,
-                citations=[], # Citations would need to be extracted from agent metadata in future
-                context_used=0, 
+                citations=citations,
+                context_used=len(tool_results),
+                confidence_score=min(
+                    1.0,
+                    max(0.0, float(agent_result.metadata.get("validation_confidence", 1.0))),
+                ),
+                processing_time_ms=duration_ms,
             )
             
         except Exception as e:
@@ -703,54 +764,8 @@ class MessageService:
                     await self.short_term.trigger_summary(conversation_id)
             
             # Send final metadata (orchestrator handles retrieval internally)
-            # Extract tool results from orchestrator metadata for citations, products, and dealers
             tool_results = agent_result.metadata.get("tool_results", {})
-            citations = []
-            products = []
-            dealers = []
-            
-            # tool_results is a dict mapping step_id -> ToolResult
-            for step_id, tool_result in tool_results.items():
-                if hasattr(tool_result, 'metadata') and tool_result.metadata:
-                    result_metadata = tool_result.metadata
-                    
-                    # Extract products and dealers
-                    if 'products' in result_metadata:
-                        products.extend(result_metadata['products'])
-                    if 'dealers' in result_metadata:
-                        dealers.extend(result_metadata['dealers'])
-                    
-                    
-                    # Extract citations from sources (sources are doc_id strings)
-                    if 'sources' in result_metadata:
-                        # Log metadata for debugging products issue
-                        products_list = result_metadata.get('products', [])
-                        if products_list:
-                            logger.info("First product keys", keys=list(products_list[0].keys()))
-                            logger.info("First product sample", sample=str(products_list[0])[:200])
-                            
-                        logger.info("Tool result metadata", step_id=step_id, 
-                                   products_count=len(products_list),
-                                   dealers_count=len(result_metadata.get('dealers', [])),
-                                   sources_count=len(result_metadata.get('sources', [])))
-                        
-                        confidence = min(1.0, max(0.0, float(result_metadata.get('confidence', 1.0))))
-                        
-                        for source in result_metadata['sources'][:5]:  # Top 5 citations
-                            # source is just a doc_id string like "essco-bathware_product_EOS-CHR-491"
-                            doc_id = source if isinstance(source, str) else source.get("title", str(source))
-                            citations.append({
-                                "doc_id": doc_id,
-                                "title": doc_id,
-                                "confidence": confidence,
-                                "url": None,
-                                "snippet": None
-                            })
-            
-            # Sanitize products/dealers: strip MongoDB ObjectId, datetime, and other
-            # non-JSON-serializable types before they reach model_dump_json().
-            safe_products = [_sanitize_for_json(p) for p in products]
-            safe_dealers  = [_sanitize_for_json(d) for d in dealers]
+            citations, safe_products, safe_dealers = _extract_tool_result_metadata(tool_results)
 
             # Deduplicate products and dealers by ID
             unique_products = {p['id']: p for p in safe_products if p.get('id')}.values()
