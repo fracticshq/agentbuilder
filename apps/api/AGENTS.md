@@ -34,6 +34,9 @@ This is the core FastAPI backend providing:
 | `AZURE_OPENAI_ENDPOINT` | If `azure_openai` | `https://<resource>.openai.azure.com/` | Azure OpenAI resource endpoint |
 | `AZURE_OPENAI_API_VERSION` | If `azure_openai` | `2025-...` | Azure API version to call |
 | `AZURE_OPENAI_DEPLOYMENT` | Optional | `gpt-5.4-mini` | Defaults to the configured Azure model |
+| `AZURE_SUBSCRIPTION_ID` | For admin Azure discovery | `00000000-...` | Azure subscription used for ARM deployment discovery |
+| `AZURE_RESOURCE_GROUP` | For admin Azure discovery | `agentbuilder-rg` | Resource group containing the Azure OpenAI account |
+| `AZURE_OPENAI_ACCOUNT_NAME` | For admin Azure discovery | `anant-resource` | Azure OpenAI account name used on the ARM deployments route |
 
 ---
 
@@ -52,6 +55,9 @@ This is the core FastAPI backend providing:
 - `POST /api/v1/ingest/documents` - Upload documents
 - `POST /api/v1/ingest/chunks` - Process chunks
 - `GET /api/v1/ingest/status/{job_id}` - Check ingestion status
+
+### Admin LLM API
+- `GET /api/v1/admin/llm/azure/deployments` - List Azure OpenAI deployments for the admin dashboard picker
 
 ---
 
@@ -79,3 +85,4 @@ curl http://localhost:8000/health
 - Implements SLOs: P95 latency ≤ 3s, citation coverage 100%
 - Follows "No source → No answer" principle
 - All responses include citation tracking
+- Azure deployment discovery for the admin UI uses ARM + `DefaultAzureCredential`; if the ARM env vars are missing, the endpoint returns `503`

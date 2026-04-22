@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     AZURE_OPENAI_DEPLOYMENT: str = ""
     AZURE_OPENAI_ENDPOINT: str = ""
     AZURE_OPENAI_API_VERSION: str = ""
+    AZURE_SUBSCRIPTION_ID: str = ""
+    AZURE_RESOURCE_GROUP: str = ""
+    AZURE_OPENAI_ACCOUNT_NAME: str = ""
     
     # Qwen Configuration
     QWEN_API_KEY: str = ""

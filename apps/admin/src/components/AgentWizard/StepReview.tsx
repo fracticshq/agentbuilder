@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { CheckCircleIcon, ExclamationTriangleIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
+import type { AzureOpenAIDeployment } from '../../api/client';
 import { getModelLabel, getProviderLabel } from '../../utils/llmOptions';
+
 
 interface StepReviewProps {
   data: any;
@@ -9,9 +11,18 @@ interface StepReviewProps {
   isDeploying: boolean;
   brands: Array<{ id: string; name: string }>;
   agentId?: string; // Add agentId prop
+  deployments?: AzureOpenAIDeployment[];
 }
 
-export default function StepReview({ data, onTest, onDeploy, isDeploying, brands, agentId }: StepReviewProps) {
+export default function StepReview({
+  data,
+  onTest,
+  onDeploy,
+  isDeploying,
+  brands,
+  agentId,
+  deployments = [],
+}: StepReviewProps) {
   const [showYaml, setShowYaml] = useState(false);
   const [testMessage, setTestMessage] = useState('');
   const [testResponse, setTestResponse] = useState('');
@@ -215,8 +226,8 @@ export default function StepReview({ data, onTest, onDeploy, isDeploying, brands
     },
     {
       name: 'LLM Configuration',
-      valid: data.provider && data.model,
-      message: data.provider && data.model ? 'Model configured' : 'Provider and model required'
+      valid: !!data.model,
+      message: data.model ? 'Azure deployment configured' : 'Azure deployment required'
     },
     {
       name: 'System Prompt',
@@ -264,7 +275,7 @@ export default function StepReview({ data, onTest, onDeploy, isDeploying, brands
             <h5 className="text-sm font-medium text-gray-700">LLM Settings</h5>
             <div className="mt-1 text-sm text-gray-600">
               <p><strong>Provider:</strong> {getProviderLabel(data.provider)}</p>
-              <p><strong>Model:</strong> {getModelLabel(data.provider, data.model)}</p>
+              <p><strong>Model:</strong> {getModelLabel(data.provider, data.model, deployments)}</p>
               <p><strong>Temperature:</strong> {data.temperature}</p>
             </div>
           </div>

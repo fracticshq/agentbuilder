@@ -1,5 +1,12 @@
-import React from 'react';
-import { getAvailableModels, getDefaultModel, llmProviders } from '../../utils/llmOptions';
+import React, { useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { api, AzureOpenAIDeploymentsResponse } from '../../api/client';
+import {
+  AZURE_OPENAI_PROVIDER,
+  AZURE_OPENAI_PROVIDER_LABEL,
+  getAzureDeploymentOptions,
+  getDefaultDeployment,
+} from '../../utils/llmOptions';
 
 interface StepLLMConfigProps {
   data: {
@@ -15,63 +22,126 @@ interface StepLLMConfigProps {
 }
 
 export default function StepLLMConfig({ data, onChange }: StepLLMConfigProps) {
-  const availableModels = getAvailableModels(data.provider, data.model);
+  const {
+    data: deploymentCatalog,
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useQuery<AzureOpenAIDeploymentsResponse>({
+    queryKey: ['admin', 'azure-openai-deployments'],
+    queryFn: api.getAzureDeployments,
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  const availableDeployments = getAzureDeploymentOptions(
+    deploymentCatalog?.deployments || [],
+    data.model
+  );
+  const hasDiscoveredDeployments = Boolean(deploymentCatalog?.deployments?.length);
+
+  useEffect(() => {
+    if (data.provider !== AZURE_OPENAI_PROVIDER) {
+      onChange('provider', AZURE_OPENAI_PROVIDER);
+    }
+  }, [data.provider, onChange]);
+
+  useEffect(() => {
+    if (data.model) {
+      return;
+    }
+
+    const preferredDeployment = getDefaultDeployment(deploymentCatalog, data.model);
+    if (preferredDeployment) {
+      onChange('model', preferredDeployment);
+    }
+  }, [data.model, deploymentCatalog, onChange]);
 
   return (
     <div className="space-y-6">
       <div>
         <h3 className="text-lg font-medium text-gray-900">LLM Configuration</h3>
         <p className="mt-1 text-sm text-gray-600">
-          Choose the language model provider and configure its parameters.
+          This dashboard now uses Azure OpenAI deployments discovered from the backend.
         </p>
       </div>
 
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
         <div>
-          <label htmlFor="provider" className="block text-sm font-medium text-gray-700">
-            Provider *
+          <label className="block text-sm font-medium text-gray-700">
+            Provider
           </label>
-          <select
-            id="provider"
-            value={data.provider}
-            onChange={(e) => {
-              const nextProvider = e.target.value;
-              onChange('provider', nextProvider);
-              onChange('model', getDefaultModel(nextProvider));
-            }}
-            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
-            required
-          >
-            <option value="">Select a provider</option>
-            {llmProviders.map((provider) => (
-              <option key={provider.id} value={provider.id}>
-                {provider.name}
-              </option>
-            ))}
-          </select>
+          <div className="mt-1 block w-full rounded-md border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-700 shadow-sm">
+            {AZURE_OPENAI_PROVIDER_LABEL}
+          </div>
+          <p className="mt-1 text-xs text-gray-500">
+            Provider selection is managed centrally through Azure OpenAI.
+          </p>
         </div>
 
         <div>
           <label htmlFor="model" className="block text-sm font-medium text-gray-700">
-            Model *
+            Azure Deployment *
           </label>
           <select
             id="model"
             value={data.model}
             onChange={(e) => onChange('model', e.target.value)}
             className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
-            disabled={!data.provider}
+            disabled={isLoading || (!availableDeployments.length && !data.model)}
             required
           >
-            <option value="">Select a model</option>
-            {availableModels.map((model) => (
+            <option value="">
+              {isLoading ? 'Loading Azure deployments...' : 'Select an Azure deployment'}
+            </option>
+            {availableDeployments.map((model) => (
               <option key={model.id} value={model.id}>
-                {model.name} - {model.description}
+                {model.name}
               </option>
             ))}
           </select>
+          <p className="mt-1 text-xs text-gray-500">
+            Only deployments currently configured on your Azure OpenAI resource are shown here.
+          </p>
         </div>
       </div>
+
+      {isLoading && (
+        <div className="rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
+          Fetching Azure OpenAI deployments from the backend.
+        </div>
+      )}
+
+      {isError && (
+        <div className="rounded-md border border-red-200 bg-red-50 p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h4 className="text-sm font-medium text-red-900">
+                Could not load Azure deployments
+              </h4>
+              <p className="mt-1 text-sm text-red-800">
+                {error instanceof Error
+                  ? error.message
+                  : 'The backend could not discover Azure OpenAI deployments.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => refetch()}
+              className="inline-flex items-center rounded-md border border-red-300 bg-white px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!isLoading && !isError && !hasDiscoveredDeployments && !data.model && (
+        <div className="rounded-md border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-800">
+          No Azure OpenAI deployments are currently available. Configure a deployment on the Azure resource before continuing.
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
         <div>

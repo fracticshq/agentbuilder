@@ -66,8 +66,9 @@ interface BrandVoice {
 - Agent purpose and role
 
 #### Step 2: LLM Configuration
-- Provider selection (OpenAI, Azure OpenAI, Qwen, etc.)
-- Model selection (GPT-4o-mini, GPT-5.4-mini for Azure OpenAI, etc.)
+- Provider is fixed to Azure OpenAI
+- Deployment selection is loaded dynamically from the backend Azure deployment discovery endpoint
+- Only currently deployed Azure OpenAI deployments should appear in the picker
 - Temperature and token settings
 
 #### Step 3: System Prompt
@@ -213,6 +214,9 @@ GET    /api/v1/admin/agents
 POST   /api/v1/admin/agents
 PUT    /api/v1/admin/agents/{id}
 DELETE /api/v1/admin/agents/{id}
+
+// Azure OpenAI deployment discovery
+GET    /api/v1/admin/llm/azure/deployments
 
 // Knowledge Base
 POST   /api/v1/admin/knowledge/{agent_id}

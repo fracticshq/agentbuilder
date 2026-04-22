@@ -183,6 +183,20 @@ export interface UpdateAgentRequest {
   };
 }
 
+export interface AzureOpenAIDeployment {
+  deployment_name: string;
+  model_name: string;
+  model_version?: string | null;
+  provisioning_state: string;
+  sku_name?: string | null;
+}
+
+export interface AzureOpenAIDeploymentsResponse {
+  provider: 'azure_openai';
+  default_deployment?: string | null;
+  deployments: AzureOpenAIDeployment[];
+}
+
 // Brand API
 export const brandApi = {
   list: () => apiClient.get<Brand[]>('/api/v1/admin/brands/'),
@@ -204,6 +218,11 @@ export const agentApi = {
   update: (id: string, data: Partial<UpdateAgentRequest>) => 
     apiClient.put<Agent>(`/api/v1/admin/agents/${id}`, data),
   delete: (id: string) => apiClient.delete(`/api/v1/admin/agents/${id}`),
+};
+
+export const llmApi = {
+  getAzureDeployments: () =>
+    apiClient.get<AzureOpenAIDeploymentsResponse>('/api/v1/admin/llm/azure/deployments'),
 };
 
 // Catalog API
@@ -259,6 +278,11 @@ export const api = {
   },
   deleteAgent: async (id: string) => {
     await agentApi.delete(id);
+  },
+
+  getAzureDeployments: async () => {
+    const response = await llmApi.getAzureDeployments();
+    return response.data;
   },
   
   // Catalog
