@@ -19,6 +19,23 @@ type SectionTestState = {
   message?: string;
 };
 
+function formatMaskedValue(maskedValue?: string | null): string {
+  if (!maskedValue) {
+    return 'Configured';
+  }
+
+  const trimmedValue = maskedValue.trim();
+  if (trimmedValue.length <= 28) {
+    return trimmedValue;
+  }
+
+  return `${trimmedValue.slice(0, 12)}...${trimmedValue.slice(-10)}`;
+}
+
+function countConfiguredFields(section: RuntimeSettingSection): number {
+  return section.fields.filter((field) => field.configured || (field.value || '').trim()).length;
+}
+
 function buildInitialDraftValues(sections: RuntimeSettingSection[]): Record<string, string> {
   const next: Record<string, string> = {};
   sections.forEach((section) => {
@@ -276,15 +293,44 @@ export default function Settings() {
 
         return (
           <section key={section.id} className="rounded-2xl bg-white p-8 shadow-sm ring-1 ring-gray-200">
-            <div className="flex flex-col gap-4 border-b border-gray-100 pb-6 lg:flex-row lg:items-start lg:justify-between">
-              <div className="max-w-2xl">
-                <h2 className="text-xl font-semibold text-gray-900">{section.title}</h2>
-                <p className="mt-2 text-sm text-gray-600">{section.description}</p>
+            <div className="border-b border-gray-100 pb-6">
+              <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                <div className="min-w-0 max-w-3xl">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <h2 className="text-xl font-semibold text-gray-900">{section.title}</h2>
+                    <span className="inline-flex rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
+                      {countConfiguredFields(section)} configured
+                    </span>
+                  </div>
+                  <p className="mt-2 break-words text-sm leading-6 text-gray-600">
+                    {section.description}
+                  </p>
+                </div>
               </div>
+
               {section.supports_connection_test && (
-                <div className="flex flex-col items-start gap-2 lg:items-end">
+                <div className="mt-5 flex flex-col gap-4 rounded-2xl border border-gray-200 bg-gray-50 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900">Connection test</p>
+                    <p className="mt-1 break-words text-sm text-gray-600">
+                      Validate the currently saved values for this provider before you leave the page.
+                    </p>
+                    {testState.message && (
+                      <p
+                        className={`mt-2 break-words text-sm ${
+                          testState.status === 'healthy'
+                            ? 'text-green-600'
+                            : testState.status === 'unhealthy'
+                              ? 'text-red-600'
+                              : 'text-gray-500'
+                        }`}
+                      >
+                        {testState.message}
+                      </p>
+                    )}
+                  </div>
                   <button
-                    className="inline-flex items-center gap-2 rounded-md border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                    className="inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 shadow-sm transition hover:bg-gray-100 sm:w-auto"
                     disabled={testState.status === 'testing'}
                     onClick={() => void handleTestConnection(section)}
                     type="button"
@@ -296,38 +342,25 @@ export default function Settings() {
                     )}
                     {testState.status === 'testing' ? 'Testing...' : 'Test Connection'}
                   </button>
-                  {testState.message && (
-                    <p
-                      className={`max-w-md text-sm ${
-                        testState.status === 'healthy'
-                          ? 'text-green-600'
-                          : testState.status === 'unhealthy'
-                            ? 'text-red-600'
-                            : 'text-gray-500'
-                      }`}
-                    >
-                      {testState.message}
-                    </p>
-                  )}
                 </div>
               )}
             </div>
 
-            <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
               {section.fields.map((field) => {
                 const configuredSecret = field.secret && field.configured && !clearedKeys[field.key];
                 return (
-                  <div key={field.key} className="rounded-xl border border-gray-200 p-5">
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
+                  <div key={field.key} className="min-w-0 overflow-hidden rounded-2xl border border-gray-200 p-5">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
                         <label className="text-sm font-semibold text-gray-900" htmlFor={field.key}>
                           {field.label}
                           {field.required ? ' *' : ''}
                         </label>
-                        <p className="mt-1 text-sm text-gray-500">{field.description}</p>
+                        <p className="mt-1 break-words text-sm leading-6 text-gray-500">{field.description}</p>
                       </div>
                       <span
-                        className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
+                        className={`inline-flex shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${
                           field.source === 'stored'
                             ? 'bg-green-50 text-green-700'
                             : field.source === 'environment'
@@ -346,7 +379,7 @@ export default function Settings() {
                     <div className="mt-4 space-y-3">
                       {field.input_type === 'select' ? (
                         <select
-                          className="block w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
+                          className="block w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
                           id={field.key}
                           onChange={(event) => handleFieldChange(field.key, event.target.value)}
                           value={draftValues[field.key] || ''}
@@ -359,7 +392,7 @@ export default function Settings() {
                         </select>
                       ) : (
                         <input
-                          className="block w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
+                          className="block w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
                           id={field.key}
                           onChange={(event) => handleFieldChange(field.key, event.target.value)}
                           placeholder={
@@ -373,28 +406,30 @@ export default function Settings() {
                       )}
 
                       {field.secret && (
-                        <div className="flex items-center justify-between gap-3 text-sm">
-                          <span className="text-gray-500">
-                            {configuredSecret
-                              ? `Stored value: ${field.masked_value}`
-                              : clearedKeys[field.key]
-                                ? 'This secret will be cleared on save.'
-                                : 'Leave blank to keep the current secret unchanged.'}
-                          </span>
+                        <div className="rounded-xl bg-gray-50 p-3">
+                          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                            <span className="min-w-0 break-all text-sm text-gray-600">
+                              {configuredSecret
+                                ? `Stored value: ${formatMaskedValue(field.masked_value)}`
+                                : clearedKeys[field.key]
+                                  ? 'This secret will be cleared on save.'
+                                  : 'Leave blank to keep the current secret unchanged.'}
+                            </span>
                           {field.configured && (
                             <button
-                              className="font-medium text-red-600 hover:text-red-500"
+                              className="shrink-0 text-left text-sm font-medium text-red-600 hover:text-red-500"
                               onClick={() => handleClearSecret(field.key)}
                               type="button"
                             >
                               Clear saved value
                             </button>
                           )}
+                          </div>
                         </div>
                       )}
 
                       {field.updated_at && (
-                        <div className="flex items-center gap-2 text-xs text-gray-400">
+                        <div className="flex items-center gap-2 break-words text-xs text-gray-400">
                           <CheckCircleIcon className="h-4 w-4" />
                           Updated {new Date(field.updated_at).toLocaleString()}
                         </div>

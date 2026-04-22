@@ -306,6 +306,9 @@ function App({ config }: AppProps) {
       page_context: extractPageContext(),
     });
 
+    const assistantMessageId = (Date.now() + 1).toString();
+    let streamedContent = '';
+
     try {
       const context = extractPageContext();
       const currentConvId = conversationId || createSecureClientId('conv');
@@ -313,9 +316,6 @@ function App({ config }: AppProps) {
         setConversationId(currentConvId);
         sessionStorage.setItem('agent_widget_conversation_id', currentConvId);
       }
-
-      const assistantMessageId = (Date.now() + 1).toString();
-      let streamedContent = '';
 
       addMessage({ id: assistantMessageId, content: '', role: 'assistant', timestamp: new Date(), citations: [] });
 
@@ -350,11 +350,11 @@ function App({ config }: AppProps) {
       });
     } catch (err) {
       console.error('[Widget] Chat error:', err);
-      addMessage({
-        id: (Date.now() + 1).toString(),
-        content: 'Sorry, I encountered an error. Please try again.',
-        role: 'assistant',
-        timestamp: new Date(),
+      updateMessage(assistantMessageId, {
+        content: streamedContent || 'Sorry, I encountered an error. Please try again.',
+        citations: [],
+        products: [],
+        dealers: [],
       });
     } finally {
       setIsTyping(false);

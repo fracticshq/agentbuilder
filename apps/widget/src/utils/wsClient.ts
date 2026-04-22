@@ -104,6 +104,27 @@ export class WebSocketClient {
     this.pendingMeta = {};
   }
 
+  private hasPendingResponseData(): boolean {
+    return (
+      this.accumulatedContent.trim().length > 0 ||
+      (this.pendingMeta.citations?.length ?? 0) > 0 ||
+      (this.pendingMeta.products?.length ?? 0) > 0 ||
+      (this.pendingMeta.dealers?.length ?? 0) > 0
+    );
+  }
+
+  private buildPendingMessage(): Message {
+    return {
+      id: Date.now().toString(),
+      content: this.accumulatedContent,
+      role: 'assistant',
+      timestamp: new Date(),
+      citations: this.pendingMeta.citations,
+      products: this.pendingMeta.products ?? [],
+      dealers: this.pendingMeta.dealers ?? [],
+    };
+  }
+
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
@@ -177,10 +198,15 @@ export class WebSocketClient {
         if (this.ws === ws) this.ws = null;
         this.connectPromise = null;
         this.stopHeartbeat();
-        if (this.pendingReject) {
-          const r = this.pendingReject;
+        if (this.pendingResolve && this.hasPendingResponseData()) {
+          const resolve = this.pendingResolve;
+          const message = this.buildPendingMessage();
           this.clearPending();
-          r(new Error('WebSocket connection closed'));
+          resolve(message);
+        } else if (this.pendingReject) {
+          const reject = this.pendingReject;
+          this.clearPending();
+          reject(new Error('WebSocket connection closed'));
         }
         if (!this.intentionalClose) {
           this.scheduleReconnect();

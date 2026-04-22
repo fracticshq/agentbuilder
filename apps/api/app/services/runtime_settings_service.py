@@ -41,13 +41,24 @@ class RuntimeSettingsService:
 
     def _derive_encryption_key(self) -> bytes:
         seed = (
-            getattr(self.settings, "SETTINGS_ENCRYPTION_KEY", "")
-            or getattr(self.settings, "PII_ENCRYPTION_KEY", "")
-            or getattr(self.settings, "SECRET_KEY", "")
+            self._normalize_seed_candidate(getattr(self.settings, "SETTINGS_ENCRYPTION_KEY", None))
+            or self._normalize_seed_candidate(getattr(self.settings, "PII_ENCRYPTION_KEY", None))
+            or self._normalize_seed_candidate(getattr(self.settings, "SECRET_KEY", None))
             or "agentbuilder-runtime-settings"
         )
         digest = hashlib.sha256(seed.encode("utf-8")).digest()
         return base64.urlsafe_b64encode(digest)
+
+    def _normalize_seed_candidate(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            decoded = value.decode("utf-8", errors="ignore").strip()
+            return decoded or None
+        if isinstance(value, str):
+            trimmed = value.strip()
+            return trimmed or None
+        return None
 
     def _get_collection(self):
         try:

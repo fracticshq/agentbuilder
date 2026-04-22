@@ -30,7 +30,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
     // Track view details
     if (typeof window !== 'undefined' && (window as any).agentAnalytics) {
       (window as any).agentAnalytics.track('product_view_details', {
-        sku: product.sku,
+        sku: product.sku || 'unknown',
         name: product.name
       });
     }
@@ -87,7 +87,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
           )}
         </div>
         
-        <p className="product-sku">SKU: {product.sku}</p>
+        <p className="product-sku">{product.sku ? `SKU: ${product.sku}` : 'SKU available on request'}</p>
         
         <div className="product-price-row">
           <span className="product-price">{formatPrice(product.price, product.currency)}</span>

@@ -24,7 +24,19 @@ WS_POLICY_VIOLATION = 1008
 
 
 async def _close_websocket(websocket: WebSocket, reason: str) -> None:
-    await websocket.close(code=WS_POLICY_VIOLATION, reason=reason)
+    try:
+        await websocket.close(code=WS_POLICY_VIOLATION, reason=reason)
+    except RuntimeError:
+        logger.debug("websocket_already_closed", reason=reason)
+
+
+async def _safe_send_text(websocket: WebSocket, payload: str) -> bool:
+    try:
+        await websocket.send_text(payload)
+        return True
+    except (WebSocketDisconnect, RuntimeError):
+        logger.info("websocket_send_skipped_closed_socket")
+        return False
 
 
 async def _enforce_websocket_rate_limit(websocket: WebSocket, endpoint: str) -> bool:
@@ -104,33 +116,40 @@ async def websocket_endpoint(
                 request_data = json.loads(data)
                 # Heartbeat ping — respond immediately and wait for next message
                 if request_data.get("type") == "ping":
-                    await websocket.send_text(json.dumps({"type": "pong"}))
+                    if not await _safe_send_text(websocket, json.dumps({"type": "pong"})):
+                        return
                     continue
                 request = MessageRequest(**request_data)
             except (json.JSONDecodeError, ValueError) as e:
-                await websocket.send_text(json.dumps({
+                if not await _safe_send_text(websocket, json.dumps({
                     "error": "Invalid message format",
                     "detail": str(e)
-                }))
+                })):
+                    return
                 continue
             
             # Process message and stream response
             try:
                 async for chunk in message_service.stream_message(request):
-                    await websocket.send_text(chunk.model_dump_json())
+                    if not await _safe_send_text(websocket, chunk.model_dump_json()):
+                        return
             except Exception as e:
                 logger.error("Error processing WebSocket message", error=str(e))
-                await websocket.send_text(json.dumps({
+                if not await _safe_send_text(websocket, json.dumps({
                     "type": "error",
                     "content": f"Error: {str(e)}",
                     "conversation_id": request.conversation_id or "",
-                }))
+                })):
+                    return
                 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception as e:
         logger.error("WebSocket error", error=str(e))
-        await websocket.close(code=1011, reason="Internal error")
+        try:
+            await websocket.close(code=1011, reason="Internal error")
+        except RuntimeError:
+            logger.debug("websocket_close_skipped_after_error")
 
 
 @router.websocket("/ws/admin/{conversation_id}")
@@ -282,7 +301,8 @@ async def widget_control_channel(
             msg_type = msg.get("type")
 
             if msg_type == "ping":
-                await websocket.send_text(json.dumps({"type": "pong"}))
+                if not await _safe_send_text(websocket, json.dumps({"type": "pong"})):
+                    return
 
             elif msg_type == "register":
                 # Widget sends its agent_id so we can inject history into the right memory
