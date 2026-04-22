@@ -66,8 +66,8 @@ interface BrandVoice {
 - Agent purpose and role
 
 #### Step 2: LLM Configuration
-- Provider selection (OpenAI, Qwen, etc.)
-- Model selection (GPT-4o-mini, etc.)
+- Provider selection (OpenAI, Azure OpenAI, Qwen, etc.)
+- Model selection (GPT-4o-mini, GPT-5.4-mini for Azure OpenAI, etc.)
 - Temperature and token settings
 
 #### Step 3: System Prompt

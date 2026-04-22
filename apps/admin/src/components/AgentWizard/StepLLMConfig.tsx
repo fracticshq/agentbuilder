@@ -23,6 +23,13 @@ const providers = [
       { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo', description: 'Good balance of cost and performance' },
     ]
   },
+  {
+    id: 'azure_openai',
+    name: 'Azure OpenAI',
+    models: [
+      { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', description: 'Azure OpenAI deployment for fast GPT-5.4 responses' },
+    ]
+  },
   { 
     id: 'qwen', 
     name: 'Qwen (Alibaba Cloud)',

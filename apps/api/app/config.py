@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+
+    # Azure OpenAI Configuration
+    AZURE_OPENAI_API_KEY: str = ""
+    AZURE_OPENAI_MODEL: str = "gpt-5.4-mini"
+    AZURE_OPENAI_DEPLOYMENT: str = ""
+    AZURE_OPENAI_ENDPOINT: str = ""
+    AZURE_OPENAI_API_VERSION: str = ""
     
     # Qwen Configuration
     QWEN_API_KEY: str = ""

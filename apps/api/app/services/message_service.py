@@ -168,18 +168,30 @@ class MessageService:
         if provider_name == "openai":
             api_key = settings.OPENAI_API_KEY
             model = settings.OPENAI_MODEL
+            provider_kwargs = {"base_url": settings.OPENAI_BASE_URL}
+        elif provider_name == "azure_openai":
+            api_key = settings.AZURE_OPENAI_API_KEY
+            model = settings.AZURE_OPENAI_MODEL
+            provider_kwargs = {
+                "api_version": settings.AZURE_OPENAI_API_VERSION,
+                "azure_endpoint": settings.AZURE_OPENAI_ENDPOINT,
+                "deployment_name": settings.AZURE_OPENAI_DEPLOYMENT or settings.AZURE_OPENAI_MODEL,
+            }
         elif provider_name == "qwen":
             api_key = settings.QWEN_API_KEY
             model = settings.QWEN_MODEL
+            provider_kwargs = {"base_url": settings.QWEN_BASE_URL}
         else:
             api_key = settings.OPENAI_API_KEY
             model = settings.OPENAI_MODEL
+            provider_kwargs = {"base_url": settings.OPENAI_BASE_URL}
             
         try:
             self.llm_provider = create_provider_from_env(
                 provider_name=provider_name,
                 api_key=api_key,
-                model=model
+                model=model,
+                **provider_kwargs,
             )
         except ValueError as e:
             logger.error("llm_provider_init_failed", error=str(e))

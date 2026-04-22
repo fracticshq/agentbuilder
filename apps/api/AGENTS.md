@@ -30,6 +30,10 @@ This is the core FastAPI backend providing:
 | `CORS_ALLOW_ORIGINS` | No | `*` | Comma-separated origins |
 | `REDIS_URL` | Yes | `redis://localhost:6379` | Cache backend |
 | `MONGO_URI` | Yes | `mongodb://...` | Database connection |
+| `DEFAULT_LLM_PROVIDER` | Yes | `openai` or `azure_openai` | Active LLM adapter |
+| `AZURE_OPENAI_ENDPOINT` | If `azure_openai` | `https://<resource>.openai.azure.com/` | Azure OpenAI resource endpoint |
+| `AZURE_OPENAI_API_VERSION` | If `azure_openai` | `2025-...` | Azure API version to call |
+| `AZURE_OPENAI_DEPLOYMENT` | Optional | `gpt-5.4-mini` | Defaults to the configured Azure model |
 
 ---
 
