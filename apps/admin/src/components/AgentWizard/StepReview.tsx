@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { CheckCircleIcon, ExclamationTriangleIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
+import { getModelLabel, getProviderLabel } from '../../utils/llmOptions';
 
 interface StepReviewProps {
   data: any;
@@ -262,8 +263,8 @@ export default function StepReview({ data, onTest, onDeploy, isDeploying, brands
           <div>
             <h5 className="text-sm font-medium text-gray-700">LLM Settings</h5>
             <div className="mt-1 text-sm text-gray-600">
-              <p><strong>Provider:</strong> {data.provider || 'Not set'}</p>
-              <p><strong>Model:</strong> {data.model || 'Not set'}</p>
+              <p><strong>Provider:</strong> {getProviderLabel(data.provider)}</p>
+              <p><strong>Model:</strong> {getModelLabel(data.provider, data.model)}</p>
               <p><strong>Temperature:</strong> {data.temperature}</p>
             </div>
           </div>

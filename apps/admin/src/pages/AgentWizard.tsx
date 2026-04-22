@@ -13,6 +13,7 @@ import StepKnowledgeBase from '../components/AgentWizard/StepKnowledgeBase';
 import StepRAGConfig from '../components/AgentWizard/StepRAGConfig';
 import StepFeatures from '../components/AgentWizard/StepFeatures';
 import StepReview from '../components/AgentWizard/StepReview';
+import { getDefaultModel } from '../utils/llmOptions';
 
 type StepStatus = 'complete' | 'current' | 'upcoming';
 
@@ -285,7 +286,7 @@ export default function AgentWizard() {
 
         // LLM Config
         provider: llm.provider || '',
-        model: llm.model || '',
+        model: llm.model || getDefaultModel(llm.provider || ''),
         temperature: llm.temperature ?? 0.7,
         max_tokens: llm.max_tokens ?? 2000,
         top_p: llm.top_p ?? 1.0,

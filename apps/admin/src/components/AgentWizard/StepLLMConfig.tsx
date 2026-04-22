@@ -1,4 +1,5 @@
 import React from 'react';
+import { getAvailableModels, getDefaultModel, llmProviders } from '../../utils/llmOptions';
 
 interface StepLLMConfigProps {
   data: {
@@ -13,46 +14,8 @@ interface StepLLMConfigProps {
   onChange: (field: string, value: string | number) => void;
 }
 
-const providers = [
-  { 
-    id: 'openai', 
-    name: 'OpenAI',
-    models: [
-      { id: 'gpt-4o-mini', name: 'GPT-4o Mini', description: 'Fast and cost-effective' },
-      { id: 'gpt-4o', name: 'GPT-4o', description: 'Most capable model' },
-      { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo', description: 'Good balance of cost and performance' },
-    ]
-  },
-  {
-    id: 'azure_openai',
-    name: 'Azure OpenAI',
-    models: [
-      { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', description: 'Azure OpenAI deployment for fast GPT-5.4 responses' },
-    ]
-  },
-  { 
-    id: 'qwen', 
-    name: 'Qwen (Alibaba Cloud)',
-    models: [
-      { id: 'qwen-turbo', name: 'Qwen Turbo', description: 'Fast and efficient' },
-      { id: 'qwen-plus', name: 'Qwen Plus', description: 'Enhanced capabilities' },
-      { id: 'qwen-max', name: 'Qwen Max', description: 'Most advanced model' },
-    ]
-  },
-  { 
-    id: 'anthropic', 
-    name: 'Anthropic',
-    models: [
-      { id: 'claude-3-haiku', name: 'Claude 3 Haiku', description: 'Fast and lightweight' },
-      { id: 'claude-3-sonnet', name: 'Claude 3 Sonnet', description: 'Balanced performance' },
-      { id: 'claude-3-opus', name: 'Claude 3 Opus', description: 'Most capable model' },
-    ]
-  }
-];
-
 export default function StepLLMConfig({ data, onChange }: StepLLMConfigProps) {
-  const selectedProvider = providers.find(p => p.id === data.provider);
-  const availableModels = selectedProvider?.models || [];
+  const availableModels = getAvailableModels(data.provider, data.model);
 
   return (
     <div className="space-y-6">
@@ -72,15 +35,15 @@ export default function StepLLMConfig({ data, onChange }: StepLLMConfigProps) {
             id="provider"
             value={data.provider}
             onChange={(e) => {
-              onChange('provider', e.target.value);
-              // Reset model when provider changes
-              onChange('model', '');
+              const nextProvider = e.target.value;
+              onChange('provider', nextProvider);
+              onChange('model', getDefaultModel(nextProvider));
             }}
             className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
             required
           >
             <option value="">Select a provider</option>
-            {providers.map((provider) => (
+            {llmProviders.map((provider) => (
               <option key={provider.id} value={provider.id}>
                 {provider.name}
               </option>
