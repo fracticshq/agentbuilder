@@ -19,6 +19,7 @@ The admin dashboard provides a comprehensive interface for managing brands and A
 - **Brand Management**: Create and manage multiple brands with their own configurations
 - **Agent Builder**: Visual wizard for creating AI agents step-by-step
 - **Knowledge Base**: Upload and manage documents for RAG functionality
+- **Runtime Settings**: Manage encrypted provider credentials and Azure/Voyage runtime metadata from the dashboard
 - **System Prompts**: Rich text editor for agent personality configuration
 - **Analytics**: Real-time metrics and usage statistics
 
@@ -70,6 +71,12 @@ interface BrandVoice {
 - Deployment selection is loaded dynamically from the backend Azure deployment discovery endpoint
 - Only currently deployed Azure OpenAI deployments should appear in the picker
 - Temperature and token settings
+
+#### Settings Page
+- `/settings` is the operator control plane for runtime credentials
+- Provider secrets are never rendered back in plaintext
+- The page can save encrypted secrets, clear stored values, and run Azure OpenAI / Voyage connection tests
+- Environment values are treated as bootstrap/fallback and should eventually be moved into stored settings
 
 #### Step 3: System Prompt
 - Rich text editor for agent personality
@@ -217,6 +224,11 @@ DELETE /api/v1/admin/agents/{id}
 
 // Azure OpenAI deployment discovery
 GET    /api/v1/admin/llm/azure/deployments
+
+// Runtime settings
+GET    /api/v1/admin/settings/runtime
+PUT    /api/v1/admin/settings/runtime
+POST   /api/v1/admin/settings/runtime/test
 
 // Knowledge Base
 POST   /api/v1/admin/knowledge/{agent_id}

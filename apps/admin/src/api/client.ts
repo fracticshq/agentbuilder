@@ -214,6 +214,61 @@ export interface AzureOpenAIDeploymentsResponse {
   deployments: AzureOpenAIDeployment[];
 }
 
+export interface RuntimeSettingOption {
+  value: string;
+  label: string;
+}
+
+export interface RuntimeSettingField {
+  key: string;
+  label: string;
+  description: string;
+  input_type: 'text' | 'password' | 'select';
+  secret: boolean;
+  required: boolean;
+  configured: boolean;
+  source: 'stored' | 'environment' | 'default';
+  value?: string | null;
+  masked_value?: string | null;
+  updated_at?: string | null;
+  options?: RuntimeSettingOption[];
+}
+
+export interface RuntimeSettingSection {
+  id: string;
+  title: string;
+  description: string;
+  supports_connection_test: boolean;
+  fields: RuntimeSettingField[];
+}
+
+export interface RuntimeSettingsResponse {
+  sections: RuntimeSettingSection[];
+}
+
+export interface RuntimeSettingsUpdateResponse {
+  updated: Array<{
+    key: string;
+    action: 'updated' | 'cleared';
+    section: string;
+  }>;
+  settings: RuntimeSettingsResponse;
+}
+
+export interface RuntimeSettingsTestRequest {
+  sections?: string[];
+  overrides?: Record<string, string | null>;
+}
+
+export interface RuntimeSettingsTestResponse {
+  status: 'healthy' | 'unhealthy';
+  results: Array<{
+    section: string;
+    status: 'healthy' | 'unhealthy';
+    detail: string;
+  }>;
+}
+
 // Brand API
 export const brandApi = {
   list: () => apiClient.get<Brand[]>('/api/v1/admin/brands/'),
@@ -244,6 +299,14 @@ export const llmApi = {
 
 export const adminSessionApi = {
   validate: () => apiClient.get<{ authorized: true }>('/api/v1/admin/session/validate'),
+};
+
+export const runtimeSettingsApi = {
+  get: () => apiClient.get<RuntimeSettingsResponse>('/api/v1/admin/settings/runtime'),
+  update: (updates: Record<string, string | null>) =>
+    apiClient.put<RuntimeSettingsUpdateResponse>('/api/v1/admin/settings/runtime', { updates }),
+  test: (payload: RuntimeSettingsTestRequest) =>
+    apiClient.post<RuntimeSettingsTestResponse>('/api/v1/admin/settings/runtime/test', payload),
 };
 
 // Catalog API

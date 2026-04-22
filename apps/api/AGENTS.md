@@ -37,6 +37,7 @@ This is the core FastAPI backend providing:
 | `AZURE_SUBSCRIPTION_ID` | For admin Azure discovery | `00000000-...` | Azure subscription used for ARM deployment discovery |
 | `AZURE_RESOURCE_GROUP` | For admin Azure discovery | `agentbuilder-rg` | Resource group containing the Azure OpenAI account |
 | `AZURE_OPENAI_ACCOUNT_NAME` | For admin Azure discovery | `anant-resource` | Azure OpenAI account name used on the ARM deployments route |
+| `SETTINGS_ENCRYPTION_KEY` | Recommended | `random-32-char-string` | Encrypts runtime settings stored in MongoDB. Falls back to `PII_ENCRYPTION_KEY`, then `SECRET_KEY`. |
 
 ---
 
@@ -58,6 +59,11 @@ This is the core FastAPI backend providing:
 
 ### Admin LLM API
 - `GET /api/v1/admin/llm/azure/deployments` - List Azure OpenAI deployments for the admin dashboard picker
+
+### Admin Runtime Settings API
+- `GET /api/v1/admin/settings/runtime` - Read masked runtime settings for the admin dashboard
+- `PUT /api/v1/admin/settings/runtime` - Create/update/clear encrypted runtime settings
+- `POST /api/v1/admin/settings/runtime/test` - Validate Azure OpenAI and Voyage connectivity without exposing plaintext secrets
 
 ---
 
@@ -86,3 +92,4 @@ curl http://localhost:8000/health
 - Follows "No source → No answer" principle
 - All responses include citation tracking
 - Azure deployment discovery for the admin UI uses ARM + `DefaultAzureCredential`; if the ARM env vars are missing, the endpoint returns `503`
+- Runtime provider secrets are resolved from encrypted records in the system DB first, then from environment variables as bootstrap/fallback
