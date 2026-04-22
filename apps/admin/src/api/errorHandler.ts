@@ -37,6 +37,30 @@ export function handleApiError(error: unknown): ApiError {
     // Server returned an error response
     const status = axiosError.response?.status || 500;
     const detail = axiosError.response?.data?.detail || axiosError.response?.data?.message;
+
+    if (status === 401 && detail === 'X-Admin-Key header required') {
+      return new ApiError(
+        'Admin write access key required. Save it in the top bar, then retry.',
+        status,
+        detail
+      );
+    }
+
+    if (status === 403 && detail === 'Invalid admin key') {
+      return new ApiError(
+        'Admin write access key is invalid. Update it in the top bar, then retry.',
+        status,
+        detail
+      );
+    }
+
+    if (status === 503 && detail === 'Admin write protection is not configured') {
+      return new ApiError(
+        'Admin write protection is not configured on the API.',
+        status,
+        detail
+      );
+    }
     
     switch (status) {
       case 400:

@@ -12,12 +12,26 @@ declare global {
 const runtimeConfig = window.__APP_CONFIG__ || {};
 const API_BASE_URL = runtimeConfig.API_BASE_URL || process.env.REACT_APP_API_URL || window.location.origin;
 const ADMIN_API_KEY_STORAGE_KEY = 'agentbuilder.admin_api_key';
+export const ADMIN_API_KEY_CHANGED_EVENT = 'agentbuilder.admin_api_key_changed';
+
+function notifyAdminApiKeyChanged(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent(ADMIN_API_KEY_CHANGED_EVENT, {
+    detail: { hasKey: hasAdminApiKey() },
+  }));
+}
 
 export function getAdminApiKey(): string {
   if (typeof window === 'undefined') {
     return '';
   }
   return window.sessionStorage.getItem(ADMIN_API_KEY_STORAGE_KEY) || '';
+}
+
+export function hasAdminApiKey(): boolean {
+  return getAdminApiKey().trim().length > 0;
 }
 
 export function setAdminApiKey(value: string): void {
@@ -27,9 +41,11 @@ export function setAdminApiKey(value: string): void {
   const trimmedValue = value.trim();
   if (trimmedValue) {
     window.sessionStorage.setItem(ADMIN_API_KEY_STORAGE_KEY, trimmedValue);
+    notifyAdminApiKeyChanged();
     return;
   }
   window.sessionStorage.removeItem(ADMIN_API_KEY_STORAGE_KEY);
+  notifyAdminApiKeyChanged();
 }
 
 export function clearAdminApiKey(): void {
@@ -37,6 +53,7 @@ export function clearAdminApiKey(): void {
     return;
   }
   window.sessionStorage.removeItem(ADMIN_API_KEY_STORAGE_KEY);
+  notifyAdminApiKeyChanged();
 }
 
 // Create axios instance

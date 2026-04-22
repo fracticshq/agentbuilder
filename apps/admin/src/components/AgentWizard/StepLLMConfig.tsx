@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, AzureOpenAIDeploymentsResponse } from '../../api/client';
+import { useAdminApiKey } from '../../hooks/useAdminApiKey';
 import {
   AZURE_OPENAI_PROVIDER,
   AZURE_OPENAI_PROVIDER_LABEL,
@@ -22,6 +23,7 @@ interface StepLLMConfigProps {
 }
 
 export default function StepLLMConfig({ data, onChange }: StepLLMConfigProps) {
+  const hasAdminAccess = useAdminApiKey();
   const {
     data: deploymentCatalog,
     isLoading,
@@ -33,6 +35,7 @@ export default function StepLLMConfig({ data, onChange }: StepLLMConfigProps) {
     queryFn: api.getAzureDeployments,
     staleTime: 60_000,
     retry: false,
+    enabled: hasAdminAccess,
   });
 
   const availableDeployments = getAzureDeploymentOptions(
@@ -107,13 +110,20 @@ export default function StepLLMConfig({ data, onChange }: StepLLMConfigProps) {
         </div>
       </div>
 
-      {isLoading && (
+      {!hasAdminAccess && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          Save the <span className="font-semibold">Admin write access</span> key in the top bar to load Azure deployments.
+          Existing saved deployment values can still be reviewed here.
+        </div>
+      )}
+
+      {hasAdminAccess && isLoading && (
         <div className="rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
           Fetching Azure OpenAI deployments from the backend.
         </div>
       )}
 
-      {isError && (
+      {hasAdminAccess && isError && (
         <div className="rounded-md border border-red-200 bg-red-50 p-4">
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -137,7 +147,7 @@ export default function StepLLMConfig({ data, onChange }: StepLLMConfigProps) {
         </div>
       )}
 
-      {!isLoading && !isError && !hasDiscoveredDeployments && !data.model && (
+      {hasAdminAccess && !isLoading && !isError && !hasDiscoveredDeployments && !data.model && (
         <div className="rounded-md border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-800">
           No Azure OpenAI deployments are currently available. Configure a deployment on the Azure resource before continuing.
         </div>
