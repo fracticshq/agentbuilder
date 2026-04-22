@@ -1035,36 +1035,3 @@ class MessageService:
         except Exception as e:
             logger.error("llm_streaming_error", error=str(e))
             yield "I apologize, but I encountered an error while processing your request."
-    
-    async def _build_memory_context(
-        self,
-        conversation_id: str,
-        user_id: str,
-        query: str,
-        escalations: list,
-    ) -> dict:
-        """
-        Build memory context for the agent.
-        """
-        # Get recent messages
-        recent_messages = await self.short_term.get_recent_messages(conversation_id, limit=10)
-        
-        # Get user facts
-        user_facts = await self.episodic.get_relevant_facts(user_id, query)
-        
-        # Get summaries
-        summaries = await self.short_term.get_summaries(conversation_id)
-        
-        # Get matched rules
-        matched_rules = []
-        if self.memory_config.ENABLE_GRAPH_RULES:
-            matched_rules = await self.graph.get_matching_rules(query)
-            
-        return {
-            "recent_messages": recent_messages,
-            "user_facts": user_facts,
-            "summaries": summaries,
-            "matched_rules": matched_rules,
-            "escalations": escalations
-        }
-
