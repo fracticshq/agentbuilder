@@ -176,8 +176,11 @@ describe('ChatWindow', () => {
 
     it('shows typing indicator with dots', () => {
       setBrand();
+      const pendingMessages: Message[] = [
+        { id: '1', content: 'Hello', role: 'user', timestamp: new Date() },
+      ];
       render(
-        <ChatWindow messages={messages} isTyping={true} onSendMessage={vi.fn()} onClose={noopClose} onToggleExpand={noopExpand} />
+        <ChatWindow messages={pendingMessages} isTyping={true} onSendMessage={vi.fn()} onClose={noopClose} onToggleExpand={noopExpand} />
       );
       const dots = document.querySelectorAll('.typing-dots .dot');
       expect(dots.length).toBe(3);

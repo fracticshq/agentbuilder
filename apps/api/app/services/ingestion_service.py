@@ -4,7 +4,6 @@ Ingestion Service - Document processing and chunking
 
 import asyncio
 import uuid
-import os
 import json
 from typing import List, Optional
 from datetime import datetime
@@ -16,6 +15,8 @@ from commons.types.requests import IngestionRequest
 from commons.types.responses import IngestionResponse, IngestionStatus
 from ..config import Settings
 from ..connections import connection_manager
+from .job_store import JobStore
+from .runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger()
 
@@ -25,54 +26,59 @@ class IngestionService:
     
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.active_jobs = {}  # In-memory job tracking (use Redis in production)
-        self.voyage_api_key = os.getenv("VOYAGE_API_KEY")
-        self.voyage_model = os.getenv("VOYAGE_MODEL", "voyage-large-2-instruct")
+        self.job_store = JobStore()
+        self.runtime_settings_service = RuntimeSettingsService(settings)
+
+    async def _get_voyage_runtime_config(self) -> dict[str, str]:
+        config = await self.runtime_settings_service.get_voyage_runtime_config()
+        return {
+            "api_key": config["api_key"],
+            "model": config["model"],
+        }
     
     async def start_ingestion_job(self, files: List[dict], agent_id: Optional[str] = None) -> str:
         """Start a new ingestion job."""
         job_id = str(uuid.uuid4())
-        
-        self.active_jobs[job_id] = {
+
+        await self.job_store.set(job_id, {
             "status": "pending",
             "files_count": len(files),
             "processed_count": 0,
             "agent_id": agent_id,
-            "created_at": asyncio.get_event_loop().time(),
+            "created_at": datetime.utcnow().isoformat(),
             "error": None
-        }
-        
+        })
+
         logger.info("Started ingestion job", job_id=job_id, files_count=len(files), agent_id=agent_id)
         return job_id
-    
+
     async def process_documents(self, job_id: str, files: List[dict], agent_id: Optional[str] = None):
         """Process documents in background."""
         try:
-            self.active_jobs[job_id]["status"] = "processing"
-            
+            await self.job_store.update(job_id, {"status": "processing"})
+
             for i, file_data in enumerate(files):
                 # Extract file information
                 content = file_data['content']
                 filename = file_data['filename']
                 content_type = file_data['content_type']
-                
+
                 # Process based on content type
                 chunks = await self._extract_and_chunk(content, content_type, filename)
-                
+
                 # Store chunks with embeddings
                 await self._store_chunks(chunks, job_id, filename, agent_id)
-                
+
                 # Update progress
-                self.active_jobs[job_id]["processed_count"] = i + 1
-                
+                await self.job_store.update(job_id, {"processed_count": i + 1})
+
                 logger.info("Processed file", job_id=job_id, filename=filename, chunks_count=len(chunks))
-            
-            self.active_jobs[job_id]["status"] = "completed"
+
+            await self.job_store.update(job_id, {"status": "completed"})
             logger.info("Completed ingestion job", job_id=job_id)
-            
+
         except Exception as e:
-            self.active_jobs[job_id]["status"] = "error"
-            self.active_jobs[job_id]["error"] = str(e)
+            await self.job_store.update(job_id, {"status": "error", "error": str(e)})
             logger.error("Error processing documents", job_id=job_id, error=str(e))
     
     async def process_chunk(self, request: IngestionRequest) -> IngestionResponse:
@@ -109,10 +115,10 @@ class IngestionService:
     
     async def get_job_status(self, job_id: str) -> Optional[IngestionStatus]:
         """Get the status of an ingestion job."""
-        job_info = self.active_jobs.get(job_id)
+        job_info = await self.job_store.get(job_id)
         if not job_info:
             return None
-        
+
         return IngestionStatus(
             job_id=job_id,
             status=job_info["status"],
@@ -120,11 +126,12 @@ class IngestionService:
             processed_count=job_info["processed_count"],
             error=job_info.get("error")
         )
-    
+
     async def cancel_job(self, job_id: str) -> bool:
         """Cancel an ingestion job."""
-        if job_id in self.active_jobs:
-            self.active_jobs[job_id]["status"] = "cancelled"
+        job_info = await self.job_store.get(job_id)
+        if job_info:
+            await self.job_store.update(job_id, {"status": "cancelled"})
             logger.info("Cancelled ingestion job", job_id=job_id)
             return True
         return False
@@ -384,8 +391,12 @@ class IngestionService:
     
     async def _generate_embeddings(self, text: str) -> List[float]:
         """Generate embeddings using Voyage AI."""
-        if not self.voyage_api_key:
-            logger.warning("VOYAGE_API_KEY not set, returning zero embeddings")
+        voyage_config = await self._get_voyage_runtime_config()
+        api_key = voyage_config["api_key"]
+        model = voyage_config["model"]
+
+        if not api_key:
+            logger.warning("voyage_api_key_not_configured", text_length=len(text))
             return [0.0] * 1024  # Voyage uses 1024 dimensions
         
         try:
@@ -393,12 +404,12 @@ class IngestionService:
                 response = await client.post(
                     "https://api.voyageai.com/v1/embeddings",
                     headers={
-                        "Authorization": f"Bearer {self.voyage_api_key}",
+                        "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json"
                     },
                     json={
                         "input": [text],
-                        "model": self.voyage_model
+                        "model": model
                     },
                     timeout=30.0
                 )
@@ -490,4 +501,3 @@ class IngestionService:
         except Exception as e:
             logger.error("Error storing chunk in MongoDB", error=str(e))
             return str(uuid.uuid4())  # Return fake ID on error
-

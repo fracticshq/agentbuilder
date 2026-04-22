@@ -18,15 +18,16 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 import structlog
 
+from app.auth.admin_key import require_admin_key
 from app.connections import connection_manager
 from app.services import catalog_service
 
 logger = structlog.get_logger()
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin_key)])
 
 
 def _firecrawl_key() -> str:
@@ -65,8 +66,7 @@ class SyncConfigUpdate(BaseModel):
 async def import_shopify(req: ShopifyImportRequest, background_tasks: BackgroundTasks):
     """Start async Shopify product fetch. Paginates /products.json. Returns job_id."""
     job_id = str(uuid.uuid4())
-    job = catalog_service.create_job(job_id, "shopify")
-    job["total"] = 0
+    await catalog_service.create_job(job_id, "shopify", total=0)
 
     background_tasks.add_task(
         catalog_service.fetch_shopify_products,
@@ -143,8 +143,7 @@ async def import_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="Maximum 50 URLs per request.")
 
     job_id = str(uuid.uuid4())
-    job = catalog_service.create_job(job_id, "scrape")
-    job["total"] = len(req.urls)
+    await catalog_service.create_job(job_id, "scrape", total=len(req.urls))
 
     background_tasks.add_task(
         catalog_service.run_firecrawl_scrape,
@@ -159,7 +158,7 @@ async def import_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
 
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str):
-    job = catalog_service.get_job(job_id)
+    job = await catalog_service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     return job
@@ -224,7 +223,7 @@ async def manual_sync(brand_id: str, background_tasks: BackgroundTasks):
 
     if source_type == "shopify":
         job_id = str(uuid.uuid4())
-        catalog_service.create_job(job_id, "shopify")
+        await catalog_service.create_job(job_id, "shopify")
         background_tasks.add_task(
             catalog_service.fetch_shopify_products,
             config["source_url"],

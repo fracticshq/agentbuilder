@@ -5,7 +5,7 @@ Authentication data models.
 from datetime import datetime
 from enum import Enum
 from typing import Optional, List
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 from bson import ObjectId
 
 
@@ -102,6 +102,26 @@ class User(BaseModel):
             ObjectId: str,
             datetime: lambda v: v.isoformat()
         }
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_fields(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        normalized = dict(data)
+        if "password_hash" not in normalized and normalized.get("hashed_password"):
+            normalized["password_hash"] = normalized["hashed_password"]
+        if "brands" not in normalized:
+            brand_id = normalized.get("brand_id")
+            normalized["brands"] = [brand_id] if brand_id else []
+        if "is_active" not in normalized:
+            normalized["is_active"] = not normalized.get("disabled", False)
+        if "locked_until" not in normalized and normalized.get("account_locked_until"):
+            normalized["locked_until"] = normalized["account_locked_until"]
+        if "is_verified" not in normalized:
+            normalized["is_verified"] = normalized.get("verified", False)
+        return normalized
     
     def has_permission(self, permission: Permission) -> bool:
         """Check if user has a specific permission."""
@@ -218,6 +238,30 @@ class APIKey(BaseModel):
     
     class Config:
         populate_by_name = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_fields(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        normalized = dict(data)
+        if "key_id" not in normalized and normalized.get("key_prefix"):
+            normalized["key_id"] = normalized["key_prefix"]
+        if "scopes" not in normalized and normalized.get("permissions"):
+            normalized["scopes"] = normalized["permissions"]
+        if "brand_ids" not in normalized and normalized.get("brand_id"):
+            normalized["brand_ids"] = [normalized["brand_id"]]
+        if "is_active" not in normalized:
+            normalized["is_active"] = not normalized.get("disabled", False)
+        if "revoked_at" not in normalized and normalized.get("disabled_at"):
+            normalized["revoked_at"] = normalized["disabled_at"]
+        if "usage" not in normalized:
+            normalized["usage"] = {
+                "total_requests": normalized.get("total_requests", 0),
+                "last_used": normalized.get("last_used"),
+            }
+        return normalized
     
     def is_expired(self) -> bool:
         """Check if API key is expired."""

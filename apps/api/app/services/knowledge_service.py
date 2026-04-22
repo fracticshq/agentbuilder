@@ -5,7 +5,6 @@ Handles both document uploads and bulk JSON imports for products/dealers
 
 import asyncio
 import uuid
-import os
 import json
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -15,6 +14,8 @@ from pymongo import UpdateOne
 
 from ..config import Settings
 from ..connections import connection_manager
+from .job_store import JobStore
+from .runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger()
 
@@ -24,13 +25,19 @@ class KnowledgeService:
     
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.active_jobs = {}  # In-memory job tracking (use Redis in production)
-        self.voyage_api_key = os.getenv("VOYAGE_API_KEY")
-        self.voyage_model = os.getenv("VOYAGE_MODEL", "voyage-large-2-instruct")
+        self.job_store = JobStore()
+        self.runtime_settings_service = RuntimeSettingsService(settings)
         self.mongo_client = None
         self.db_cache = {}  # Cache brand-specific databases
         self.db = None
         self.collection = None
+
+    async def _get_voyage_runtime_config(self) -> Dict[str, str]:
+        config = await self.runtime_settings_service.get_voyage_runtime_config()
+        return {
+            "api_key": config["api_key"],
+            "model": config["model"],
+        }
     
     async def _get_brand_database(self, brand_id: str):
         """
@@ -98,7 +105,7 @@ class KnowledgeService:
         """Start a document upload job."""
         job_id = str(uuid.uuid4())
         
-        self.active_jobs[job_id] = {
+        await self.job_store.set(job_id, {
             "status": "pending",
             "type": "document",
             "filename": filename,
@@ -106,10 +113,10 @@ class KnowledgeService:
             "brand_id": brand_id,
             "processed_chunks": 0,
             "total_chunks": 0,
-            "created_at": asyncio.get_event_loop().time(),
+            "created_at": datetime.utcnow().isoformat(),
             "error": None
-        }
-        
+        })
+
         return job_id
     
     async def start_bulk_upload(
@@ -121,7 +128,7 @@ class KnowledgeService:
         """Start a bulk JSON upload job."""
         job_id = str(uuid.uuid4())
         
-        self.active_jobs[job_id] = {
+        await self.job_store.set(job_id, {
             "status": "pending",
             "type": "bulk",
             "content_type": content_type,
@@ -129,18 +136,18 @@ class KnowledgeService:
             "total_items": len(items),
             "processed_items": 0,
             "processed_chunks": 0,
-            "created_at": asyncio.get_event_loop().time(),
+            "created_at": datetime.utcnow().isoformat(),
             "error": None
-        }
-        
+        })
+
         return job_id
     
     async def get_job_status(self, job_id: str) -> Optional[Dict]:
         """Get job status."""
-        job = self.active_jobs.get(job_id)
+        job = await self.job_store.get(job_id)
         if not job:
             return None
-        
+
         return {
             "job_id": job_id,
             "status": job["status"],
@@ -172,14 +179,14 @@ class KnowledgeService:
         """Process a document upload in background."""
         try:
             await self._ensure_connection(brand_id)  # Use brand-specific database
-            self.active_jobs[job_id]["status"] = "processing"
-            
+            await self.job_store.update(job_id, {"status": "processing"})
+
             # Extract text from document
             text = await self._extract_text(content, content_type_header, filename)
-            
+
             # Chunk the text
             chunks = await self._chunk_text(text, filename)
-            self.active_jobs[job_id]["total_chunks"] = len(chunks)
+            await self.job_store.update(job_id, {"total_chunks": len(chunks)})
             
             # Generate doc_id
             doc_id = f"{brand_id}_{kb_content_type}_{uuid.uuid4().hex[:8]}"
@@ -237,19 +244,18 @@ class KnowledgeService:
                 await self.collection.insert_one(chunk_doc)
                 
                 # Update progress
-                self.active_jobs[job_id]["processed_chunks"] = i + 1
-            
-            self.active_jobs[job_id]["status"] = "completed"
+                await self.job_store.update(job_id, {"processed_chunks": i + 1})
+
+            await self.job_store.update(job_id, {"status": "completed"})
             logger.info(
                 "Document upload completed",
                 job_id=job_id,
                 doc_id=doc_id,
                 chunks=len(chunks)
             )
-            
+
         except Exception as e:
-            self.active_jobs[job_id]["status"] = "error"
-            self.active_jobs[job_id]["error"] = str(e)
+            await self.job_store.update(job_id, {"status": "error", "error": str(e)})
             logger.error("Document upload failed", job_id=job_id, error=str(e))
     
     # ========================================================================
@@ -266,28 +272,27 @@ class KnowledgeService:
         """Process bulk JSON upload in background."""
         try:
             await self._ensure_connection(brand_id)  # Use brand-specific database
-            self.active_jobs[job_id]["status"] = "processing"
-            
+            await self.job_store.update(job_id, {"status": "processing"})
+
             for i, item in enumerate(items):
                 if content_type == "product":
                     await self._process_product_item(item, brand_id, job_id)
                 elif content_type == "dealer":
                     await self._process_dealer_item(item, brand_id, job_id)
-                
+
                 # Update progress
-                self.active_jobs[job_id]["processed_items"] = i + 1
-            
-            self.active_jobs[job_id]["status"] = "completed"
+                await self.job_store.update(job_id, {"processed_items": i + 1})
+
+            await self.job_store.update(job_id, {"status": "completed"})
             logger.info(
                 "Bulk upload completed",
                 job_id=job_id,
                 items=len(items),
                 content_type=content_type
             )
-            
+
         except Exception as e:
-            self.active_jobs[job_id]["status"] = "error"
-            self.active_jobs[job_id]["error"] = str(e)
+            await self.job_store.update(job_id, {"status": "error", "error": str(e)})
             logger.error("Bulk upload failed", job_id=job_id, error=str(e))
     
     async def _process_product_item(self, item: Any, brand_id: str, job_id: str):
@@ -353,8 +358,9 @@ class KnowledgeService:
                 upsert=True
             )
             
-            # Update progress
-            self.active_jobs[job_id]["processed_chunks"] += 1
+            # Update progress (fire-and-forget increment)
+            job = await self.job_store.get(job_id) or {}
+            await self.job_store.update(job_id, {"processed_chunks": job.get("processed_chunks", 0) + 1})
     
     async def _process_dealer_item(self, item: Any, brand_id: str, job_id: str):
         """Process a single dealer item."""
@@ -421,8 +427,9 @@ class KnowledgeService:
                 upsert=True
             )
             
-            # Update progress
-            self.active_jobs[job_id]["processed_chunks"] += 1
+            # Update progress (fire-and-forget increment)
+            job = await self.job_store.get(job_id) or {}
+            await self.job_store.update(job_id, {"processed_chunks": job.get("processed_chunks", 0) + 1})
     
     # ========================================================================
     # Document Management
@@ -619,17 +626,24 @@ class KnowledgeService:
     
     async def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings using Voyage AI."""
+        voyage_config = await self._get_voyage_runtime_config()
+        api_key = voyage_config["api_key"]
+        model = voyage_config["model"]
+        if not api_key:
+            logger.warning("voyage_api_key_not_configured", texts_count=len(texts))
+            return [[] for _ in texts]
+
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     "https://api.voyageai.com/v1/embeddings",
                     headers={
-                        "Authorization": f"Bearer {self.voyage_api_key}",
+                        "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json"
                     },
                     json={
                         "input": texts,
-                        "model": self.voyage_model
+                        "model": model
                     }
                 )
                 

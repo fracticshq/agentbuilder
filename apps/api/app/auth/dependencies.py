@@ -2,7 +2,9 @@
 FastAPI dependencies for authentication and authorization.
 """
 
+from datetime import datetime
 from typing import Optional
+from bson import ObjectId
 from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
@@ -18,7 +20,14 @@ logger = structlog.get_logger()
 settings = Settings()
 
 # Security schemes
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
+
+
+def _mongo_id_filter(value: str | ObjectId) -> dict:
+    try:
+        return {"_id": ObjectId(str(value))}
+    except Exception:
+        return {"_id": value}
 
 
 async def get_db() -> AsyncIOMotorDatabase:
@@ -48,6 +57,9 @@ async def get_current_user(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+    if credentials is None:
+        raise credentials_exception
     
     token = credentials.credentials
     
@@ -63,8 +75,8 @@ async def get_current_user(
         raise credentials_exception
     
     # Get user from database
-    users_collection = db[settings.MONGODB_DATABASE].users
-    user_doc = await users_collection.find_one({"_id": user_id})
+    users_collection = db.users
+    user_doc = await users_collection.find_one(_mongo_id_filter(user_id))
     
     if user_doc is None:
         logger.warning("user_not_found", user_id=user_id)
@@ -141,7 +153,7 @@ async def get_api_key_user(
         )
     
     # Get API key from database
-    api_keys_collection = db[settings.MONGODB_DATABASE].api_keys
+    api_keys_collection = db.api_keys
     api_key_doc = await api_keys_collection.find_one({"key_id": key_id})
     
     if api_key_doc is None:
@@ -171,16 +183,16 @@ async def get_api_key_user(
     
     # Update last used timestamp
     await api_keys_collection.update_one(
-        {"_id": api_key.id},
+        _mongo_id_filter(api_key.id),
         {
-            "$set": {"usage.last_used": "now"},
+            "$set": {"usage.last_used": datetime.utcnow()},
             "$inc": {"usage.total_requests": 1}
         }
     )
     
     # Get user
-    users_collection = db[settings.MONGODB_DATABASE].users
-    user_doc = await users_collection.find_one({"_id": api_key.user_id})
+    users_collection = db.users
+    user_doc = await users_collection.find_one(_mongo_id_filter(api_key.user_id))
     
     if user_doc is None:
         logger.error("api_key_user_not_found", user_id=api_key.user_id)

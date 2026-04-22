@@ -4,7 +4,6 @@ Integrates Phase 5 Memory System with retrieval and LLM generation.
 Phase 4: Response validation to prevent hallucinations.
 """
 
-import os
 import asyncio
 import json
 import uuid
@@ -36,6 +35,7 @@ from ..config import Settings
 from ..connections import connection_manager
 from .response_validator import ResponseValidator  # Phase 4
 from .strapi_client import StrapiClient
+from .runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger(__name__)
 
@@ -51,6 +51,50 @@ def _sanitize_for_json(data: dict) -> dict:
         return json.loads(json.dumps(data, default=str))
     except Exception:
         return {}
+
+
+def _extract_tool_result_metadata(tool_results: dict) -> tuple[list[dict], list[dict], list[dict]]:
+    """Normalize citations, products, and dealers from orchestrator tool metadata."""
+    citations: list[dict] = []
+    products: list[dict] = []
+    dealers: list[dict] = []
+
+    for step_id, tool_result in tool_results.items():
+        if not hasattr(tool_result, "metadata") or not tool_result.metadata:
+            continue
+
+        result_metadata = tool_result.metadata
+
+        if "products" in result_metadata:
+            products.extend(result_metadata["products"])
+        if "dealers" in result_metadata:
+            dealers.extend(result_metadata["dealers"])
+
+        if "sources" not in result_metadata:
+            continue
+
+        confidence = min(1.0, max(0.0, float(result_metadata.get("confidence", 1.0))))
+        for source in result_metadata["sources"][:5]:
+            doc_id = source if isinstance(source, str) else source.get("title", str(source))
+            citations.append({
+                "doc_id": doc_id,
+                "title": doc_id,
+                "confidence": confidence,
+                "url": None,
+                "snippet": None,
+            })
+
+        logger.info(
+            "tool_result_metadata",
+            step_id=step_id,
+            products_count=len(result_metadata.get("products", [])),
+            dealers_count=len(result_metadata.get("dealers", [])),
+            sources_count=len(result_metadata.get("sources", [])),
+        )
+
+    safe_products = [_sanitize_for_json(product) for product in products]
+    safe_dealers = [_sanitize_for_json(dealer) for dealer in dealers]
+    return citations, safe_products, safe_dealers
 
 
 class MessageService:
@@ -75,6 +119,7 @@ class MessageService:
         # Agent configuration (will be loaded on first message)
         self.agent_config = None
         self.system_prompt = None
+        self.runtime_settings_service = RuntimeSettingsService(settings)
         
         # Memory system will be initialized after database is set
         self.memory_config = MemoryConfig()
@@ -94,8 +139,8 @@ class MessageService:
             graph_rules=self.memory_config.ENABLE_GRAPH_RULES,
         )
         
-        # Initialize retrieval pipeline with configuration
-        retrieval_config = RetrievalConfig(
+        # Initialize retrieval pipeline configuration.
+        self.retrieval_config = RetrievalConfig(
             vector_enabled=True,
             vector_top_k=50,
             similarity_threshold=0.7,
@@ -108,53 +153,15 @@ class MessageService:
             page_boost_enabled=True,
             dedup_enabled=True
         )
-        
-        try:
-            self.retrieval_pipeline = RetrievalPipeline(
-                config=retrieval_config,
-                brand_id=brand_id
-            )
-            logger.info("retrieval_pipeline_initialized", brand_id=brand_id)
-        except Exception as e:
-            logger.warning("retrieval_pipeline_init_failed", error=str(e))
-            self.retrieval_pipeline = None
-        
-        # Initialize LLM provider (default to OpenAI for now)
-        provider_name = settings.DEFAULT_LLM_PROVIDER or "openai"
-        if provider_name == "openai":
-            api_key = settings.OPENAI_API_KEY
-            model = settings.OPENAI_MODEL
-        elif provider_name == "qwen":
-            api_key = settings.QWEN_API_KEY
-            model = settings.QWEN_MODEL
-        else:
-            api_key = settings.OPENAI_API_KEY
-            model = settings.OPENAI_MODEL
-            
-        try:
-            self.llm_provider = create_provider_from_env(
-                provider_name=provider_name,
-                api_key=api_key,
-                model=model
-            )
-        except ValueError as e:
-            logger.error("llm_provider_init_failed", error=str(e))
-            raise
+        self.retrieval_pipeline = None
+        self.llm_provider = None
         
         # Phase 4: Initialize response validator
         self.response_validator = ResponseValidator(strict_mode=True)
         
         # Phase 6: Initialize SOTA Orchestrator with Critic
         self.tool_registry = ToolRegistry()
-        if self.retrieval_pipeline:
-            self.tool_registry.register(RetrievalTool(self.retrieval_pipeline))
-            
-        self.orchestrator = Orchestrator(
-            llm=self.llm_provider,
-            tools=self.tool_registry,
-            critic=self.response_validator,  # Enable autonomous self-correction
-            system_prompt=None  # Will be loaded dynamically from DB
-        )
+        self.orchestrator = None
 
         # Strapi dashboard sync (fire-and-forget, non-blocking)
         self.strapi = StrapiClient(
@@ -163,6 +170,70 @@ class MessageService:
         )
 
         logger.info("message_service_initialized", brand_id=self.brand_id)
+
+    def _build_llm_provider(self, runtime_config: dict[str, Optional[str]]):
+        """Build an LLM provider from resolved runtime settings."""
+        resolved_provider = runtime_config.get("provider_name") or "openai"
+        api_key = runtime_config.get("api_key") or ""
+        resolved_model = runtime_config.get("model") or ""
+        provider_kwargs = {
+            "base_url": runtime_config.get("base_url"),
+            "api_version": runtime_config.get("api_version"),
+            "azure_endpoint": runtime_config.get("azure_endpoint"),
+            "deployment_name": runtime_config.get("deployment_name"),
+        }
+        try:
+            provider = create_provider_from_env(
+                provider_name=resolved_provider,
+                api_key=api_key,
+                model=resolved_model,
+                **provider_kwargs,
+            )
+            logger.info("llm_provider_configured", provider=resolved_provider, model=resolved_model)
+            return provider
+        except ValueError as e:
+            logger.error("llm_provider_init_failed", provider=resolved_provider, model=resolved_model, error=str(e))
+            raise
+
+    async def _configure_retrieval_pipeline(self, brand_slug: Optional[str]) -> None:
+        voyage_config = await self.runtime_settings_service.get_voyage_runtime_config()
+        try:
+            self.retrieval_pipeline = RetrievalPipeline(
+                config=self.retrieval_config,
+                brand_id=brand_slug,
+                voyage_api_key=voyage_config["api_key"] or None,
+                voyage_model=voyage_config["model"],
+                rerank_api_key=voyage_config["api_key"] or None,
+            )
+            logger.info("retrieval_pipeline_initialized", brand_id=brand_slug)
+        except Exception as e:
+            logger.warning("retrieval_pipeline_init_failed", brand_id=brand_slug, error=str(e))
+            self.retrieval_pipeline = None
+
+        self.tool_registry = ToolRegistry()
+        if self.retrieval_pipeline:
+            self.tool_registry.register(RetrievalTool(self.retrieval_pipeline))
+
+    async def _configure_runtime_dependencies(
+        self,
+        *,
+        provider_name: Optional[str] = None,
+        model: Optional[str] = None,
+        brand_slug: Optional[str] = None,
+    ) -> None:
+        await self._configure_retrieval_pipeline(brand_slug)
+
+        runtime_config = await self.runtime_settings_service.get_llm_runtime_config(
+            provider_name=provider_name,
+            model=model,
+        )
+        self.llm_provider = self._build_llm_provider(runtime_config)
+        self.orchestrator = Orchestrator(
+            llm=self.llm_provider,
+            tools=self.tool_registry,
+            critic=self.response_validator,
+            system_prompt=self.system_prompt,
+        )
     
     async def _initialize_brand_database(self, agent_id: str):
         """Initialize brand-specific database and memory system."""
@@ -177,32 +248,8 @@ class MessageService:
             if agent and agent.get("brand_slug"):
                 brand_slug = agent["brand_slug"]
                 
-                # Reinitialize retrieval pipeline with correct brand_slug
-                retrieval_config = RetrievalConfig(
-                    vector_enabled=True,
-                    vector_top_k=50,
-                    similarity_threshold=0.7,
-                    bm25_enabled=True,
-                    bm25_top_k=50,
-                    rrf_k=60,
-                    rerank_enabled=True,
-                    rerank_top_k=12,
-                    brand_boost_enabled=True,
-                    page_boost_enabled=True,
-                    dedup_enabled=True
-                )
-                
-                self.retrieval_pipeline = RetrievalPipeline(
-                    config=retrieval_config,
-                    brand_id=brand_slug  # Use brand_slug instead of default brand_id
-                )
+                await self._configure_retrieval_pipeline(brand_slug)
                 logger.info("retrieval_pipeline_reinitialized", brand_slug=brand_slug)
-                
-                # Update the RetrievalTool to use the new pipeline
-                # This is critical - the tool was registered with the old default pipeline
-                if self.tool_registry:
-                    self.tool_registry.register(RetrievalTool(self.retrieval_pipeline))
-                    logger.info("retrieval_tool_updated", brand_slug=brand_slug)
             
             # Initialize memory system with brand database
             self.short_term = ShortTermMemory(self.brand_db)
@@ -259,6 +306,14 @@ class MessageService:
                 self.agent_config = config
                 self.system_prompt = agent.get("system_prompt", "")
                 self.brand_id = agent.get("brand_slug", self.brand_id)
+                llm_config = config.get("llm", {})
+                llm_provider_name = llm_config.get("provider")
+                llm_model = llm_config.get("model")
+                await self._configure_runtime_dependencies(
+                    provider_name=llm_provider_name,
+                    model=llm_model,
+                    brand_slug=self.brand_id,
+                )
                 
                 # Sync system prompt to Orchestrator
                 if self.orchestrator:
@@ -332,6 +387,9 @@ class MessageService:
                 logger.warning("agent_not_found", agent_id=agent_id)
                 self.agent_config = {}
                 self.system_prompt = ""
+                await self._configure_runtime_dependencies(
+                    brand_slug=self.brand_id,
+                )
                 
         except Exception as e:
             logger.error("agent_config_load_error", error=str(e))
@@ -483,15 +541,32 @@ class MessageService:
             
             # 6. Extract Facts & Auto-Summary (Async)
             if self.memory_config.ENABLE_FACT_EXTRACTION:
-                # Fire and forget / background task desirable here
-                pass 
+                messages = await self.short_term.get_recent_messages(conversation_id, limit=10)
+                await self.episodic.extract_and_store_facts(
+                    user_id=user_id,
+                    messages=messages,
+                    conversation_id=conversation_id,
+                )
+
+            if self.memory_config.ENABLE_AUTO_SUMMARY:
+                if await self.short_term.should_summarize(conversation_id):
+                    await self.short_term.trigger_summary(conversation_id)
+
+            tool_results = agent_result.metadata.get("tool_results", {})
+            citations, _products, _dealers = _extract_tool_result_metadata(tool_results)
+            duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
                 
             # Return response
             return MessageResponse(
                 message=response_text,
                 conversation_id=conversation_id,
-                citations=[], # Citations would need to be extracted from agent metadata in future
-                context_used=0, 
+                citations=citations,
+                context_used=len(tool_results),
+                confidence_score=min(
+                    1.0,
+                    max(0.0, float(agent_result.metadata.get("validation_confidence", 1.0))),
+                ),
+                processing_time_ms=duration_ms,
             )
             
         except Exception as e:
@@ -686,6 +761,8 @@ class MessageService:
                 conversation_id=conversation_id,
                 user_message=request.message,
                 assistant_message=full_response,
+                brand_slug=self.brand_id,
+                agent_id=agent_id,
             )
 
             # Extract episodic facts
@@ -703,54 +780,8 @@ class MessageService:
                     await self.short_term.trigger_summary(conversation_id)
             
             # Send final metadata (orchestrator handles retrieval internally)
-            # Extract tool results from orchestrator metadata for citations, products, and dealers
             tool_results = agent_result.metadata.get("tool_results", {})
-            citations = []
-            products = []
-            dealers = []
-            
-            # tool_results is a dict mapping step_id -> ToolResult
-            for step_id, tool_result in tool_results.items():
-                if hasattr(tool_result, 'metadata') and tool_result.metadata:
-                    result_metadata = tool_result.metadata
-                    
-                    # Extract products and dealers
-                    if 'products' in result_metadata:
-                        products.extend(result_metadata['products'])
-                    if 'dealers' in result_metadata:
-                        dealers.extend(result_metadata['dealers'])
-                    
-                    
-                    # Extract citations from sources (sources are doc_id strings)
-                    if 'sources' in result_metadata:
-                        # Log metadata for debugging products issue
-                        products_list = result_metadata.get('products', [])
-                        if products_list:
-                            logger.info("First product keys", keys=list(products_list[0].keys()))
-                            logger.info("First product sample", sample=str(products_list[0])[:200])
-                            
-                        logger.info("Tool result metadata", step_id=step_id, 
-                                   products_count=len(products_list),
-                                   dealers_count=len(result_metadata.get('dealers', [])),
-                                   sources_count=len(result_metadata.get('sources', [])))
-                        
-                        confidence = min(1.0, max(0.0, float(result_metadata.get('confidence', 1.0))))
-                        
-                        for source in result_metadata['sources'][:5]:  # Top 5 citations
-                            # source is just a doc_id string like "essco-bathware_product_EOS-CHR-491"
-                            doc_id = source if isinstance(source, str) else source.get("title", str(source))
-                            citations.append({
-                                "doc_id": doc_id,
-                                "title": doc_id,
-                                "confidence": confidence,
-                                "url": None,
-                                "snippet": None
-                            })
-            
-            # Sanitize products/dealers: strip MongoDB ObjectId, datetime, and other
-            # non-JSON-serializable types before they reach model_dump_json().
-            safe_products = [_sanitize_for_json(p) for p in products]
-            safe_dealers  = [_sanitize_for_json(d) for d in dealers]
+            citations, safe_products, safe_dealers = _extract_tool_result_metadata(tool_results)
 
             # Deduplicate products and dealers by ID
             unique_products = {p['id']: p for p in safe_products if p.get('id')}.values()
@@ -1035,36 +1066,3 @@ class MessageService:
         except Exception as e:
             logger.error("llm_streaming_error", error=str(e))
             yield "I apologize, but I encountered an error while processing your request."
-    
-    async def _build_memory_context(
-        self,
-        conversation_id: str,
-        user_id: str,
-        query: str,
-        escalations: list,
-    ) -> dict:
-        """
-        Build memory context for the agent.
-        """
-        # Get recent messages
-        recent_messages = await self.short_term.get_recent_messages(conversation_id, limit=10)
-        
-        # Get user facts
-        user_facts = await self.episodic.get_relevant_facts(user_id, query)
-        
-        # Get summaries
-        summaries = await self.short_term.get_summaries(conversation_id)
-        
-        # Get matched rules
-        matched_rules = []
-        if self.memory_config.ENABLE_GRAPH_RULES:
-            matched_rules = await self.graph.get_matching_rules(query)
-            
-        return {
-            "recent_messages": recent_messages,
-            "user_facts": user_facts,
-            "summaries": summaries,
-            "matched_rules": matched_rules,
-            "escalations": escalations
-        }
-

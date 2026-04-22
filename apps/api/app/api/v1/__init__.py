@@ -2,12 +2,13 @@
 API v1 Router
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from .endpoints import messages, ingestion, status, knowledge, activity, catalog
 from .admin import router as admin_router
 from .auth import auth_router
+from ...security.rate_limiter import rate_limit_dependency
 
-api_router = APIRouter()
+api_router = APIRouter(dependencies=[Depends(rate_limit_dependency)])
 
 # Include authentication router (no prefix, it has its own /auth prefix)
 api_router.include_router(auth_router)

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, Brand, CreateAgentRequest } from '../api/client';
+import { api, AzureOpenAIDeploymentsResponse, Brand, CreateAgentRequest } from '../api/client';
 import { showErrorAlert } from '../api/errorHandler';
 
 // Import wizard components
@@ -13,6 +13,12 @@ import StepKnowledgeBase from '../components/AgentWizard/StepKnowledgeBase';
 import StepRAGConfig from '../components/AgentWizard/StepRAGConfig';
 import StepFeatures from '../components/AgentWizard/StepFeatures';
 import StepReview from '../components/AgentWizard/StepReview';
+import {
+  AZURE_OPENAI_PROVIDER,
+  getDefaultDeployment,
+  isAzureOpenAIProvider,
+} from '../utils/llmOptions';
+
 
 type StepStatus = 'complete' | 'current' | 'upcoming';
 
@@ -90,7 +96,7 @@ const initialData: AgentData = {
   role: '',
 
   // LLM Config
-  provider: '',
+  provider: AZURE_OPENAI_PROVIDER,
   model: '',
   temperature: 0.7,
   max_tokens: 2000,
@@ -158,6 +164,15 @@ export default function AgentWizard() {
   const [agentData, setAgentData] = useState<AgentData>(initialData);
   const [isDeploying, setIsDeploying] = useState(false);
 
+  const normalizeAzureLlmState = (data: Partial<AgentData>): Partial<AgentData> => {
+    const shouldPreserveModel = isAzureOpenAIProvider(data.provider);
+    return {
+      ...data,
+      provider: AZURE_OPENAI_PROVIDER,
+      model: shouldPreserveModel ? data.model || '' : '',
+    };
+  };
+
   // Load saved draft from localStorage on mount
   useEffect(() => {
     if (!id) {
@@ -165,7 +180,7 @@ export default function AgentWizard() {
       if (savedDraft) {
         try {
           const parsed = JSON.parse(savedDraft);
-          setAgentData(prev => ({ ...prev, ...parsed.data }));
+          setAgentData(prev => ({ ...prev, ...normalizeAzureLlmState(parsed.data || {}) }));
           setCurrentStep(parsed.step || 1);
         } catch (e) {
           console.error('Failed to load draft:', e);
@@ -189,6 +204,13 @@ export default function AgentWizard() {
   const { data: brands = [] } = useQuery<Brand[]>({
     queryKey: ['brands'],
     queryFn: api.getBrands,
+  });
+
+  const { data: azureDeployments } = useQuery<AzureOpenAIDeploymentsResponse>({
+    queryKey: ['admin', 'azure-openai-deployments'],
+    queryFn: api.getAzureDeployments,
+    staleTime: 60_000,
+    retry: false,
   });
 
   // Fetch existing agent if editing
@@ -284,8 +306,8 @@ export default function AgentWizard() {
         role: existingAgent.metadata?.role || '',
 
         // LLM Config
-        provider: llm.provider || '',
-        model: llm.model || '',
+        provider: AZURE_OPENAI_PROVIDER,
+        model: isAzureOpenAIProvider(llm.provider) ? llm.model || '' : '',
         temperature: llm.temperature ?? 0.7,
         max_tokens: llm.max_tokens ?? 2000,
         top_p: llm.top_p ?? 1.0,
@@ -342,13 +364,35 @@ export default function AgentWizard() {
         brand_id: mappedData.brand_id
       });
 
-      setAgentData(prev => ({ ...prev, ...mappedData }));
+      setAgentData(prev => ({ ...prev, ...normalizeAzureLlmState(mappedData) }));
       console.log('✅ Agent data loaded into wizard state');
     }
   }, [existingAgent]);
 
+  useEffect(() => {
+    const preferredDeployment = getDefaultDeployment(azureDeployments, agentData.model);
+    if (!preferredDeployment || agentData.model) {
+      return;
+    }
+
+    setAgentData(prev => {
+      if (prev.model) {
+        return prev;
+      }
+      return {
+        ...prev,
+        provider: AZURE_OPENAI_PROVIDER,
+        model: preferredDeployment,
+      };
+    });
+  }, [agentData.model, azureDeployments]);
+
   const updateStepData = (field: string, value: any) => {
-    setAgentData(prev => ({ ...prev, [field]: value }));
+    setAgentData(prev => ({
+      ...prev,
+      [field]: value,
+      ...(field === 'provider' ? { provider: AZURE_OPENAI_PROVIDER } : {}),
+    }));
   };
 
   const getStepStatus = (stepNumber: number): StepStatus => {
@@ -413,7 +457,7 @@ export default function AgentWizard() {
         },
         configuration: {
           llm: {
-            provider: agentData.provider,
+            provider: AZURE_OPENAI_PROVIDER,
             model: agentData.model,
             temperature: agentData.temperature,
             max_tokens: agentData.max_tokens,
@@ -598,6 +642,7 @@ export default function AgentWizard() {
             isDeploying={isDeploying}
             brands={brands}
             agentId={id}
+            deployments={azureDeployments?.deployments || []}
           />
         );
       default:
@@ -674,7 +719,8 @@ export default function AgentWizard() {
         {currentStep < 7 && (
           <button
             onClick={nextStep}
-            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
+            disabled={currentStep === 2 && !agentData.model}
+            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:cursor-not-allowed disabled:bg-gray-400"
           >
             Next
           </button>

@@ -7,6 +7,7 @@ import asyncio
 import structlog
 
 from .vector.atlas_search import AtlasVectorSearch
+from .vector.voyage_client import VoyageClient
 from .bm25.text_search import BM25Search
 from .fusion.rrf import RRFFusion
 from .fusion.reranker import CrossEncoderReranker
@@ -31,14 +32,29 @@ class RetrievalPipeline:
     def __init__(
         self,
         config: Optional[RetrievalConfig] = None,
-        brand_id: Optional[str] = None
+        brand_id: Optional[str] = None,
+        voyage_api_key: Optional[str] = None,
+        voyage_model: str = "voyage-large-2-instruct",
+        rerank_api_key: Optional[str] = None,
+        rerank_model: str = "rerank-1",
     ):
         self.config = config or RetrievalConfig()
         self.brand_id = brand_id
         
         # Initialize search components with brand_id for database isolation
         try:
-            self.vector_search = AtlasVectorSearch(brand_id=brand_id) if self.config.vector_enabled else None
+            self.vector_search = (
+                AtlasVectorSearch(
+                    brand_id=brand_id,
+                    voyage_client=(
+                        VoyageClient(api_key=voyage_api_key, model=voyage_model)
+                        if voyage_api_key
+                        else None
+                    ),
+                )
+                if self.config.vector_enabled
+                else None
+            )
         except Exception as e:
             logger.warning("Vector search initialization failed", error=str(e))
             self.vector_search = None
@@ -51,7 +67,11 @@ class RetrievalPipeline:
         
         # Initialize fusion and reranking
         self.rrf = RRFFusion(k=self.config.rrf_k)
-        self.reranker = CrossEncoderReranker() if self.config.rerank_enabled else None
+        self.reranker = (
+            CrossEncoderReranker(api_key=rerank_api_key or voyage_api_key, model=rerank_model)
+            if self.config.rerank_enabled
+            else None
+        )
         
         # Initialize boosts
         self.brand_boost = BrandBoost(brand_id) if brand_id and self.config.brand_boost_enabled else None

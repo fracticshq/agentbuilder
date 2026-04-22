@@ -35,5 +35,7 @@ WORKDIR /app/api
 
 EXPOSE 8000
 
-# Run without --reload in Docker (source isn't hot-reloaded anyway in a container)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+RUN chmod +x /app/api/docker-entrypoint.sh
+
+# Fail fast with a clear config error before importing the app.
+ENTRYPOINT ["/app/api/docker-entrypoint.sh"]

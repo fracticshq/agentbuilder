@@ -1,7 +1,60 @@
 import axios from 'axios';
 import { handleApiError } from './errorHandler';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+declare global {
+  interface Window {
+    __APP_CONFIG__?: {
+      API_BASE_URL?: string;
+    };
+  }
+}
+
+const runtimeConfig = window.__APP_CONFIG__ || {};
+const API_BASE_URL = runtimeConfig.API_BASE_URL || process.env.REACT_APP_API_URL || window.location.origin;
+const ADMIN_API_KEY_STORAGE_KEY = 'agentbuilder.admin_api_key';
+export const ADMIN_API_KEY_CHANGED_EVENT = 'agentbuilder.admin_api_key_changed';
+
+function notifyAdminApiKeyChanged(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent(ADMIN_API_KEY_CHANGED_EVENT, {
+    detail: { hasKey: hasAdminApiKey() },
+  }));
+}
+
+export function getAdminApiKey(): string {
+  if (typeof window === 'undefined') {
+    return '';
+  }
+  return window.sessionStorage.getItem(ADMIN_API_KEY_STORAGE_KEY) || '';
+}
+
+export function hasAdminApiKey(): boolean {
+  return getAdminApiKey().trim().length > 0;
+}
+
+export function setAdminApiKey(value: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const trimmedValue = value.trim();
+  if (trimmedValue) {
+    window.sessionStorage.setItem(ADMIN_API_KEY_STORAGE_KEY, trimmedValue);
+    notifyAdminApiKeyChanged();
+    return;
+  }
+  window.sessionStorage.removeItem(ADMIN_API_KEY_STORAGE_KEY);
+  notifyAdminApiKeyChanged();
+}
+
+export function clearAdminApiKey(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.sessionStorage.removeItem(ADMIN_API_KEY_STORAGE_KEY);
+  notifyAdminApiKeyChanged();
+}
 
 // Create axios instance
 export const apiClient = axios.create({
@@ -9,6 +62,17 @@ export const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+});
+
+apiClient.interceptors.request.use((config) => {
+  const adminApiKey = getAdminApiKey();
+  if (adminApiKey) {
+    config.headers = config.headers || {};
+    config.headers['X-Admin-Key'] = adminApiKey;
+  } else if (config.headers && 'X-Admin-Key' in config.headers) {
+    delete config.headers['X-Admin-Key'];
+  }
+  return config;
 });
 
 // Add response interceptor for consistent error handling
@@ -136,6 +200,75 @@ export interface UpdateAgentRequest {
   };
 }
 
+export interface AzureOpenAIDeployment {
+  deployment_name: string;
+  model_name: string;
+  model_version?: string | null;
+  provisioning_state: string;
+  sku_name?: string | null;
+}
+
+export interface AzureOpenAIDeploymentsResponse {
+  provider: 'azure_openai';
+  default_deployment?: string | null;
+  deployments: AzureOpenAIDeployment[];
+}
+
+export interface RuntimeSettingOption {
+  value: string;
+  label: string;
+}
+
+export interface RuntimeSettingField {
+  key: string;
+  label: string;
+  description: string;
+  input_type: 'text' | 'password' | 'select';
+  secret: boolean;
+  required: boolean;
+  configured: boolean;
+  source: 'stored' | 'environment' | 'default';
+  value?: string | null;
+  masked_value?: string | null;
+  updated_at?: string | null;
+  options?: RuntimeSettingOption[];
+}
+
+export interface RuntimeSettingSection {
+  id: string;
+  title: string;
+  description: string;
+  supports_connection_test: boolean;
+  fields: RuntimeSettingField[];
+}
+
+export interface RuntimeSettingsResponse {
+  sections: RuntimeSettingSection[];
+}
+
+export interface RuntimeSettingsUpdateResponse {
+  updated: Array<{
+    key: string;
+    action: 'updated' | 'cleared';
+    section: string;
+  }>;
+  settings: RuntimeSettingsResponse;
+}
+
+export interface RuntimeSettingsTestRequest {
+  sections?: string[];
+  overrides?: Record<string, string | null>;
+}
+
+export interface RuntimeSettingsTestResponse {
+  status: 'healthy' | 'unhealthy';
+  results: Array<{
+    section: string;
+    status: 'healthy' | 'unhealthy';
+    detail: string;
+  }>;
+}
+
 // Brand API
 export const brandApi = {
   list: () => apiClient.get<Brand[]>('/api/v1/admin/brands/'),
@@ -157,6 +290,23 @@ export const agentApi = {
   update: (id: string, data: Partial<UpdateAgentRequest>) => 
     apiClient.put<Agent>(`/api/v1/admin/agents/${id}`, data),
   delete: (id: string) => apiClient.delete(`/api/v1/admin/agents/${id}`),
+};
+
+export const llmApi = {
+  getAzureDeployments: () =>
+    apiClient.get<AzureOpenAIDeploymentsResponse>('/api/v1/admin/llm/azure/deployments'),
+};
+
+export const adminSessionApi = {
+  validate: () => apiClient.get<{ authorized: true }>('/api/v1/admin/session/validate'),
+};
+
+export const runtimeSettingsApi = {
+  get: () => apiClient.get<RuntimeSettingsResponse>('/api/v1/admin/settings/runtime'),
+  update: (updates: Record<string, string | null>) =>
+    apiClient.put<RuntimeSettingsUpdateResponse>('/api/v1/admin/settings/runtime', { updates }),
+  test: (payload: RuntimeSettingsTestRequest) =>
+    apiClient.post<RuntimeSettingsTestResponse>('/api/v1/admin/settings/runtime/test', payload),
 };
 
 // Catalog API
@@ -213,6 +363,11 @@ export const api = {
   deleteAgent: async (id: string) => {
     await agentApi.delete(id);
   },
+
+  getAzureDeployments: async () => {
+    const response = await llmApi.getAzureDeployments();
+    return response.data;
+  },
   
   // Catalog
   syncShopify: async (data: { brand_id: string; store_url: string; access_token?: string }) => {
@@ -264,11 +419,11 @@ export const documentApi = {
 
   getKnowledgeDocuments: async (agentId?: string): Promise<KnowledgeDocument[]> => {
     const params = agentId ? { agent_id: agentId } : {};
-    console.log('🔍 Fetching documents with params:', params);
+    process.env.NODE_ENV !== 'production' && console.log('🔍 Fetching documents with params:', params);
     
     const response = await apiClient.get<{ documents: any[], count: number }>('/api/v1/ingest/documents', { params });
     
-    console.log('📥 Documents API response:', response.data);
+    process.env.NODE_ENV !== 'production' && console.log('📥 Documents API response:', response.data);
     
     // Transform API response to match KnowledgeDocument interface
     const transformed = response.data.documents.map((doc: any) => ({
@@ -288,7 +443,7 @@ export const documentApi = {
       updated_at: doc.created_at || new Date().toISOString(),
     }));
     
-    console.log('✨ Transformed documents:', transformed);
+    process.env.NODE_ENV !== 'production' && console.log('✨ Transformed documents:', transformed);
     return transformed;
   },
 

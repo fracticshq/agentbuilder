@@ -73,19 +73,22 @@ async def register_user(
         )
     
     # Hash password
-    hashed_password = hash_password(request.password)
+    password_hash = hash_password(request.password)
     
     # Create user document
     user_doc = {
         "username": request.username,
         "email": request.email,
-        "hashed_password": hashed_password,
+        "password_hash": password_hash,
         "full_name": request.full_name,
         "role": UserRole.USER.value,  # Default role
-        "brand_id": request.brand_id,
-        "disabled": False,
+        "brands": [request.brand_id] if request.brand_id else [],
+        "is_active": True,
+        "is_verified": False,
         "failed_login_attempts": 0,
-        "account_locked_until": None,
+        "locked_until": None,
+        "last_login": None,
+        "metadata": {},
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow()
     }

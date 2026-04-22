@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { PlusIcon, CpuChipIcon, TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon } from '@heroicons/react/24/outline';
 import { api, Agent } from '../api/client';
 import { ApiError, showErrorAlert } from '../api/errorHandler';
+import { getModelLabel, getProviderLabel } from '../utils/llmOptions';
 
 export default function Agents() {
   const queryClient = useQueryClient();
@@ -27,6 +28,13 @@ export default function Agents() {
   const { data: agents = [], isLoading, error } = useQuery<Agent[]>({
     queryKey: ['agents'],
     queryFn: () => api.getAgents(),
+  });
+
+  const { data: azureDeployments } = useQuery({
+    queryKey: ['admin', 'azure-openai-deployments'],
+    queryFn: api.getAzureDeployments,
+    staleTime: 60_000,
+    retry: false,
   });
 
   // Mutation for changing agent status
@@ -227,7 +235,7 @@ export default function Agents() {
                     <p>Created: {new Date(agent.created_at).toLocaleDateString()}</p>
                     {agent.configuration?.llm && (
                       <p className="mt-1">
-                        Model: {agent.configuration.llm.provider} / {agent.configuration.llm.model}
+                        Model: {getProviderLabel(agent.configuration.llm.provider)} / {getModelLabel(agent.configuration.llm.provider, agent.configuration.llm.model, azureDeployments?.deployments)}
                       </p>
                     )}
                   </div>

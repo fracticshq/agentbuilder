@@ -2,14 +2,15 @@
 API Key management endpoints.
 """
 
+from bson import ObjectId
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timedelta
 
-from ....auth.models import User, UserRole, Permission
-from ....auth.api_keys import generate_api_key, hash_api_key
-from ....auth.dependencies import get_current_active_user, require_permission
+from ....auth.models import APIKey, User, UserRole, Permission
+from ....auth.api_keys import generate_api_key
+from ....auth.dependencies import get_current_active_user
 from ....auth.dependencies import get_db
 
 router = APIRouter()
@@ -19,7 +20,7 @@ class CreateAPIKeyRequest(BaseModel):
     """API key creation request."""
     name: str = Field(..., min_length=3, max_length=100, description="Descriptive name for the API key")
     brand_id: Optional[str] = Field(None, description="Brand ID to scope this key to")
-    permissions: List[Permission] = Field(default_factory=lambda: [Permission.READ_MESSAGES], description="Permissions for this key")
+    permissions: List[Permission] = Field(default_factory=lambda: [Permission.MESSAGE_READ], description="Permissions for this key")
     expires_in_days: Optional[int] = Field(None, ge=1, le=365, description="Key expiration in days (max 365)")
 
 
@@ -41,6 +42,31 @@ class CreateAPIKeyResponse(APIKeyResponse):
     warning: str = "Save this key securely. It will not be shown again."
 
 
+def _primary_brand_id(api_key: APIKey) -> Optional[str]:
+    return api_key.brand_ids[0] if api_key.brand_ids else None
+
+
+def _serialize_api_key_response(
+    key_doc: dict | APIKey,
+    revealed_key: Optional[str] = None,
+) -> APIKeyResponse:
+    api_key = key_doc if isinstance(key_doc, APIKey) else APIKey(**key_doc)
+    response_cls = CreateAPIKeyResponse if revealed_key else APIKeyResponse
+    response_kwargs = {
+        "id": str(api_key.id),
+        "name": api_key.name,
+        "key_preview": f"{api_key.key_id}...{revealed_key[-4:] if revealed_key else '****'}",
+        "brand_id": _primary_brand_id(api_key),
+        "permissions": [Permission(scope) for scope in api_key.scopes],
+        "created_at": api_key.created_at,
+        "expires_at": api_key.expires_at,
+        "last_used": api_key.usage.get("last_used"),
+    }
+    if revealed_key:
+        response_kwargs["api_key"] = revealed_key
+    return response_cls(**response_kwargs)
+
+
 @router.post("/keys", response_model=CreateAPIKeyResponse, status_code=status.HTTP_201_CREATED)
 async def create_api_key(
     request: CreateAPIKeyRequest,
@@ -55,12 +81,11 @@ async def create_api_key(
     
     - **name**: Descriptive name for the key
     - **brand_id**: Optional brand scope
-    - **permissions**: List of permissions (default: READ_MESSAGES)
+    - **permissions**: List of permissions (default: MESSAGE_READ)
     - **expires_in_days**: Optional expiration (max 365 days)
     """
     # Generate API key
-    api_key = generate_api_key()
-    key_hash = hash_api_key(api_key)
+    api_key, key_id, key_hash = generate_api_key()
     
     # Calculate expiration
     expires_at = None
@@ -71,32 +96,23 @@ async def create_api_key(
     key_doc = {
         "user_id": str(current_user.id),
         "name": request.name,
+        "key_id": key_id,
         "key_hash": key_hash,
-        "key_prefix": api_key[:8],  # Store prefix for identification
-        "brand_id": request.brand_id,
-        "permissions": [p.value for p in request.permissions],
-        "disabled": False,
+        "brand_ids": [request.brand_id] if request.brand_id else [],
+        "scopes": [p.value for p in request.permissions],
+        "is_active": True,
         "created_at": datetime.utcnow(),
         "expires_at": expires_at,
-        "last_used": None
+        "usage": {
+            "total_requests": 0,
+            "last_used": None,
+        },
     }
     
     # Insert key
-    from bson import ObjectId
     result = await db.api_keys.insert_one(key_doc)
-    key_doc["id"] = str(result.inserted_id)
-    
-    return CreateAPIKeyResponse(
-        id=key_doc["id"],
-        name=key_doc["name"],
-        key_preview=f"{key_doc['key_prefix']}...{api_key[-4:]}",
-        api_key=api_key,
-        brand_id=key_doc.get("brand_id"),
-        permissions=[Permission(p) for p in key_doc["permissions"]],
-        created_at=key_doc["created_at"],
-        expires_at=key_doc.get("expires_at"),
-        last_used=key_doc.get("last_used")
-    )
+    key_doc["_id"] = result.inserted_id
+    return _serialize_api_key_response(key_doc, revealed_key=api_key)
 
 
 @router.get("/keys", response_model=List[APIKeyResponse])
@@ -109,29 +125,13 @@ async def list_api_keys(
     
     Requires authentication.
     """
-    from bson import ObjectId
-    
     # Build query
     query = {"user_id": str(current_user.id)}
     
     # Fetch keys
     cursor = db.api_keys.find(query).sort("created_at", -1)
     keys = await cursor.to_list(length=100)
-    
-    # Format response
-    return [
-        APIKeyResponse(
-            id=str(key["_id"]),
-            name=key["name"],
-            key_preview=f"{key['key_prefix']}...****",
-            brand_id=key.get("brand_id"),
-            permissions=[Permission(p) for p in key["permissions"]],
-            created_at=key["created_at"],
-            expires_at=key.get("expires_at"),
-            last_used=key.get("last_used")
-        )
-        for key in keys
-    ]
+    return [_serialize_api_key_response(key) for key in keys]
 
 
 @router.get("/keys/{key_id}", response_model=APIKeyResponse)
@@ -145,8 +145,6 @@ async def get_api_key(
     
     Requires authentication. Users can only access their own keys.
     """
-    from bson import ObjectId
-    
     # Fetch key
     key = await db.api_keys.find_one({"_id": ObjectId(key_id)})
     if not key:
@@ -161,17 +159,7 @@ async def get_api_key(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this API key"
         )
-    
-    return APIKeyResponse(
-        id=str(key["_id"]),
-        name=key["name"],
-        key_preview=f"{key['key_prefix']}...****",
-        brand_id=key.get("brand_id"),
-        permissions=[Permission(p) for p in key["permissions"]],
-        created_at=key["created_at"],
-        expires_at=key.get("expires_at"),
-        last_used=key.get("last_used")
-    )
+    return _serialize_api_key_response(key)
 
 
 @router.delete("/keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -185,8 +173,6 @@ async def delete_api_key(
     
     Requires authentication. Users can only delete their own keys.
     """
-    from bson import ObjectId
-    
     # Fetch key
     key = await db.api_keys.find_one({"_id": ObjectId(key_id)})
     if not key:
@@ -219,8 +205,6 @@ async def disable_api_key(
     
     Requires authentication. Users can only disable their own keys.
     """
-    from bson import ObjectId
-    
     # Fetch key
     key = await db.api_keys.find_one({"_id": ObjectId(key_id)})
     if not key:
@@ -239,19 +223,9 @@ async def disable_api_key(
     # Disable key
     await db.api_keys.update_one(
         {"_id": ObjectId(key_id)},
-        {"$set": {"disabled": True, "disabled_at": datetime.utcnow()}}
+        {"$set": {"is_active": False, "revoked_at": datetime.utcnow()}}
     )
     
     # Fetch updated key
     key = await db.api_keys.find_one({"_id": ObjectId(key_id)})
-    
-    return APIKeyResponse(
-        id=str(key["_id"]),
-        name=key["name"],
-        key_preview=f"{key['key_prefix']}...****",
-        brand_id=key.get("brand_id"),
-        permissions=[Permission(p) for p in key["permissions"]],
-        created_at=key["created_at"],
-        expires_at=key.get("expires_at"),
-        last_used=key.get("last_used")
-    )
+    return _serialize_api_key_response(key)

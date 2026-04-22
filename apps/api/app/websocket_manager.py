@@ -1,110 +1,348 @@
+"""
+WebSocket Connection Manager — Redis pub/sub fanout + shared state.
+
+Architecture:
+  - WebSocket objects are process-local (can't be serialized across instances).
+    Each API instance maintains its own dict of active connections.
+  - Cross-instance message delivery uses Redis pub/sub:
+      send_to_widget(conv_id, msg)  → PUBLISH conv:{conv_id}:widget  <json>
+      send_to_admin(conv_id, msg)   → PUBLISH conv:{conv_id}:admin   <json>
+    Every instance that has a local connection for that conv_id is subscribed
+    and forwards the message to its local WebSocket.
+  - Shared state (human-control flag, agent_id, takeover buffer) lives in Redis:
+      HASH  conv:{conv_id}:state   → {"is_human_in_control": "0", "agent_id": "..."}
+      LIST  conv:{conv_id}:buffer  → [json, json, ...]
+
+Fallback:
+  When Redis is unavailable, all operations degrade gracefully to in-process
+  equivalents so a single-instance deployment works without Redis.
+"""
+
+import asyncio
+import hashlib
+import hmac
 import json
+from typing import Dict, Set, Optional
+
 import structlog
-from typing import Dict, Set
 from fastapi import WebSocket
+
+from .connections import connection_manager
 
 logger = structlog.get_logger(__name__)
 
+_STATE_TTL = 86400   # 24 h — auto-expire idle conversation state
+_PUB_PREFIX = "conv:"
+
+
+def _state_key(conversation_id: str) -> str:
+    return f"{_PUB_PREFIX}{conversation_id}:state"
+
+def _buffer_key(conversation_id: str) -> str:
+    return f"{_PUB_PREFIX}{conversation_id}:buffer"
+
+def _channel(conversation_id: str, target: str) -> str:
+    return f"{_PUB_PREFIX}{conversation_id}:{target}"
+
+
 class ConnectionManager:
     def __init__(self):
-        # conversation_id -> set of active widget connections
+        # Local (per-process) WebSocket registries
         self.widget_connections: Dict[str, Set[WebSocket]] = {}
-        # conversation_id -> set of active admin connections
-        self.admin_connections: Dict[str, Set[WebSocket]] = {}
-        # conversation_id -> boolean flag indicating human is in control
-        self.human_control_flags: Dict[str, bool] = {}
-        # conversation_id -> agent_id (registered by widget on connect)
-        self.agent_ids: Dict[str, str] = {}
-        # conversation_id -> messages exchanged during human takeover
-        self.takeover_buffers: Dict[str, list] = {}
+        self.admin_connections:  Dict[str, Set[WebSocket]] = {}
+
+        # In-process fallback state (used when Redis is unavailable)
+        self._local_control:  Dict[str, bool]   = {}
+        self._local_agent_ids: Dict[str, str]   = {}
+        self._local_buffers:  Dict[str, list]   = {}
+        self._local_widget_secret_hashes: Dict[str, str] = {}
+
+        # asyncio tasks running the Redis subscription loops
+        self._sub_tasks: Dict[str, asyncio.Task] = {}
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _redis(self):
+        return connection_manager.redis_client
+
+    def _hash_widget_secret(self, control_secret: str) -> str:
+        return hashlib.sha256(control_secret.encode("utf-8")).hexdigest()
+
+    async def _publish(self, channel: str, message: dict) -> bool:
+        """Publish to Redis. Returns True on success, False if Redis is unavailable."""
+        r = self._redis()
+        if not r:
+            return False
+        try:
+            await r.publish(channel, json.dumps(message))
+            return True
+        except Exception as e:
+            logger.warning("redis_publish_failed", channel=channel, error=str(e))
+            return False
+
+    async def _send_local(
+        self,
+        connections: Dict[str, Set[WebSocket]],
+        conversation_id: str,
+        message: dict,
+    ):
+        """Deliver message to all local WebSocket connections for a conversation."""
+        websockets = list(connections.get(conversation_id, set()))
+        for ws in websockets:
+            try:
+                await ws.send_json(message)
+            except Exception as e:
+                logger.error("ws_send_failed", error=str(e), conversation_id=conversation_id)
+
+    async def _subscribe_loop(self, conversation_id: str, target: str):
+        """
+        Background task: subscribe to a Redis pub/sub channel and forward
+        arriving messages to local WebSocket connections.
+        Runs until the task is cancelled (on disconnect).
+        """
+        r = self._redis()
+        if not r:
+            return
+
+        channel = _channel(conversation_id, target)
+        pubsub = r.pubsub()
+        try:
+            await pubsub.subscribe(channel)
+            logger.debug("redis_subscribed", channel=channel)
+
+            async for raw in pubsub.listen():
+                if raw["type"] != "message":
+                    continue
+                try:
+                    data = json.loads(raw["data"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+                registry = (
+                    self.widget_connections if target == "widget"
+                    else self.admin_connections
+                )
+                await self._send_local(registry, conversation_id, data)
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error("redis_subscribe_loop_error", channel=channel, error=str(e))
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+                await pubsub.aclose()
+            except Exception:
+                pass
+            logger.debug("redis_unsubscribed", channel=channel)
+
+    def _start_sub(self, conversation_id: str, target: str):
+        """Start a subscription loop task if Redis is available and not already running."""
+        key = f"{conversation_id}:{target}"
+        if key in self._sub_tasks and not self._sub_tasks[key].done():
+            return
+        if not self._redis():
+            return
+        task = asyncio.create_task(self._subscribe_loop(conversation_id, target))
+        self._sub_tasks[key] = task
+
+    def _stop_sub(self, conversation_id: str, target: str):
+        """Cancel the subscription loop if no more local connections exist for this conv+target."""
+        registry = (
+            self.widget_connections if target == "widget"
+            else self.admin_connections
+        )
+        if registry.get(conversation_id):
+            return  # still have local connections — keep subscribing
+        key = f"{conversation_id}:{target}"
+        task = self._sub_tasks.pop(key, None)
+        if task and not task.done():
+            task.cancel()
+
+    # ── connect / disconnect ─────────────────────────────────────────────────
 
     async def connect_widget(self, websocket: WebSocket, conversation_id: str):
         await websocket.accept()
-        if conversation_id not in self.widget_connections:
-            self.widget_connections[conversation_id] = set()
-        self.widget_connections[conversation_id].add(websocket)
+        self.widget_connections.setdefault(conversation_id, set()).add(websocket)
+        self._start_sub(conversation_id, "widget")
         logger.info("widget_websocket_connected", conversation_id=conversation_id)
 
     async def connect_admin(self, websocket: WebSocket, conversation_id: str):
         await websocket.accept()
-        if conversation_id not in self.admin_connections:
-            self.admin_connections[conversation_id] = set()
-        self.admin_connections[conversation_id].add(websocket)
+        self.admin_connections.setdefault(conversation_id, set()).add(websocket)
+        self._start_sub(conversation_id, "admin")
         logger.info("admin_websocket_connected", conversation_id=conversation_id)
-        
-        # Notify admins of the current control state on connection
-        control_state = self.is_human_in_control(conversation_id)
+
+        # Notify admin of current control state immediately on connect
+        is_human = await self.is_human_in_control(conversation_id)
         await self.send_to_admin(conversation_id, {
             "type": "control_status",
-            "is_human_in_control": control_state
+            "is_human_in_control": is_human,
         })
 
-    def disconnect_widget(self, websocket: WebSocket, conversation_id: str):
-        if conversation_id in self.widget_connections:
-            self.widget_connections[conversation_id].discard(websocket)
-            if not self.widget_connections[conversation_id]:
-                del self.widget_connections[conversation_id]
+    async def disconnect_widget(self, websocket: WebSocket, conversation_id: str):
+        conns = self.widget_connections.get(conversation_id, set())
+        conns.discard(websocket)
+        if not conns:
+            self.widget_connections.pop(conversation_id, None)
+        self._stop_sub(conversation_id, "widget")
         logger.info("widget_websocket_disconnected", conversation_id=conversation_id)
 
-    def disconnect_admin(self, websocket: WebSocket, conversation_id: str):
-        if conversation_id in self.admin_connections:
-            self.admin_connections[conversation_id].discard(websocket)
-            if not self.admin_connections[conversation_id]:
-                del self.admin_connections[conversation_id]
+    async def disconnect_admin(self, websocket: WebSocket, conversation_id: str):
+        conns = self.admin_connections.get(conversation_id, set())
+        conns.discard(websocket)
+        if not conns:
+            self.admin_connections.pop(conversation_id, None)
+        self._stop_sub(conversation_id, "admin")
         logger.info("admin_websocket_disconnected", conversation_id=conversation_id)
 
-    def set_human_control(self, conversation_id: str, is_active: bool):
-        """Set whether a human agent is currently in control of this conversation."""
-        self.human_control_flags[conversation_id] = is_active
-        if is_active:
-            # Start a fresh buffer for this takeover session
-            self.takeover_buffers[conversation_id] = []
-        logger.info("human_control_updated", conversation_id=conversation_id, is_active=is_active)
-
-    def is_human_in_control(self, conversation_id: str) -> bool:
-        """Check if a human agent is in control."""
-        return self.human_control_flags.get(conversation_id, False)
-
-    def register_agent_id(self, conversation_id: str, agent_id: str):
-        """Store the agent_id for a conversation (sent by widget on connect)."""
-        self.agent_ids[conversation_id] = agent_id
-
-    def get_agent_id(self, conversation_id: str) -> str | None:
-        """Retrieve the agent_id associated with a conversation."""
-        return self.agent_ids.get(conversation_id)
-
-    def buffer_takeover_message(self, conversation_id: str, role: str, content: str):
-        """Append a message to the human takeover buffer for this conversation."""
-        if conversation_id not in self.takeover_buffers:
-            self.takeover_buffers[conversation_id] = []
-        self.takeover_buffers[conversation_id].append({"role": role, "content": content})
-
-    def pop_takeover_buffer(self, conversation_id: str) -> list:
-        """Return and clear the takeover message buffer for a conversation."""
-        messages = self.takeover_buffers.pop(conversation_id, [])
-        return messages
+    # ── message fanout ───────────────────────────────────────────────────────
 
     async def send_to_widget(self, conversation_id: str, message: dict):
-        """Send a JSON message to all widget connections for a conversation."""
-        if conversation_id in self.widget_connections:
-            websockets = list(self.widget_connections[conversation_id])
-            for websocket in websockets:
-                try:
-                    await websocket.send_json(message)
-                except Exception as e:
-                    logger.error("error_sending_to_widget", error=str(e), conversation_id=conversation_id)
-                    self.disconnect_widget(websocket, conversation_id)
+        """
+        Deliver message to all widget connections for this conversation,
+        across all API instances via Redis pub/sub.
+        Falls back to direct local send if Redis is unavailable.
+        """
+        published = await self._publish(_channel(conversation_id, "widget"), message)
+        if not published:
+            # Redis unavailable — deliver to local connections directly
+            await self._send_local(self.widget_connections, conversation_id, message)
 
     async def send_to_admin(self, conversation_id: str, message: dict):
-        """Send a JSON message to all admin connections for a conversation."""
-        if conversation_id in self.admin_connections:
-            websockets = list(self.admin_connections[conversation_id])
-            for websocket in websockets:
-                try:
-                    await websocket.send_json(message)
-                except Exception as e:
-                    logger.error("error_sending_to_admin", error=str(e), conversation_id=conversation_id)
-                    self.disconnect_admin(websocket, conversation_id)
+        """Same as send_to_widget but for admin connections."""
+        published = await self._publish(_channel(conversation_id, "admin"), message)
+        if not published:
+            await self._send_local(self.admin_connections, conversation_id, message)
 
-# Global websocket connection manager instance
+    # ── shared state — Redis hash with local fallback ────────────────────────
+
+    async def set_human_control(self, conversation_id: str, is_active: bool):
+        r = self._redis()
+        if r:
+            try:
+                await r.hset(
+                    _state_key(conversation_id),
+                    mapping={"is_human_in_control": "1" if is_active else "0"},
+                )
+                await r.expire(_state_key(conversation_id), _STATE_TTL)
+                if is_active:
+                    # Start a fresh buffer by deleting the old list
+                    await r.delete(_buffer_key(conversation_id))
+            except Exception as e:
+                logger.warning("redis_set_human_control_failed", error=str(e))
+                self._local_control[conversation_id] = is_active
+        else:
+            self._local_control[conversation_id] = is_active
+            if is_active:
+                self._local_buffers[conversation_id] = []
+        logger.info("human_control_updated", conversation_id=conversation_id, is_active=is_active)
+
+    async def is_human_in_control(self, conversation_id: str) -> bool:
+        r = self._redis()
+        if r:
+            try:
+                val = await r.hget(_state_key(conversation_id), "is_human_in_control")
+                return val == "1"
+            except Exception as e:
+                logger.warning("redis_get_human_control_failed", error=str(e))
+        return self._local_control.get(conversation_id, False)
+
+    async def register_agent_id(self, conversation_id: str, agent_id: str):
+        r = self._redis()
+        if r:
+            try:
+                await r.hset(_state_key(conversation_id), mapping={"agent_id": agent_id})
+                await r.expire(_state_key(conversation_id), _STATE_TTL)
+                return
+            except Exception as e:
+                logger.warning("redis_register_agent_id_failed", error=str(e))
+        self._local_agent_ids[conversation_id] = agent_id
+
+    async def get_agent_id(self, conversation_id: str) -> Optional[str]:
+        r = self._redis()
+        if r:
+            try:
+                val = await r.hget(_state_key(conversation_id), "agent_id")
+                return val
+            except Exception as e:
+                logger.warning("redis_get_agent_id_failed", error=str(e))
+        return self._local_agent_ids.get(conversation_id)
+
+    async def authorize_widget_control(
+        self,
+        conversation_id: str,
+        agent_id: str,
+        control_secret: str,
+    ) -> bool:
+        """Authorize widget control traffic with a per-conversation secret."""
+        if not agent_id or len(control_secret) < 32:
+            return False
+
+        secret_hash = self._hash_widget_secret(control_secret)
+        r = self._redis()
+        if r:
+            try:
+                state = await r.hgetall(_state_key(conversation_id))
+                stored_hash = state.get("widget_control_secret_hash")
+                stored_agent_id = state.get("agent_id")
+
+                if not stored_hash:
+                    await r.hset(
+                        _state_key(conversation_id),
+                        mapping={
+                            "agent_id": agent_id,
+                            "widget_control_secret_hash": secret_hash,
+                        },
+                    )
+                    await r.expire(_state_key(conversation_id), _STATE_TTL)
+                    return True
+
+                if stored_agent_id and stored_agent_id != agent_id:
+                    return False
+
+                return hmac.compare_digest(stored_hash, secret_hash)
+            except Exception as e:
+                logger.warning("redis_widget_auth_failed", error=str(e))
+
+        stored_hash = self._local_widget_secret_hashes.get(conversation_id)
+        stored_agent_id = self._local_agent_ids.get(conversation_id)
+        if not stored_hash:
+            self._local_agent_ids[conversation_id] = agent_id
+            self._local_widget_secret_hashes[conversation_id] = secret_hash
+            return True
+
+        if stored_agent_id and stored_agent_id != agent_id:
+            return False
+
+        return hmac.compare_digest(stored_hash, secret_hash)
+
+    async def buffer_takeover_message(self, conversation_id: str, role: str, content: str):
+        entry = json.dumps({"role": role, "content": content})
+        r = self._redis()
+        if r:
+            try:
+                await r.rpush(_buffer_key(conversation_id), entry)
+                await r.expire(_buffer_key(conversation_id), _STATE_TTL)
+                return
+            except Exception as e:
+                logger.warning("redis_buffer_message_failed", error=str(e))
+        buf = self._local_buffers.setdefault(conversation_id, [])
+        buf.append({"role": role, "content": content})
+
+    async def pop_takeover_buffer(self, conversation_id: str) -> list:
+        r = self._redis()
+        if r:
+            try:
+                key = _buffer_key(conversation_id)
+                raw = await r.lrange(key, 0, -1)
+                await r.delete(key)
+                return [json.loads(m) for m in raw]
+            except Exception as e:
+                logger.warning("redis_pop_buffer_failed", error=str(e))
+        messages = self._local_buffers.pop(conversation_id, [])
+        return messages
+
+
+# Singleton
 ws_manager = ConnectionManager()

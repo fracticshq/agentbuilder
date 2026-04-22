@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 import structlog
 
 from ....dependencies import get_knowledge_service
+from ....auth.admin_key import require_admin_key
 from ....services.knowledge_service import KnowledgeService
 
 logger = structlog.get_logger()
@@ -101,7 +102,7 @@ class JobStatusResponse(BaseModel):
 # Endpoints
 # ============================================================================
 
-@router.post("/upload", response_model=UploadResponse)
+@router.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_admin_key)])
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -207,7 +208,7 @@ async def upload_document(
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
-@router.post("/bulk-upload", response_model=UploadResponse)
+@router.post("/bulk-upload", response_model=UploadResponse, dependencies=[Depends(require_admin_key)])
 async def bulk_upload_json(
     background_tasks: BackgroundTasks,
     request: BulkUploadRequest = Body(...),
@@ -330,7 +331,7 @@ async def bulk_upload_json(
         raise HTTPException(status_code=500, detail=f"Bulk upload failed: {str(e)}")
 
 
-@router.get("/jobs/{job_id}", response_model=JobStatusResponse)
+@router.get("/jobs/{job_id}", response_model=JobStatusResponse, dependencies=[Depends(require_admin_key)])
 async def get_job_status(
     job_id: str,
     knowledge_service: KnowledgeService = Depends(get_knowledge_service)
@@ -358,7 +359,7 @@ async def get_job_status(
         raise HTTPException(status_code=500, detail=f"Failed to get job status: {str(e)}")
 
 
-@router.get("/documents")
+@router.get("/documents", dependencies=[Depends(require_admin_key)])
 async def list_documents(
     brand_id: str,
     content_type: Optional[str] = None,
@@ -394,7 +395,7 @@ async def list_documents(
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
 
 
-@router.delete("/documents/{doc_id}")
+@router.delete("/documents/{doc_id}", dependencies=[Depends(require_admin_key)])
 async def delete_document(
     doc_id: str,
     brand_id: str,

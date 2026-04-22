@@ -8,6 +8,7 @@ import BrandDetail from './pages/BrandDetail';
 import Agents from './pages/Agents';
 import AgentDetail from './pages/AgentDetail';
 import AgentWizard from './pages/AgentWizard';
+import Settings from './pages/Settings';
 import './App.css';
 
 // Create a client
@@ -35,6 +36,7 @@ function App() {
               <Route path="/agents/new" element={<AgentWizard />} />
               <Route path="/agents/:id" element={<AgentDetail />} />
               <Route path="/agents/:id/edit" element={<AgentWizard />} />
+              <Route path="/settings" element={<Settings />} />
             </Routes>
           </Layout>
         </div>

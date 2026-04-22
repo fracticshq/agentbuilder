@@ -30,6 +30,14 @@ This is the core FastAPI backend providing:
 | `CORS_ALLOW_ORIGINS` | No | `*` | Comma-separated origins |
 | `REDIS_URL` | Yes | `redis://localhost:6379` | Cache backend |
 | `MONGO_URI` | Yes | `mongodb://...` | Database connection |
+| `DEFAULT_LLM_PROVIDER` | Yes | `openai` or `azure_openai` | Active LLM adapter |
+| `AZURE_OPENAI_ENDPOINT` | If `azure_openai` | `https://<resource>.openai.azure.com/` | Azure OpenAI resource endpoint |
+| `AZURE_OPENAI_API_VERSION` | If `azure_openai` | `2025-...` | Azure API version to call |
+| `AZURE_OPENAI_DEPLOYMENT` | Optional | `gpt-5.4-mini` | Defaults to the configured Azure model |
+| `AZURE_SUBSCRIPTION_ID` | For admin Azure discovery | `00000000-...` | Azure subscription used for ARM deployment discovery |
+| `AZURE_RESOURCE_GROUP` | For admin Azure discovery | `agentbuilder-rg` | Resource group containing the Azure OpenAI account |
+| `AZURE_OPENAI_ACCOUNT_NAME` | For admin Azure discovery | `anant-resource` | Azure OpenAI account name used on the ARM deployments route |
+| `SETTINGS_ENCRYPTION_KEY` | Recommended | `random-32-char-string` | Encrypts runtime settings stored in MongoDB. Falls back to `PII_ENCRYPTION_KEY`, then `SECRET_KEY`. |
 
 ---
 
@@ -48,6 +56,14 @@ This is the core FastAPI backend providing:
 - `POST /api/v1/ingest/documents` - Upload documents
 - `POST /api/v1/ingest/chunks` - Process chunks
 - `GET /api/v1/ingest/status/{job_id}` - Check ingestion status
+
+### Admin LLM API
+- `GET /api/v1/admin/llm/azure/deployments` - List Azure OpenAI deployments for the admin dashboard picker
+
+### Admin Runtime Settings API
+- `GET /api/v1/admin/settings/runtime` - Read masked runtime settings for the admin dashboard
+- `PUT /api/v1/admin/settings/runtime` - Create/update/clear encrypted runtime settings
+- `POST /api/v1/admin/settings/runtime/test` - Validate Azure OpenAI and Voyage connectivity without exposing plaintext secrets
 
 ---
 
@@ -75,3 +91,5 @@ curl http://localhost:8000/health
 - Implements SLOs: P95 latency ≤ 3s, citation coverage 100%
 - Follows "No source → No answer" principle
 - All responses include citation tracking
+- Azure deployment discovery for the admin UI uses ARM + `DefaultAzureCredential`; if the ARM env vars are missing, the endpoint returns `503`
+- Runtime provider secrets are resolved from encrypted records in the system DB first, then from environment variables as bootstrap/fallback

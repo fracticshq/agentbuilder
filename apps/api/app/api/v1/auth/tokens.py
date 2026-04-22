@@ -2,11 +2,13 @@
 Token refresh and management endpoints.
 """
 
+from bson import ObjectId
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
 from datetime import datetime
 
-from ....auth.jwt import create_access_token, verify_token
+from ....auth.jwt import create_access_token, decode_and_verify_token
+from ....auth.password import verify_password
 from ....auth.models import User
 from ....auth.dependencies import get_db
 
@@ -38,24 +40,15 @@ async def refresh_access_token(
     Returns a new access token.
     """
     # Verify refresh token
-    payload = verify_token(request.refresh_token)
+    payload = decode_and_verify_token(request.refresh_token, token_type="refresh")
     if not payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired refresh token",
             headers={"WWW-Authenticate": "Bearer"}
         )
-    
-    # Check token type
-    if payload.get("type") != "refresh":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token type. Expected refresh token.",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
-    
-    # Get user_id from payload
-    user_id = payload.get("sub")
+
+    user_id = payload.get("user_id")
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -64,46 +57,50 @@ async def refresh_access_token(
         )
     
     # Check if refresh token is revoked
-    revoked_token = await db.refresh_tokens.find_one({
-        "token": request.refresh_token,
-        "revoked": True
-    })
-    if revoked_token:
+    refresh_tokens = await db.refresh_tokens.find({
+        "user_id": str(user_id),
+        "is_revoked": False,
+    }).to_list(length=20)
+    matching_token = next(
+        (
+            token_doc for token_doc in refresh_tokens
+            if verify_password(request.refresh_token, token_doc["token_hash"])
+        ),
+        None,
+    )
+    if matching_token is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token has been revoked",
+            detail="Refresh token has been revoked or is unknown",
             headers={"WWW-Authenticate": "Bearer"}
         )
-    
-    # Get user from database
-    from bson import ObjectId
-    user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+
+    user_doc = await db.users.find_one({"_id": ObjectId(str(user_id))})
     if not user_doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
-    
-    # Check if user is disabled
-    if user_doc.get("disabled", False):
+
+    user = User(**user_doc)
+    if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is disabled"
+            detail="User account is inactive"
         )
-    
-    # Create new access token
+
     access_token = create_access_token(
         data={
-            "sub": str(user_doc["_id"]),
-            "username": user_doc["username"],
-            "role": user_doc["role"]
+            "user_id": str(user.id),
+            "email": user.email,
+            "role": user.role.value,
+            "brands": user.brands,
         }
     )
-    
-    # Update last_accessed timestamp for refresh token
+
     await db.refresh_tokens.update_one(
-        {"token": request.refresh_token},
-        {"$set": {"last_accessed": datetime.utcnow()}}
+        {"_id": matching_token["_id"]},
+        {"$set": {"last_used": datetime.utcnow()}}
     )
     
     return TokenResponse(
@@ -124,20 +121,38 @@ async def revoke_refresh_token(
     - **refresh_token**: The refresh token to revoke
     """
     # Mark token as revoked
-    result = await db.refresh_tokens.update_one(
-        {"token": request.refresh_token},
-        {
-            "$set": {
-                "revoked": True,
-                "revoked_at": datetime.utcnow()
-            }
-        }
+    payload = decode_and_verify_token(request.refresh_token, token_type="refresh")
+    if not payload or not payload.get("user_id"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token"
+        )
+
+    refresh_tokens = await db.refresh_tokens.find({
+        "user_id": str(payload["user_id"]),
+        "is_revoked": False,
+    }).to_list(length=20)
+    matching_token = next(
+        (
+            token_doc for token_doc in refresh_tokens
+            if verify_password(request.refresh_token, token_doc["token_hash"])
+        ),
+        None,
     )
-    
-    if result.matched_count == 0:
+    if matching_token is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Refresh token not found"
         )
-    
+
+    await db.refresh_tokens.update_one(
+        {"_id": matching_token["_id"]},
+        {
+            "$set": {
+                "is_revoked": True,
+                "revoked_at": datetime.utcnow()
+            }
+        }
+    )
+
     return {"message": "Refresh token revoked successfully"}

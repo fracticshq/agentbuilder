@@ -54,6 +54,7 @@ async def test_stream_yields_error_chunk_on_llm_failure():
 
         req = MessageRequest(
             message="Hello",
+            user_id="user-test-1",
             agent_id="test-agent",
             conversation_id="conv-test-1",
         )
@@ -94,6 +95,7 @@ async def test_stream_error_chunk_has_conversation_id():
 
         req = MessageRequest(
             message="Hi",
+            user_id="user-test-2",
             agent_id="test-agent",
             conversation_id="conv-xyz-999",
         )

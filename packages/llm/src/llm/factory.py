@@ -13,6 +13,11 @@ except ImportError:
     OpenAIProvider = None
 
 try:
+    from .providers.azure_openai_provider import AzureOpenAIProvider
+except ImportError:
+    AzureOpenAIProvider = None
+
+try:
     from .providers.qwen_provider import QwenProvider
 except ImportError:
     QwenProvider = None
@@ -53,6 +58,9 @@ class LLMFactory:
 if OpenAIProvider:
     LLMFactory.register_provider(ProviderType.OPENAI, OpenAIProvider)
 
+if AzureOpenAIProvider:
+    LLMFactory.register_provider(ProviderType.AZURE_OPENAI, AzureOpenAIProvider)
+
 if QwenProvider:
     LLMFactory.register_provider(ProviderType.QWEN, QwenProvider)
 
@@ -60,7 +68,16 @@ if MockProvider:
     LLMFactory.register_provider(ProviderType.QWEN, MockProvider)  # Use mock for Qwen for now
 
 
-def create_provider_from_env(provider_name: str, api_key: str, model: str) -> LLMProvider:
+def create_provider_from_env(
+    provider_name: str,
+    api_key: str,
+    model: str,
+    *,
+    base_url: str | None = None,
+    api_version: str | None = None,
+    azure_endpoint: str | None = None,
+    deployment_name: str | None = None,
+) -> LLMProvider:
     """Create a provider from environment variables."""
     try:
         provider_type = ProviderType(provider_name.lower())
@@ -71,7 +88,10 @@ def create_provider_from_env(provider_name: str, api_key: str, model: str) -> LL
         provider=provider_type,
         api_key=api_key,
         model=model,
-        base_url=None
+        base_url=base_url,
+        api_version=api_version,
+        azure_endpoint=azure_endpoint,
+        deployment_name=deployment_name,
     )
     
     return LLMFactory.create_provider(config)

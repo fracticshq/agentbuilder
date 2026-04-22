@@ -1,13 +1,32 @@
 """
 Rate limiting implementation using Redis.
+
+Fail-open policy
+----------------
+When Redis is unavailable, ``check_rate_limit`` returns (True, ...) — i.e. all
+requests are allowed through.  This is an intentional availability-over-security
+trade-off: a Redis outage should not take down the chat widget for end users.
+
+Implications to be aware of:
+- During a Redis outage, per-user and per-IP limits are NOT enforced.
+- An attacker who can trigger a Redis failure (e.g. OOM, network partition)
+  can bypass rate limiting for the duration of the outage.
+- Every fail-open event is logged at WARNING level with ``event=rate_limiter_fail_open``
+  so alerts/dashboards can detect and page on Redis connectivity issues.
+
+If stricter behaviour is required, replace the ``return True, {...}`` in
+``check_rate_limit``'s except block with a 503 raise.
 """
 
 import time
 from typing import Optional
-from fastapi import HTTPException, status, Request
+from fastapi import HTTPException, status
 from redis import asyncio as aioredis
+from starlette.requests import HTTPConnection
 import structlog
 
+from ..auth.api_keys import extract_key_id
+from ..auth.jwt import decode_and_verify_token
 from ..config import Settings
 from ..connections import connection_manager
 
@@ -107,8 +126,15 @@ class RateLimiter:
             return is_allowed, info
             
         except Exception as e:
-            logger.error("rate_limit_check_failed", error=str(e), key=key)
-            # Fail open - allow request if Redis is down
+            # FAIL-OPEN: Redis is unavailable — allow the request through.
+            # See module docstring for trade-offs and alerting guidance.
+            logger.warning(
+                "rate_limiter_fail_open",
+                event="rate_limiter_fail_open",
+                error=str(e),
+                key=key,
+                note="rate limiting bypassed — Redis unreachable",
+            )
             return True, {
                 "limit": limit,
                 "remaining": limit,
@@ -282,7 +308,7 @@ async def check_rate_limit(
         return True, {"limit": 0, "remaining": 0, "reset_at": 0, "retry_after": None}
 
 
-async def rate_limit_dependency(request: Request):
+async def rate_limit_dependency(connection: HTTPConnection):
     """
     FastAPI dependency for rate limiting.
     
@@ -291,31 +317,72 @@ async def rate_limit_dependency(request: Request):
         async def endpoint():
             ...
     """
-    # Extract identifiers
-    user_id = getattr(request.state, "user_id", None)
-    api_key_id = getattr(request.state, "api_key_id", None)
-    ip_address = request.client.host if request.client else None
-    endpoint = f"{request.method}:{request.url.path}"
-    
-    # Check rate limit
-    is_allowed, info = await check_rate_limit(
-        user_id=user_id,
-        api_key_id=api_key_id,
+    # Extract identifiers from request headers so the limiter works globally,
+    # even on routes that do not depend on the auth helpers.
+    user_id = getattr(connection.state, "user_id", None)
+    if user_id is None:
+        auth_header = connection.headers.get("Authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1].strip()
+            payload = decode_and_verify_token(token, token_type="access")
+            if payload and payload.get("user_id"):
+                user_id = str(payload["user_id"])
+                connection.state.user_id = user_id
+
+    api_key_id = getattr(connection.state, "api_key_id", None)
+    if api_key_id is None:
+        api_key = connection.headers.get("X-API-Key")
+        parsed_key_id = extract_key_id(api_key) if api_key else None
+        if parsed_key_id:
+            api_key_id = parsed_key_id
+            connection.state.api_key_id = api_key_id
+
+    ip_address = connection.client.host if connection.client else None
+    connection_method = getattr(connection, "method", connection.scope["type"].upper())
+    endpoint = f"{connection_method}:{connection.url.path}"
+
+    async def _enforce(identifier_type: str, **kwargs) -> dict:
+        is_allowed, info = await check_rate_limit(endpoint=endpoint, **kwargs)
+        if not is_allowed:
+            logger.warning(
+                "rate_limit_blocked",
+                identifier_type=identifier_type,
+                endpoint=endpoint,
+                user_id=user_id,
+                api_key_id=api_key_id,
+                ip_address=ip_address,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded",
+                headers={
+                    "X-RateLimit-Limit": str(info["limit"]),
+                    "X-RateLimit-Remaining": str(info["remaining"]),
+                    "X-RateLimit-Reset": str(info["reset_at"]),
+                    "Retry-After": str(info["retry_after"]) if info["retry_after"] else "60"
+                }
+            )
+        return info
+
+    # Always enforce an IP bucket so invalid or spoofed auth headers cannot
+    # escape throttling by inventing fresh identifiers.
+    rate_limit_info = await _enforce(
+        "ip",
         ip_address=ip_address,
-        endpoint=endpoint
+        limit=settings.RATE_LIMIT_REQUESTS_PER_MINUTE,
     )
-    
-    # Add rate limit headers to response
-    request.state.rate_limit_info = info
-    
-    if not is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Rate limit exceeded",
-            headers={
-                "X-RateLimit-Limit": str(info["limit"]),
-                "X-RateLimit-Remaining": str(info["remaining"]),
-                "X-RateLimit-Reset": str(info["reset_at"]),
-                "Retry-After": str(info["retry_after"]) if info["retry_after"] else "60"
-            }
+
+    if api_key_id:
+        rate_limit_info = await _enforce(
+            "api_key",
+            api_key_id=api_key_id,
+            limit=settings.RATE_LIMIT_REQUESTS_PER_MINUTE,
         )
+    elif user_id:
+        rate_limit_info = await _enforce(
+            "user",
+            user_id=user_id,
+            limit=settings.RATE_LIMIT_REQUESTS_PER_MINUTE,
+        )
+
+    connection.state.rate_limit_info = rate_limit_info

@@ -1,439 +1,255 @@
 """
-Integration tests for MessageService with Phase 5 memory system.
-
-Tests the complete flow:
-1. User message storage in short-term
-2. Safety escalation checking
-3. Semantic retrieval
-4. Memory context building
-5. LLM response generation
-6. Assistant message storage
-7. Episodic fact extraction
-8. Auto-summary triggering
+Integration-style tests for MessageService against the current runtime contract.
 """
 
-import pytest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime
 
-from app.services.message_service import MessageService
-from app.schemas.message import MessageRequest, MessageRole
-from retrieval.types import RetrievalContext, RetrievalChunk
-from llm.types import LLMResponse
-from memory.types import MemoryFact, Escalation, EscalationSeverity, GraphRule
+import pytest
 
-
-@pytest.fixture
-def mock_settings():
-    """Mock application settings."""
-    with patch("app.services.message_service.settings") as mock_settings:
-        mock_settings.MONGODB_URI = "mongodb://localhost:27017"
-        mock_settings.MONGODB_DATABASE = "test_db"
-        mock_settings.OPENAI_API_KEY = "test_key"
-        yield mock_settings
+from agent_runtime.orchestrator import AgentResult
+from commons.types.requests import MessageRequest
+from memory.types import MessageRole
+from tools.types import ToolResult
 
 
-@pytest.fixture
-def mock_mongo_client():
-    """Mock MongoDB async client."""
-    with patch("app.services.message_service.AsyncIOMotorClient") as mock_client:
-        mock_db = MagicMock()
-        mock_client.return_value.__getitem__.return_value = mock_db
-        yield mock_client
+def _make_settings() -> MagicMock:
+    settings = MagicMock()
+    settings.DEFAULT_LLM_PROVIDER = "openai"
+    settings.OPENAI_API_KEY = "sk-test"
+    settings.OPENAI_MODEL = "gpt-4o-mini"
+    settings.QWEN_API_KEY = ""
+    settings.QWEN_MODEL = "qwen-max"
+    settings.STRAPI_URL = "http://localhost:1337"
+    settings.STRAPI_API_TOKEN = ""
+    return settings
 
 
 @pytest.fixture
-def mock_retrieval_pipeline():
-    """Mock retrieval pipeline."""
-    with patch("app.services.message_service.RetrievalPipeline") as mock_pipeline:
-        mock_instance = AsyncMock()
-        mock_pipeline.return_value = mock_instance
-        
-        # Mock retrieve method
-        mock_instance.retrieve.return_value = RetrievalContext(
-            query="test query",
-            chunks=[
-                RetrievalChunk(
-                    doc_id="doc1",
-                    content="Sample product information",
-                    title="Product Manual",
-                    url="https://example.com/manual",
-                    score=0.95,
-                    metadata={"category": "manual"}
-                )
-            ],
-            metadata={"total_results": 1}
+def service_bundle():
+    settings = _make_settings()
+
+    with (
+        patch("app.services.message_service.RetrievalPipeline"),
+        patch("app.services.message_service.create_provider_from_env") as mock_factory,
+        patch("app.services.message_service.Orchestrator") as mock_orchestrator_cls,
+        patch("app.services.message_service.connection_manager"),
+        patch("app.services.message_service.ToolRegistry"),
+        patch("app.services.message_service.RetrievalTool"),
+        patch("app.services.message_service.ResponseValidator"),
+        patch("app.services.message_service.StrapiClient") as mock_strapi_cls,
+    ):
+        mock_provider = MagicMock()
+        mock_factory.return_value = mock_provider
+
+        orchestrator = MagicMock()
+        orchestrator.run = AsyncMock()
+        mock_orchestrator_cls.return_value = orchestrator
+
+        mock_strapi = MagicMock()
+        mock_strapi_cls.return_value = mock_strapi
+
+        from app.services.message_service import MessageService
+
+        service = MessageService(settings=settings, brand_id="brand-test")
+        service._load_agent_config = AsyncMock()
+        service._ensure_memory_initialized = AsyncMock()
+        service.memory_config = SimpleNamespace(
+            ENABLE_GRAPH_RULES=True,
+            ENABLE_FACT_EXTRACTION=True,
+            ENABLE_AUTO_SUMMARY=True,
         )
-        
-        yield mock_instance
 
+        service.short_term = AsyncMock()
+        service.short_term.add_message = AsyncMock()
+        service.short_term.get_recent_messages = AsyncMock(return_value=[])
+        service.short_term.should_summarize = AsyncMock(return_value=False)
+        service.short_term.trigger_summary = AsyncMock()
 
-@pytest.fixture
-def mock_llm_provider():
-    """Mock LLM provider."""
-    with patch("app.services.message_service.llm") as mock_llm:
-        mock_factory = MagicMock()
-        mock_llm.factory.create_provider.return_value = mock_factory
-        
-        # Mock generate method
-        async def mock_generate(prompt, **kwargs):
-            return LLMResponse(
-                text="This is a helpful response with citations.",
-                model="gpt-4o-mini",
-                usage={"prompt_tokens": 100, "completion_tokens": 50}
-            )
-        
-        mock_factory.generate = mock_generate
-        
-        yield mock_factory
+        summaries_cursor = MagicMock()
+        summaries_cursor.to_list = AsyncMock(return_value=[])
+        service.short_term.summaries = MagicMock()
+        service.short_term.summaries.find.return_value.sort.return_value.limit.return_value = summaries_cursor
 
+        service.episodic = AsyncMock()
+        service.episodic.extract_and_store_facts = AsyncMock(return_value=[])
+        service.episodic.get_user_facts = AsyncMock(return_value=[])
 
-@pytest.fixture
-def mock_memory_components():
-    """Mock all Phase 5 memory components."""
-    with patch("app.services.message_service.ShortTermMemory") as mock_short, \
-         patch("app.services.message_service.EpisodicMemory") as mock_episodic, \
-         patch("app.services.message_service.GraphMemory") as mock_graph:
-        
-        # Mock short-term memory
-        mock_short_instance = AsyncMock()
-        mock_short.return_value = mock_short_instance
-        mock_short_instance.add_message = AsyncMock()
-        mock_short_instance.get_recent_messages.return_value = []
-        mock_short_instance.should_summarize.return_value = False
-        mock_short_instance.summaries = MagicMock()
-        mock_short_instance.summaries.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[])
-        
-        # Mock episodic memory
-        mock_episodic_instance = AsyncMock()
-        mock_episodic.return_value = mock_episodic_instance
-        mock_episodic_instance.get_user_facts.return_value = [
-            MemoryFact(
-                user_id="user123",
-                fact="User prefers email communication",
-                confidence=0.85,
-                context={"source": "conversation"},
-                timestamp=datetime.now(),
-                ttl=90
-            )
-        ]
-        mock_episodic_instance.extract_and_store_facts = AsyncMock()
-        
-        # Mock graph memory
-        mock_graph_instance = AsyncMock()
-        mock_graph.return_value = mock_graph_instance
-        mock_graph_instance.check_escalation.return_value = []
-        mock_graph_instance.match_rules.return_value = [
-            GraphRule(
-                brand_id="brand123",
-                name="Warranty Policy",
-                conditions={"topic": "warranty"},
-                action={"type": "provide_info", "message": "Our warranty covers 2 years"},
-                priority=1
-            )
-        ]
-        
+        service.graph = AsyncMock()
+        service.graph.check_escalation = AsyncMock(return_value=[])
+        service.graph.match_rules = AsyncMock(return_value=[])
+
         yield {
-            "short_term": mock_short_instance,
-            "episodic": mock_episodic_instance,
-            "graph": mock_graph_instance
+            "service": service,
+            "orchestrator": orchestrator,
+            "strapi": mock_strapi,
         }
 
 
 @pytest.mark.asyncio
-async def test_process_message_basic_flow(
-    mock_settings,
-    mock_mongo_client,
-    mock_retrieval_pipeline,
-    mock_llm_provider,
-    mock_memory_components
-):
-    """Test basic message processing with Phase 5 memory."""
-    
-    # Create service
-    service = MessageService()
-    
-    # Override memory components with mocks
-    service.short_term = mock_memory_components["short_term"]
-    service.episodic = mock_memory_components["episodic"]
-    service.graph = mock_memory_components["graph"]
-    service.retrieval_pipeline = mock_retrieval_pipeline
-    service.llm_provider = mock_llm_provider
-    
-    # Create request
+async def test_process_message_returns_valid_response_and_persists_memory(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+
+    service._build_memory_context = AsyncMock(
+        return_value={
+            "recent_messages": [],
+            "user_facts": [],
+            "matched_rules": [],
+            "escalations": [],
+            "summaries": [],
+        }
+    )
+    orchestrator.run.return_value = AgentResult(
+        answer="This is a helpful response with citations.",
+        metadata={
+            "validation_confidence": 0.82,
+            "steps_executed": 1,
+            "tool_results": {
+                "step-1": ToolResult(
+                    success=True,
+                    data=None,
+                    metadata={"sources": ["doc1"], "confidence": 0.82},
+                )
+            },
+        },
+    )
+
     request = MessageRequest(
         message="What is the warranty on this product?",
         user_id="user123",
-        brand_id="brand123",
+        agent_id="agent-123",
         conversation_id="conv123",
-        page_context={"url": "https://example.com/product"}
+        page_context={"url": "https://example.com/product"},
     )
-    
-    # Process message
+
     response = await service.process_message(request)
-    
-    # Verify steps
-    assert response is not None
+
     assert response.message == "This is a helpful response with citations."
-    
-    # Verify user message stored
-    mock_memory_components["short_term"].add_message.assert_any_call(
-        conversation_id="conv123",
-        role=MessageRole.USER,
-        content="What is the warranty on this product?",
-        metadata={"user_id": "user123"}
-    )
-    
-    # Verify escalation checked
-    mock_memory_components["graph"].check_escalation.assert_called_once()
-    
-    # Verify retrieval called
-    mock_retrieval_pipeline.retrieve.assert_called_once()
-    
-    # Verify facts extracted
-    mock_memory_components["episodic"].extract_and_store_facts.assert_called_once()
-    
-    # Verify assistant message stored
-    assert mock_memory_components["short_term"].add_message.call_count == 2  # User + Assistant
+    assert response.conversation_id == "conv123"
+    assert response.confidence_score == pytest.approx(0.82)
+    assert response.context_used == 1
+    assert response.citations[0].doc_id == "doc1"
+    assert response.processing_time_ms is not None
+
+    first_write = service.short_term.add_message.await_args_list[0].kwargs
+    second_write = service.short_term.add_message.await_args_list[1].kwargs
+    assert first_write["role"] == MessageRole.USER
+    assert first_write["metadata"]["user_id"] == "user123"
+    assert second_write["role"] == MessageRole.ASSISTANT
+    assert second_write["content"] == response.message
+
+    service.graph.check_escalation.assert_awaited_once_with(request.message)
+    service.episodic.extract_and_store_facts.assert_awaited_once()
+    service.short_term.should_summarize.assert_awaited_once_with("conv123")
+    orchestrator.run.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_process_message_with_escalation(
-    mock_settings,
-    mock_mongo_client,
-    mock_retrieval_pipeline,
-    mock_llm_provider,
-    mock_memory_components
-):
-    """Test message processing with safety escalation."""
-    
-    # Setup escalation
-    escalation = Escalation(
-        brand_id="brand123",
-        trigger_keywords=["gas", "smell"],
-        severity=EscalationSeverity.CRITICAL,
-        action={"type": "escalate_emergency", "message": "Call emergency services immediately"}
-    )
-    mock_memory_components["graph"].check_escalation.return_value = [escalation]
-    
-    # Create service
-    service = MessageService()
-    service.short_term = mock_memory_components["short_term"]
-    service.episodic = mock_memory_components["episodic"]
-    service.graph = mock_memory_components["graph"]
-    service.retrieval_pipeline = mock_retrieval_pipeline
-    service.llm_provider = mock_llm_provider
-    
-    # Create request with safety trigger
-    request = MessageRequest(
-        message="I smell gas coming from the heater",
-        user_id="user123",
-        brand_id="brand123",
-        conversation_id="conv123"
-    )
-    
-    # Process message
-    response = await service.process_message(request)
-    
-    # Verify escalation was checked
-    mock_memory_components["graph"].check_escalation.assert_called_once()
-    
-    # Verify response still generated (but should include safety warning)
-    assert response is not None
+async def test_process_message_triggers_summary_when_needed(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
 
+    service.short_term.should_summarize.return_value = True
+    service._build_memory_context = AsyncMock(
+        return_value={
+            "recent_messages": [],
+            "user_facts": [],
+            "matched_rules": [],
+            "escalations": [],
+            "summaries": [],
+        }
+    )
+    orchestrator.run.return_value = AgentResult(
+        answer="Summary-safe response",
+        metadata={"validation_confidence": 1.0, "tool_results": {}},
+    )
 
-@pytest.mark.asyncio
-async def test_process_message_auto_summary_trigger(
-    mock_settings,
-    mock_mongo_client,
-    mock_retrieval_pipeline,
-    mock_llm_provider,
-    mock_memory_components
-):
-    """Test auto-summary triggering after 4 turns."""
-    
-    # Setup should_summarize to return True
-    mock_memory_components["short_term"].should_summarize.return_value = True
-    mock_memory_components["short_term"].trigger_summary = AsyncMock()
-    
-    # Create service
-    service = MessageService()
-    service.short_term = mock_memory_components["short_term"]
-    service.episodic = mock_memory_components["episodic"]
-    service.graph = mock_memory_components["graph"]
-    service.retrieval_pipeline = mock_retrieval_pipeline
-    service.llm_provider = mock_llm_provider
-    
-    # Create request
     request = MessageRequest(
         message="Fourth message in conversation",
         user_id="user123",
-        brand_id="brand123",
-        conversation_id="conv123"
+        agent_id="agent-123",
+        conversation_id="conv123",
     )
-    
-    # Process message
-    response = await service.process_message(request)
-    
-    # Verify summary was triggered
-    mock_memory_components["short_term"].should_summarize.assert_called_once()
-    mock_memory_components["short_term"].trigger_summary.assert_called_once()
+
+    await service.process_message(request)
+
+    service.short_term.trigger_summary.assert_awaited_once_with("conv123")
 
 
 @pytest.mark.asyncio
-async def test_stream_message_basic_flow(
-    mock_settings,
-    mock_mongo_client,
-    mock_retrieval_pipeline,
-    mock_llm_provider,
-    mock_memory_components
-):
-    """Test streaming message processing."""
-    
-    # Create service
-    service = MessageService()
-    service.short_term = mock_memory_components["short_term"]
-    service.episodic = mock_memory_components["episodic"]
-    service.graph = mock_memory_components["graph"]
-    service.retrieval_pipeline = mock_retrieval_pipeline
-    service.llm_provider = mock_llm_provider
-    
-    # Mock streaming response
-    async def mock_stream_generate(prompt, **kwargs):
-        chunks = ["This ", "is ", "a ", "streaming ", "response."]
-        for chunk in chunks:
-            yield chunk
-    
-    service.llm_provider.stream_generate = mock_stream_generate
-    
-    # Create request
+async def test_stream_message_emits_status_content_and_metadata(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+    mock_strapi = service_bundle["strapi"]
+
+    orchestrator.run.return_value = AgentResult(
+        answer="Streaming response complete.",
+        metadata={
+            "validation_confidence": 0.91,
+            "tool_results": {
+                "step-1": ToolResult(
+                    success=True,
+                    data=None,
+                    metadata={
+                        "sources": ["doc-stream"],
+                        "confidence": 0.91,
+                        "products": [{"id": "prod-1", "name": "Product 1"}],
+                    },
+                )
+            },
+        },
+    )
+
     request = MessageRequest(
         message="Tell me about the product",
         user_id="user123",
-        brand_id="brand123",
-        conversation_id="conv123"
-    )
-    
-    # Stream message
-    chunks = []
-    async for chunk in service.stream_message(request):
-        chunks.append(chunk)
-    
-    # Verify we got status updates and content
-    assert len(chunks) > 0
-    
-    # Check for different message types
-    message_types = [chunk.type for chunk in chunks]
-    assert "status" in message_types  # Status updates
-    assert "content" in message_types  # Response content
-    
-    # Verify memory operations were called
-    assert mock_memory_components["short_term"].add_message.call_count >= 2
-
-
-@pytest.mark.asyncio
-async def test_build_memory_context(
-    mock_settings,
-    mock_mongo_client,
-    mock_memory_components
-):
-    """Test memory context building."""
-    
-    # Create service
-    service = MessageService()
-    service.short_term = mock_memory_components["short_term"]
-    service.episodic = mock_memory_components["episodic"]
-    service.graph = mock_memory_components["graph"]
-    
-    # Build context
-    context = await service._build_memory_context(
-        user_id="user123",
-        brand_id="brand123",
+        agent_id="agent-123",
         conversation_id="conv123",
-        query="test query",
-        escalations=[]
     )
-    
-    # Verify structure
-    assert "recent_messages" in context
-    assert "user_facts" in context
-    assert "matched_rules" in context
-    assert "escalations" in context
-    assert "summaries" in context
-    
-    # Verify memory calls
-    mock_memory_components["short_term"].get_recent_messages.assert_called_once()
-    mock_memory_components["episodic"].get_user_facts.assert_called_once()
-    mock_memory_components["graph"].match_rules.assert_called_once()
+
+    chunks = [chunk async for chunk in service.stream_message(request)]
+
+    assert "status" in [chunk.type for chunk in chunks]
+    assert "content" in [chunk.type for chunk in chunks]
+    metadata_chunk = next(chunk for chunk in chunks if chunk.type == "metadata")
+    assert metadata_chunk.citations[0].doc_id == "doc-stream"
+    assert metadata_chunk.products[0]["name"] == "Product 1"
+    assert metadata_chunk.confidence_score == pytest.approx(0.91)
+
+    service.episodic.extract_and_store_facts.assert_awaited_once()
+    mock_strapi.sync_conversation.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_build_prompt_with_full_context(
-    mock_settings,
-    mock_mongo_client,
-    mock_memory_components
-):
-    """Test prompt building with all memory layers."""
-    
-    # Create service
-    service = MessageService()
-    
-    # Create mock retrieval context
-    retrieval_context = RetrievalContext(
-        query="test",
-        chunks=[
-            RetrievalChunk(
-                doc_id="doc1",
-                content="Product information",
-                title="Manual",
-                url="https://example.com",
-                score=0.9,
-                metadata={}
-            )
-        ],
-        metadata={}
-    )
-    
-    # Create mock memory context
-    memory_context = {
-        "recent_messages": [],
-        "user_facts": [
-            MemoryFact(
-                user_id="user123",
-                fact="Prefers email",
-                confidence=0.8,
-                context={},
-                timestamp=datetime.now(),
-                ttl=90
-            )
-        ],
-        "matched_rules": [
-            GraphRule(
-                brand_id="brand123",
-                name="Warranty",
-                conditions={},
-                action={"message": "2 year warranty"},
-                priority=1
-            )
-        ],
-        "escalations": [],
-        "summaries": []
-    }
-    
-    # Build prompt
-    prompt = service._build_prompt(
-        message="What is the warranty?",
-        retrieval_context=retrieval_context,
-        memory_context=memory_context,
-        escalations=[]
-    )
-    
-    # Verify prompt contains all elements
-    assert "Product information" in prompt  # KB context
-    assert "Prefers email" in prompt  # User facts
-    assert "Warranty" in prompt  # Rules
-    assert "What is the warranty?" in prompt  # Current message
+async def test_build_memory_context_aggregates_current_memory_layers(service_bundle):
+    service = service_bundle["service"]
 
+    service.short_term.get_recent_messages.return_value = ["recent-message"]
+    service.episodic.get_user_facts.return_value = [{"fact": "prefers email"}]
+    service.graph.match_rules.return_value = [{"name": "Warranty Policy"}]
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    summaries_cursor = MagicMock()
+    summaries_cursor.to_list = AsyncMock(return_value=[{"summary": "prior summary"}])
+    service.short_term.summaries.find.return_value.sort.return_value.limit.return_value = summaries_cursor
+
+    context = await service._build_memory_context(
+        conversation_id="conv123",
+        user_id="user123",
+        query="warranty",
+        escalations=["escalation"],
+    )
+
+    assert context["recent_messages"] == ["recent-message"]
+    assert context["user_facts"] == [{"fact": "prefers email"}]
+    assert context["matched_rules"] == [{"name": "Warranty Policy"}]
+    assert context["summaries"] == [{"summary": "prior summary"}]
+    assert context["escalations"] == ["escalation"]
+
+    service.short_term.get_recent_messages.assert_awaited_once_with("conv123", limit=10)
+    service.episodic.get_user_facts.assert_awaited_once_with("user123", limit=20)
+    service.graph.match_rules.assert_awaited_once_with(
+        brand_id="brand-test",
+        query="warranty",
+        context={},
+    )

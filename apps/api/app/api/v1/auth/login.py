@@ -3,8 +3,9 @@ Login endpoint.
 """
 
 from datetime import datetime, timedelta
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, status
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from motor.motor_asyncio import AsyncIOMotorDatabase
 import structlog
 
 from ....config import Settings
@@ -48,7 +49,7 @@ async def login(
     Raises:
         HTTPException: If authentication fails
     """
-    users_collection = db[settings.MONGODB_DATABASE].users
+    users_collection = db.users
     
     # Find user by username or email
     user_doc = await users_collection.find_one({
@@ -97,7 +98,7 @@ async def login(
             )
         
         await users_collection.update_one(
-            {"_id": user.id},
+            {"_id": ObjectId(str(user.id))},
             {"$set": update_data}
         )
         
@@ -122,7 +123,7 @@ async def login(
     
     # Successful login - reset failed attempts and update last login
     await users_collection.update_one(
-        {"_id": user.id},
+        {"_id": ObjectId(str(user.id))},
         {
             "$set": {
                 "failed_login_attempts": 0,
@@ -144,10 +145,10 @@ async def login(
     refresh_token = create_refresh_token({"user_id": user.id})
     
     # Store refresh token in database
-    refresh_tokens_collection = db[settings.MONGODB_DATABASE].refresh_tokens
+    refresh_tokens_collection = db.refresh_tokens
     await refresh_tokens_collection.insert_one({
         "token_hash": hash_password(refresh_token),  # Reuse password hash function
-        "user_id": user.id,
+        "user_id": str(user.id),
         "expires_at": datetime.utcnow() + timedelta(days=7),
         "is_revoked": False,
         "created_at": datetime.utcnow(),
@@ -187,9 +188,9 @@ async def logout(
         Success message
     """
     # Revoke all user's refresh tokens
-    refresh_tokens_collection = db[settings.MONGODB_DATABASE].refresh_tokens
+    refresh_tokens_collection = db.refresh_tokens
     result = await refresh_tokens_collection.update_many(
-        {"user_id": user.id, "is_revoked": False},
+        {"user_id": str(user.id), "is_revoked": False},
         {
             "$set": {
                 "is_revoked": True,
@@ -208,4 +209,3 @@ async def logout(
         "message": "Successfully logged out",
         "revoked_tokens": result.modified_count
     }
-

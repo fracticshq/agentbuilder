@@ -11,6 +11,7 @@ from commons.types.requests import IngestionRequest
 from commons.types.responses import IngestionResponse, IngestionStatus
 from ....dependencies import get_ingestion_service
 from ....services.ingestion_service import IngestionService
+from ....auth.admin_key import require_admin_key
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -31,7 +32,7 @@ class ChunkRequest(BaseModel):
     doc_id: Optional[str] = None
 
 
-@router.post("/documents", response_model=DocumentUploadResponse)
+@router.post("/documents", response_model=DocumentUploadResponse, dependencies=[Depends(require_admin_key)])
 async def upload_documents(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
@@ -90,7 +91,7 @@ async def upload_documents(
         raise HTTPException(status_code=500, detail="Error uploading documents")
 
 
-@router.post("/chunks", response_model=IngestionResponse)
+@router.post("/chunks", response_model=IngestionResponse, dependencies=[Depends(require_admin_key)])
 async def process_chunk(
     request: ChunkRequest,
     ingestion_service: IngestionService = Depends(get_ingestion_service)
@@ -113,7 +114,7 @@ async def process_chunk(
         raise HTTPException(status_code=500, detail="Error processing chunk")
 
 
-@router.get("/status/{job_id}", response_model=IngestionStatus)
+@router.get("/status/{job_id}", response_model=IngestionStatus, dependencies=[Depends(require_admin_key)])
 async def get_ingestion_status(
     job_id: str,
     ingestion_service: IngestionService = Depends(get_ingestion_service)
@@ -132,7 +133,7 @@ async def get_ingestion_status(
         raise HTTPException(status_code=500, detail="Error getting job status")
 
 
-@router.delete("/jobs/{job_id}")
+@router.delete("/jobs/{job_id}", dependencies=[Depends(require_admin_key)])
 async def cancel_ingestion_job(
     job_id: str,
     ingestion_service: IngestionService = Depends(get_ingestion_service)
@@ -151,7 +152,7 @@ async def cancel_ingestion_job(
         raise HTTPException(status_code=500, detail="Error cancelling job")
 
 
-@router.get("/documents")
+@router.get("/documents", dependencies=[Depends(require_admin_key)])
 async def get_documents(
     agent_id: Optional[str] = None,
     ingestion_service: IngestionService = Depends(get_ingestion_service)
@@ -167,4 +168,3 @@ async def get_documents(
     except Exception as e:
         logger.error("Error retrieving documents", agent_id=agent_id, error=str(e))
         raise HTTPException(status_code=500, detail="Error retrieving documents")
-
