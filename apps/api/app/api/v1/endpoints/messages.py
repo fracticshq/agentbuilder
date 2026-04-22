@@ -12,12 +12,18 @@ import structlog
 
 from commons.types.requests import MessageRequest
 from commons.types.responses import MessageResponse, StreamingMessageResponse
-from ....dependencies import get_message_service
+from ....auth.admin_key import is_admin_key_authorized
+from ....dependencies import get_message_service, get_settings
 from ....services.message_service import MessageService
 from ....websocket_manager import ws_manager
 
 logger = structlog.get_logger()
 router = APIRouter()
+WS_POLICY_VIOLATION = 1008
+
+
+async def _close_websocket(websocket: WebSocket, reason: str) -> None:
+    await websocket.close(code=WS_POLICY_VIOLATION, reason=reason)
 
 
 @router.post("/", response_model=MessageResponse)
@@ -115,6 +121,16 @@ async def admin_websocket_endpoint(
     message_service: MessageService = Depends(get_message_service),
 ):
     """Admin WebSocket for human takeover and live conversation monitoring."""
+    settings = get_settings()
+    if not settings.ENABLE_HUMAN_TAKEOVER:
+        await _close_websocket(websocket, "Human takeover is disabled")
+        return
+
+    admin_key = websocket.headers.get("x-admin-key") or websocket.query_params.get("admin_key")
+    if not is_admin_key_authorized(admin_key, settings):
+        await _close_websocket(websocket, "Invalid admin key")
+        return
+
     await ws_manager.connect_admin(websocket, conversation_id)
     try:
         while True:
@@ -127,7 +143,7 @@ async def admin_websocket_endpoint(
             msg_type = msg.get("type")
 
             if msg_type == "take_control":
-                ws_manager.set_human_control(conversation_id, True)
+                await ws_manager.set_human_control(conversation_id, True)
                 await ws_manager.send_to_admin(conversation_id, {
                     "type": "control_status",
                     "is_human_in_control": True,
@@ -147,18 +163,18 @@ async def admin_websocket_endpoint(
 
             elif msg_type == "release_control":
                 # Collect buffered takeover messages before clearing state
-                takeover_messages = ws_manager.pop_takeover_buffer(conversation_id)
+                takeover_messages = await ws_manager.pop_takeover_buffer(conversation_id)
 
                 # Inject history BEFORE notifying widget that AI is back in control.
                 # This ensures the AI has full context before the user can send the next message.
-                agent_id = ws_manager.get_agent_id(conversation_id)
+                agent_id = await ws_manager.get_agent_id(conversation_id)
                 if agent_id and takeover_messages:
                     try:
                         await message_service.inject_history(conversation_id, agent_id, takeover_messages)
                     except Exception as e:
                         logger.error("inject_history_failed", error=str(e), conversation_id=conversation_id)
 
-                ws_manager.set_human_control(conversation_id, False)
+                await ws_manager.set_human_control(conversation_id, False)
 
                 await ws_manager.send_to_admin(conversation_id, {
                     "type": "control_status",
@@ -186,7 +202,7 @@ async def admin_websocket_endpoint(
                     "content": content,
                 })
                 # Buffer for memory injection on release
-                ws_manager.buffer_takeover_message(conversation_id, "assistant", content)
+                await ws_manager.buffer_takeover_message(conversation_id, "assistant", content)
                 # Persist to Strapi (role 'agent' matches Strapi convention)
                 message_service.strapi.save_message(conversation_id, content, "agent")
 
@@ -195,7 +211,7 @@ async def admin_websocket_endpoint(
     except Exception as e:
         logger.error("Admin WebSocket error", error=str(e), conversation_id=conversation_id)
     finally:
-        ws_manager.disconnect_admin(websocket, conversation_id)
+        await ws_manager.disconnect_admin(websocket, conversation_id)
 
 
 @router.websocket("/ws/widget/{conversation_id}")
@@ -211,6 +227,22 @@ async def widget_control_channel(
     - ping: heartbeat
     - user_message: forwarded to admin during human takeover, buffered, and persisted
     """
+    settings = get_settings()
+    if not settings.ENABLE_HUMAN_TAKEOVER:
+        await _close_websocket(websocket, "Human takeover is disabled")
+        return
+
+    agent_id = (websocket.query_params.get("agent_id") or "").strip()
+    control_secret = (websocket.query_params.get("control_secret") or "").strip()
+    is_authorized = await ws_manager.authorize_widget_control(
+        conversation_id,
+        agent_id,
+        control_secret,
+    )
+    if not is_authorized:
+        await _close_websocket(websocket, "Unauthorized widget control channel")
+        return
+
     await ws_manager.connect_widget(websocket, conversation_id)
     try:
         while True:
@@ -227,12 +259,11 @@ async def widget_control_channel(
 
             elif msg_type == "register":
                 # Widget sends its agent_id so we can inject history into the right memory
-                agent_id = msg.get("agent_id", "")
                 if agent_id:
-                    ws_manager.register_agent_id(conversation_id, agent_id)
+                    await ws_manager.register_agent_id(conversation_id, agent_id)
 
             elif msg_type == "user_message":
-                if ws_manager.is_human_in_control(conversation_id):
+                if await ws_manager.is_human_in_control(conversation_id):
                     content = msg.get("content", "")
                     # Deliver to admin dashboard in real-time
                     await ws_manager.send_to_admin(conversation_id, {
@@ -241,7 +272,7 @@ async def widget_control_channel(
                         "content": content,
                     })
                     # Buffer for memory injection on release
-                    ws_manager.buffer_takeover_message(conversation_id, "user", content)
+                    await ws_manager.buffer_takeover_message(conversation_id, "user", content)
                     # Persist to Strapi
                     message_service.strapi.save_message(conversation_id, content, "user")
 
@@ -250,4 +281,4 @@ async def widget_control_channel(
     except Exception as e:
         logger.error("Widget control channel error", error=str(e), conversation_id=conversation_id)
     finally:
-        ws_manager.disconnect_widget(websocket, conversation_id)
+        await ws_manager.disconnect_widget(websocket, conversation_id)

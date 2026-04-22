@@ -1,7 +1,7 @@
 import os
 import logging
 from typing import List, Optional, Union
-from pydantic import BaseModel, field_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     API_LOG_LEVEL: str = "info"
     DEBUG: bool = False
+    ENVIRONMENT: str = "development"
     
     # OpenAI Configuration
     OPENAI_API_KEY: str = ""
@@ -144,6 +145,9 @@ class Settings(BaseSettings):
     ENABLE_SSE: bool = True
     ENABLE_METRICS: bool = True
     ENABLE_TRACING: bool = False
+    ENABLE_HUMAN_TAKEOVER: bool = False
+    REQUIRE_REDIS: bool = False
+    REQUIRE_MONGODB: bool = True
     
     # Rate Limiting
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60
@@ -155,8 +159,12 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "./uploads"
     
     # Security Configuration
-    SECRET_KEY: str = "your-secret-key-change-in-production"
+    SECRET_KEY: str  # Required — set via SECRET_KEY env var or Azure Key Vault
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    # Simple admin API key for protecting write operations until JWT login UI is built.
+    # Generate with: openssl rand -hex 32
+    ADMIN_API_KEY: str = ""
+    ALLOW_ADMIN_KEY_BYPASS: bool = True
     
     # Memory System Configuration (Phase 5)
     PII_ENCRYPTION_KEY: str = ""
@@ -212,7 +220,7 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
     
-    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", mode="before")
+    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_HUMAN_TAKEOVER", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", mode="before")
     @classmethod
     def parse_bool_fields(cls, v):
         """Parse boolean fields from string."""
@@ -236,14 +244,25 @@ class Settings(BaseSettings):
             return float(v)
         return v
     
-    @field_validator("DEBUG", mode="before")
+    @field_validator("DEBUG", "ALLOW_ADMIN_KEY_BYPASS", "REQUIRE_REDIS", "REQUIRE_MONGODB", mode="before")
     @classmethod
     def parse_debug(cls, v):
-        """Parse DEBUG from string."""
+        """Parse boolean settings from string."""
         if isinstance(v, str):
             return v.lower() in ("true", "1", "yes", "on")
         return v
-    
+
+    @field_validator("ENVIRONMENT", mode="before")
+    @classmethod
+    def parse_environment(cls, v):
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT == "production"
+
     class Config:
         # Load from root .env (2 levels up from app/config.py)
         env_file = "../../.env"

@@ -12,8 +12,45 @@ import type { WidgetConfig } from './types';
 import './App.css';
 import './styles/responsive.css';
 
-const apiClient = new APIClient('http://localhost:8000');
-const wsClient = new WebSocketClient('http://localhost:8000');
+declare global {
+  interface Window {
+    __APP_CONFIG__?: {
+      API_BASE_URL?: string;
+    };
+  }
+}
+
+const API_BASE = window.__APP_CONFIG__?.API_BASE_URL || import.meta.env.VITE_API_BASE_URL || window.location.origin;
+const WS_BASE = API_BASE.replace(/^http/, 'ws');
+const apiClient = new APIClient(API_BASE);
+const wsClient = new WebSocketClient(API_BASE);
+
+function createSecureClientId(prefix: string): string {
+  if (window.crypto?.randomUUID) {
+    return `${prefix}_${window.crypto.randomUUID()}`;
+  }
+
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  const value = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${prefix}_${value}`;
+}
+
+function getControlSecretStorageKey(conversationId: string): string {
+  return `agent_widget_control_secret_${conversationId}`;
+}
+
+function getOrCreateControlSecret(conversationId: string): string {
+  const storageKey = getControlSecretStorageKey(conversationId);
+  const existingSecret = sessionStorage.getItem(storageKey);
+  if (existingSecret) {
+    return existingSecret;
+  }
+
+  const secret = createSecureClientId('control');
+  sessionStorage.setItem(storageKey, secret);
+  return secret;
+}
 
 interface AppProps {
   config?: WidgetConfig;
@@ -53,13 +90,14 @@ function App({ config }: AppProps) {
   const [userId] = React.useState(() => {
     const stored = localStorage.getItem('agent_widget_user_id');
     if (stored) return stored;
-    const newId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const newId = createSecureClientId('user');
     localStorage.setItem('agent_widget_user_id', newId);
     return newId;
   });
 
   const [agentId, setAgentId] = React.useState<string | null>(null);
   const [useWebSocket, setUseWebSocket] = React.useState(true);
+  const [humanTakeoverEnabled, setHumanTakeoverEnabled] = React.useState(false);
   // Holds the pending conversation lifecycle event type until agentId is ready.
   const [convStartEvent, setConvStartEvent] = React.useState<'conversation_started' | 'conversation_resumed' | null>(null);
 
@@ -73,7 +111,7 @@ function App({ config }: AppProps) {
     if (scriptTag?.dataset.agentId) { setAgentId(scriptTag.dataset.agentId); return; }
 
     // Fallback: first available agent
-    fetch('http://localhost:8000/api/v1/admin/agents/')
+    fetch(`${API_BASE}/api/v1/admin/agents/`)
       .then(r => r.ok ? r.json() : [])
       .then(agents => { if (agents.length > 0) setAgentId(agents[0].id); })
       .catch(() => {});
@@ -86,17 +124,19 @@ function App({ config }: AppProps) {
     const fetchBrandTheme = async () => {
       try {
         // 1. Get agent → extract brand_id
-        const agentRes = await fetch(`http://localhost:8000/api/v1/admin/agents/${agentId}`);
+        const agentRes = await fetch(`${API_BASE}/api/v1/admin/agents/${agentId}`);
         if (!agentRes.ok) return;
         const agent = await agentRes.json();
         const brandId: string | undefined = agent.brand_id;
         // Read WebSocket setting from agent config (default true if not set)
         const wsEnabled = agent.configuration?.features?.websockets !== false;
+        const takeoverEnabled = config?.enableHumanTakeover ?? agent.configuration?.features?.human_takeover === true;
         setUseWebSocket(wsEnabled);
+        setHumanTakeoverEnabled(takeoverEnabled);
         if (!brandId) return;
 
         // 2. Get brand → extract colors / identity
-        const brandRes = await fetch(`http://localhost:8000/api/v1/admin/brands/${brandId}`);
+        const brandRes = await fetch(`${API_BASE}/api/v1/admin/brands/${brandId}`);
         if (!brandRes.ok) return;
         const brand = await brandRes.json();
 
@@ -111,7 +151,7 @@ function App({ config }: AppProps) {
     };
 
     fetchBrandTheme();
-  }, [agentId, setBrandTheme]);
+  }, [agentId, config?.enableHumanTakeover, setBrandTheme]);
 
   React.useEffect(() => {
     if (config) setConfig(config);
@@ -119,24 +159,30 @@ function App({ config }: AppProps) {
 
   // ── Widget control channel (human takeover) ───────────────────
   React.useEffect(() => {
-    if (!conversationId) return;
+    if (!conversationId || !agentId || !humanTakeoverEnabled) {
+      setHumanInControl(false);
+      return;
+    }
 
     let ws: WebSocket | null = null;
     let heartbeat: ReturnType<typeof setInterval> | null = null;
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
     let destroyed = false;
     let reconnectDelay = 1_000;
+    const controlSecret = getOrCreateControlSecret(conversationId);
 
     const connect = () => {
       if (destroyed) return;
-      ws = new WebSocket(`ws://localhost:8000/api/v1/messages/ws/widget/${conversationId}`);
+      const params = new URLSearchParams({
+        agent_id: agentId,
+        control_secret: controlSecret,
+      });
+      ws = new WebSocket(`${WS_BASE}/api/v1/messages/ws/widget/${conversationId}?${params.toString()}`);
       controlChannelRef.current = ws;
 
       ws.onopen = () => {
         reconnectDelay = 1_000;
-        if (agentId) {
-          ws!.send(JSON.stringify({ type: 'register', agent_id: agentId }));
-        }
+        ws!.send(JSON.stringify({ type: 'register', agent_id: agentId }));
         heartbeat = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'ping' }));
@@ -171,10 +217,10 @@ function App({ config }: AppProps) {
 
       ws.onerror = () => {};
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
         controlChannelRef.current = null;
-        if (!destroyed) {
+        if (!destroyed && event.code !== 1008) {
           // Exponential backoff reconnect, cap at 30s
           reconnectTimeout = setTimeout(() => {
             reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
@@ -194,7 +240,7 @@ function App({ config }: AppProps) {
       controlChannelRef.current = null;
       setHumanInControl(false);
     };
-  }, [conversationId, agentId]);
+  }, [conversationId, agentId, humanTakeoverEnabled, setHumanInControl]);
 
   // ── Initialize conversation ID ────────────────────────────────
   React.useEffect(() => {
@@ -204,7 +250,7 @@ function App({ config }: AppProps) {
         setConversationId(stored);
         setConvStartEvent('conversation_resumed');
       } else {
-        const newConvId = `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const newConvId = createSecureClientId('conv');
         setConversationId(newConvId);
         sessionStorage.setItem('agent_widget_conversation_id', newConvId);
         setConvStartEvent('conversation_started');
@@ -262,7 +308,7 @@ function App({ config }: AppProps) {
 
     try {
       const context = extractPageContext();
-      const currentConvId = conversationId || `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const currentConvId = conversationId || createSecureClientId('conv');
       if (!conversationId) {
         setConversationId(currentConvId);
         sessionStorage.setItem('agent_widget_conversation_id', currentConvId);
