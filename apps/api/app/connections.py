@@ -4,12 +4,15 @@ Supports brand-isolated databases with caching
 """
 
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 import redis.asyncio as aioredis
 import structlog
 
+from .config import Settings
+
 logger = structlog.get_logger()
+settings = Settings()
 
 
 class ConnectionManager:
@@ -57,7 +60,8 @@ class ConnectionManager:
             self.mongodb_client = None
             self.system_db = None
             self.brand_db_cache.clear()
-            # Don't raise - allow app to start without MongoDB
+            if settings.REQUIRE_MONGODB:
+                raise RuntimeError("MongoDB connection is required") from e
     
     async def connect_redis(self) -> None:
         """Initialize Redis connection."""
@@ -84,7 +88,8 @@ class ConnectionManager:
         except Exception as e:
             logger.warning("Redis connection failed, caching will be disabled", error=str(e))
             self.redis_client = None
-            # Don't raise - allow app to start without Redis
+            if settings.REQUIRE_REDIS:
+                raise RuntimeError("Redis connection is required") from e
     
     async def disconnect_mongodb(self) -> None:
         """Close MongoDB connection and clear cache."""
@@ -153,6 +158,10 @@ class ConnectionManager:
         if self.redis_client is None:
             raise RuntimeError("Redis not connected")
         return self.redis_client
+
+    async def get_redis(self):
+        """Compatibility helper for callers that expect an async Redis getter."""
+        return self.get_redis_client()
     
     async def health_check(self) -> dict:
         """Check health of all connections."""
