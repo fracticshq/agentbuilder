@@ -20,8 +20,9 @@ If stricter behaviour is required, replace the ``return True, {...}`` in
 
 import time
 from typing import Optional
-from fastapi import HTTPException, status, Request
+from fastapi import HTTPException, status
 from redis import asyncio as aioredis
+from starlette.requests import HTTPConnection
 import structlog
 
 from ..auth.api_keys import extract_key_id
@@ -307,7 +308,7 @@ async def check_rate_limit(
         return True, {"limit": 0, "remaining": 0, "reset_at": 0, "retry_after": None}
 
 
-async def rate_limit_dependency(request: Request):
+async def rate_limit_dependency(connection: HTTPConnection):
     """
     FastAPI dependency for rate limiting.
     
@@ -318,26 +319,27 @@ async def rate_limit_dependency(request: Request):
     """
     # Extract identifiers from request headers so the limiter works globally,
     # even on routes that do not depend on the auth helpers.
-    user_id = getattr(request.state, "user_id", None)
+    user_id = getattr(connection.state, "user_id", None)
     if user_id is None:
-        auth_header = request.headers.get("Authorization", "")
+        auth_header = connection.headers.get("Authorization", "")
         if auth_header.lower().startswith("bearer "):
             token = auth_header.split(" ", 1)[1].strip()
             payload = decode_and_verify_token(token, token_type="access")
             if payload and payload.get("user_id"):
                 user_id = str(payload["user_id"])
-                request.state.user_id = user_id
+                connection.state.user_id = user_id
 
-    api_key_id = getattr(request.state, "api_key_id", None)
+    api_key_id = getattr(connection.state, "api_key_id", None)
     if api_key_id is None:
-        api_key = request.headers.get("X-API-Key")
+        api_key = connection.headers.get("X-API-Key")
         parsed_key_id = extract_key_id(api_key) if api_key else None
         if parsed_key_id:
             api_key_id = parsed_key_id
-            request.state.api_key_id = api_key_id
+            connection.state.api_key_id = api_key_id
 
-    ip_address = request.client.host if request.client else None
-    endpoint = f"{request.method}:{request.url.path}"
+    ip_address = connection.client.host if connection.client else None
+    connection_method = getattr(connection, "method", connection.scope["type"].upper())
+    endpoint = f"{connection_method}:{connection.url.path}"
 
     async def _enforce(identifier_type: str, **kwargs) -> dict:
         is_allowed, info = await check_rate_limit(endpoint=endpoint, **kwargs)
@@ -383,4 +385,4 @@ async def rate_limit_dependency(request: Request):
             limit=settings.RATE_LIMIT_REQUESTS_PER_MINUTE,
         )
 
-    request.state.rate_limit_info = rate_limit_info
+    connection.state.rate_limit_info = rate_limit_info
