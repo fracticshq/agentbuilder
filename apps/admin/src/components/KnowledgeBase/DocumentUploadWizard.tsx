@@ -5,6 +5,8 @@ import JsonFieldMapper from './JsonFieldMapper';
 import { knowledgeApi } from '../../api/knowledge';
 import type { ContentType } from '../../types/knowledge';
 
+const isDev = process.env.NODE_ENV !== 'production';
+
 interface WizardStep {
   id: number;
   title: string;
@@ -35,21 +37,6 @@ export default function DocumentUploadWizard({
   const [mappedData, setMappedData] = useState<any[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
-
-  const canGoNext = (): boolean => {
-    switch (currentStep) {
-      case 1:
-        return contentType !== null;
-      case 2:
-        return jsonData.length > 0;
-      case 3:
-        return mappedData.length > 0;
-      case 4:
-        return true;
-      default:
-        return false;
-    }
-  };
 
   // Unused handlers removed
 
@@ -109,7 +96,7 @@ export default function DocumentUploadWizard({
       return;
     }
 
-    console.log('[Upload] Starting upload:', {
+    isDev && console.log('[Upload] Starting upload:', {
       contentType,
       itemCount: mappedData.length,
       brandId,
@@ -134,7 +121,7 @@ export default function DocumentUploadWizard({
         return item;
       });
 
-      console.log('[Upload] Calling API with data:', {
+      isDev && console.log('[Upload] Calling API with data:', {
         content_type: contentType,
         items: itemsWithDefaults,
         brand_id: brandId,
@@ -147,7 +134,7 @@ export default function DocumentUploadWizard({
         brand_id: brandId,
       });
 
-      console.log('[Upload] API response received:', response);
+      isDev && console.log('[Upload] API response received:', response);
       alert(
         `✅ Success! Upload completed.\n\n` +
         `Job ID: ${response.job_id}\n` +
@@ -238,7 +225,7 @@ export default function DocumentUploadWizard({
 
       // Step 4: Review & Upload
       case 4:
-        console.log('[Review Step] Rendering review with:', {
+        isDev && console.log('[Review Step] Rendering review with:', {
           contentType,
           mappedDataLength: mappedData.length,
           brandId,
@@ -327,7 +314,7 @@ export default function DocumentUploadWizard({
               </button>
               <button
                 onClick={() => {
-                  console.log('[Upload Button] Clicked! mappedData:', mappedData.length, 'items');
+                  isDev && console.log('[Upload Button] Clicked! mappedData:', mappedData.length, 'items');
                   handleUpload();
                 }}
                 disabled={uploading}

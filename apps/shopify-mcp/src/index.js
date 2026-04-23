@@ -10,17 +10,41 @@ import { discoverMcpEndpoints } from './shopify.js';
 const app = express();
 const port = process.env.PORT || 3005;
 
-// Memory store for sessions (use Redis for production)
-const sessionStore = new session.MemoryStore();
+// Session store: Redis in production, MemoryStore in development
+let sessionStore;
+if (process.env.NODE_ENV === 'production') {
+  const { createClient } = await import('redis');
+  const connectRedisModule = await import('connect-redis');
+  const RedisStore = connectRedisModule.default || connectRedisModule.RedisStore;
+  const redisClient = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+  redisClient.on('error', (err) => console.error('Redis session store error:', err));
+  await redisClient.connect();
+  sessionStore = new RedisStore({ client: redisClient, prefix: 'shopify-session:' });
+} else {
+  sessionStore = new session.MemoryStore();
+}
 
-app.use(cors());
-app.use(express.json());
+const sessionSecret = process.env.SESSION_SECRET;
+if (!sessionSecret) {
+  console.error('FATAL: SESSION_SECRET environment variable is not set');
+  process.exit(1);
+}
+
+const allowedOrigins = process.env.CORS_ALLOW_ORIGINS
+  ? process.env.CORS_ALLOW_ORIGINS.split(',').map(o => o.trim())
+  : ['http://localhost:3000', 'http://localhost:8000'];
+
+app.use(cors({ origin: allowedOrigins, credentials: true }));
+// Capture raw body for HMAC webhook verification before JSON parsing
+app.use(express.json({
+  verify: (req, _res, buf) => { req.rawBody = buf; }
+}));
 app.use(session({
   store: sessionStore,
-  secret: process.env.SESSION_SECRET || 'shopify-mcp-secret',
+  secret: sessionSecret,
   resave: false,
   saveUninitialized: true,
-  cookie: { secure: false }
+  cookie: { secure: process.env.NODE_ENV === 'production', sameSite: 'lax' }
 }));
 
 /**
@@ -72,10 +96,11 @@ app.post('/mcp', async (req, res) => {
       });
     }
     console.error('MCP Error:', err);
+    const isDev = process.env.NODE_ENV !== 'production';
     res.status(500).json({
       jsonrpc: '2.0',
       id: req.body.id || null,
-      error: { code: -32603, message: err.message }
+      error: { code: -32603, message: isDev ? err.message : 'Internal server error' }
     });
   }
 });
@@ -110,7 +135,7 @@ app.get('/auth/login', async (req, res) => {
   const authParams = new URLSearchParams({
     client_id: process.env.SHOPIFY_CLIENT_ID,
     scope: 'openid email customer_read_customers customer_read_orders', // Add required scopes
-    redirect_uri: `http://localhost:3005/auth/callback`,
+    redirect_uri: process.env.SHOPIFY_REDIRECT_URI || `http://localhost:3005/auth/callback`,
     state: state,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
@@ -135,7 +160,7 @@ app.get('/auth/callback', async (req, res) => {
     client_secret: process.env.SHOPIFY_CLIENT_SECRET, // If required for your app type
     grant_type: 'authorization_code',
     code: code,
-    redirect_uri: `http://localhost:3005/auth/callback`,
+    redirect_uri: process.env.SHOPIFY_REDIRECT_URI || `http://localhost:3005/auth/callback`,
     code_verifier: req.session.code_verifier
   });
 
@@ -155,6 +180,48 @@ app.get('/auth/callback', async (req, res) => {
     console.error('Token Exchange Error:', err);
     res.status(500).send(`Failed to exchange token: ${err.message}`);
   }
+});
+
+/**
+ * Shopify webhook receiver.
+ * Verifies the X-Shopify-Hmac-SHA256 header against the raw request body using
+ * SHOPIFY_WEBHOOK_SECRET (set in Shopify Partner Dashboard → Webhooks → Signing secret).
+ * Returns 401 if the signature is missing or invalid — Shopify will retry on non-2xx.
+ */
+app.post('/webhooks', (req, res) => {
+  const webhookSecret = process.env.SHOPIFY_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    console.error('SHOPIFY_WEBHOOK_SECRET not set — webhook verification skipped');
+    return res.status(500).send('Webhook secret not configured');
+  }
+
+  const hmacHeader = req.headers['x-shopify-hmac-sha256'];
+  if (!hmacHeader) {
+    return res.status(401).send('Missing HMAC header');
+  }
+
+  const digest = crypto
+    .createHmac('sha256', webhookSecret)
+    .update(req.rawBody)
+    .digest('base64');
+
+  const digestBuf = Buffer.from(digest);
+  const headerBuf = Buffer.from(hmacHeader);
+
+  if (
+    digestBuf.length !== headerBuf.length ||
+    !crypto.timingSafeEqual(digestBuf, headerBuf)
+  ) {
+    return res.status(401).send('Invalid HMAC signature');
+  }
+
+  const topic = req.headers['x-shopify-topic'] || 'unknown';
+  const shop  = req.headers['x-shopify-shop-domain'] || 'unknown';
+  console.log(`Shopify webhook received: topic=${topic} shop=${shop}`);
+
+  // TODO: dispatch to topic-specific handlers (e.g. orders/create, products/update)
+
+  res.status(200).send('OK');
 });
 
 // Health check

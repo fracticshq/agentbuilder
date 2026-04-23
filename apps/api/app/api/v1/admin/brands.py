@@ -6,6 +6,7 @@ from datetime import datetime
 import structlog
 
 from app.connections import connection_manager, get_system_db
+from app.auth.admin_key import require_admin_key
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -78,7 +79,7 @@ async def get_brand(brand_id: str):
         logger.error("Failed to get brand", brand_id=brand_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to get brand: {str(e)}")
 
-@router.post("/", response_model=Brand)
+@router.post("/", response_model=Brand, dependencies=[Depends(require_admin_key)])
 async def create_brand(brand: BrandCreate):
     """Create a new brand."""
     try:
@@ -115,7 +116,7 @@ async def create_brand(brand: BrandCreate):
         logger.error("Failed to create brand", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to create brand: {str(e)}")
 
-@router.put("/{brand_id}", response_model=Brand)
+@router.put("/{brand_id}", response_model=Brand, dependencies=[Depends(require_admin_key)])
 async def update_brand(brand_id: str, brand_update: BrandUpdate):
     """Update an existing brand."""
     try:
@@ -151,7 +152,7 @@ async def update_brand(brand_id: str, brand_update: BrandUpdate):
         logger.error("Failed to update brand", brand_id=brand_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to update brand: {str(e)}")
 
-@router.delete("/{brand_id}")
+@router.delete("/{brand_id}", dependencies=[Depends(require_admin_key)])
 async def delete_brand(brand_id: str):
     """Delete a brand."""
     try:

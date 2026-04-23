@@ -81,26 +81,40 @@ export async function fetchTools(url, headers = {}) {
 
 /**
  * Forwards a JSON-RPC request to an official Shopify MCP endpoint.
+ * Retries up to 3 times on 429 (rate limited) with exponential backoff.
  */
-export async function forwardMcpRequest(url, payload, headers = {}) {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout for actual calls
+export async function forwardMcpRequest(url, payload, headers = {}, attempt = 1) {
+  const MAX_ATTEMPTS = 3;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
 
+  try {
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...headers
-      },
+      headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify(payload),
-      signal: controller.signal
+      signal: controller.signal,
     });
 
     clearTimeout(timeout);
-    const body = await response.json();
-    return body;
+
+    if (response.status === 429 && attempt < MAX_ATTEMPTS) {
+      const retryAfterMs = parseInt(response.headers.get('retry-after') || '0', 10) * 1000
+        || (attempt * 1000); // fallback: 1s, 2s
+      console.warn(`Shopify MCP rate limited (429). Retrying in ${retryAfterMs}ms (attempt ${attempt}/${MAX_ATTEMPTS})`);
+      await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+      return forwardMcpRequest(url, payload, headers, attempt + 1);
+    }
+
+    if (!response.ok) {
+      const err = new Error(`Shopify MCP returned HTTP ${response.status}`);
+      err.status = response.status;
+      throw err;
+    }
+
+    return response.json();
   } catch (err) {
+    clearTimeout(timeout);
     console.error(`Error forwarding MCP request to ${url}:`, err.message);
     throw err;
   }

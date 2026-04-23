@@ -44,11 +44,9 @@ export const useWidgetStore = create<WidgetStore>((set, get) => ({
   config: null,
   isExpanded: false,
   brandTheme: null,
-  agentConfig: null,
   isHumanInControl: false,
 
   setBrandTheme: (theme: BrandTheme) => set({ brandTheme: theme }),
-  setAgentConfig: (agentConfig: any) => set({ agentConfig }),
   setHumanInControl: (value: boolean) => set({ isHumanInControl: value }),
 
   setConfig: (config: WidgetConfig) => {

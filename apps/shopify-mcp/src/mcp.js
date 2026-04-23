@@ -4,7 +4,7 @@ class AuthRequiredError extends Error {
   constructor(authUrl) {
     super('Authentication required');
     this.name = 'AuthRequiredError';
-    this.authUrl = authUrl || `http://localhost:3005/auth/login`; 
+    this.authUrl = authUrl || `${process.env.SHOPIFY_BASE_URL || 'http://localhost:3005'}/auth/login`;
   }
 }
 

@@ -14,6 +14,11 @@ services:
     environment:
       # Only Docker-internal service URLs that differ from .env.docker defaults
       SHOPIFY_MCP_URL: "http://shopify:3005/mcp"
+      ENVIRONMENT: "${ENVIRONMENT:-production}"
+      DEBUG: "${DEBUG:-false}"
+      REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
+      REQUIRE_REDIS: "${REQUIRE_REDIS:-false}"
+      ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
     depends_on:
       mongodb:
         condition: service_healthy
@@ -34,12 +39,12 @@ services:
     build:
       context: .
       dockerfile: apps/admin/Dockerfile
-      args:
-        REACT_APP_API_URL: http://localhost:8000
     image: agentbuilder-admin
     container_name: agentbuilder-admin
     ports:
       - "3000:3000"
+    environment:
+      API_BASE_URL: "${ADMIN_API_BASE_URL:-http://localhost:8000}"
     depends_on:
       - api
     restart: unless-stopped
@@ -55,12 +60,12 @@ services:
     build:
       context: .
       dockerfile: apps/widget/Dockerfile
-      args:
-        VITE_API_BASE_URL: http://localhost:8000
     image: agentbuilder-widget
     container_name: agentbuilder-widget
     ports:
       - "5174:5174"
+    environment:
+      API_BASE_URL: "${WIDGET_API_BASE_URL:-http://localhost:8000}"
     depends_on:
       - api
     restart: unless-stopped
@@ -80,6 +85,10 @@ services:
     container_name: agentbuilder-shopify
     ports:
       - "3005:3005"
+    env_file:
+      - .env.docker
+    environment:
+      NODE_ENV: production
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3005/health"]
@@ -92,8 +101,8 @@ services:
   mongodb:
     image: mongo:7
     container_name: agentbuilder-mongodb
-    ports:
-      - "27017:27017"                   # expose so you can connect with Compass
+    # Port not exposed to host in production. To connect with Compass locally,
+    # temporarily add: ports: ["27017:27017"]
     volumes:
       - mongo_data:/data/db
     restart: unless-stopped
@@ -108,8 +117,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: agentbuilder-redis
-    ports:
-      - "6379:6379"
+    # Port not exposed to host in production. To inspect locally,
+    # temporarily add: ports: ["6379:6379"]
     volumes:
       - redis_data:/data
     restart: unless-stopped

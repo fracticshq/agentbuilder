@@ -240,7 +240,7 @@ describe('WebSocketClient', () => {
       ws.simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
       await p;
 
-      ws.send.mockClear();
+      vi.mocked(ws.send).mockClear();
       vi.advanceTimersByTime(1_000);
       expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'ping' }));
     });

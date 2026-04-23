@@ -71,33 +71,24 @@ The **Agent Builder Platform** empowers businesses to create intelligent AI agen
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Agent Builder Platform                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                   │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐        │
-│  │   Widget     │   │     API      │   │    Admin     │        │
-│  │  (React TS)  │◄──┤  (FastAPI)   │──►│  (React TS)  │        │
-│  │  WebSockets  │   │   Streaming  │   │  Dashboard   │        │
-│  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘        │
-│         │                   │                   │                 │
-│         └───────────────────┴───────────────────┘                 │
-│                             │                                     │
-│         ┌───────────────────┴────────────────────┐                │
-│         │        Core Services                   │                │
-│    ┌────▼─────┐  ┌──────────┐  ┌─────────────┐  │                │
-│    │Retrieval │  │  Memory  │  │     LLM     │  │                │
-│    │  Hybrid  │  │ 4-Layer  │  │  Adapters   │  │                │
-│    │Vector+BM25│ │Short+Epi │  │Multi-Model  │  │                │
-│    └────┬─────┘  └────┬─────┘  └─────┬───────┘  │                │
-│         │             │              │           │                │
-│    ┌────▼─────────────▼──────────────▼──────┐    │                │
-│    │      Storage & Caching Infrastructure  │    │                │
-│    │ MongoDB Atlas │ Redis │ Voyage AI      │    │                │
-│    │ Vector Search │  KV   │ Embeddings     │    │                │
-│    └─────────────────────────────────────────┘    │                │
-└─────────────────────────────────────────────────────────────────┘
+Browser (end user)   → apps/widget  (port 5174) ──┐
+Browser (admin)      → apps/admin   (port 3000) ──┤──► apps/api (port 8000)
+                                                    │         │
+Agent tool calls     ─────────────────────────────┘         ├──► apps/shopify-mcp (port 3005)
+                                                              ├──► MongoDB  (vector + documents)
+                                                              ├──► Redis    (pub/sub, job state, sessions)
+                                                              ├──► OpenAI / Qwen  (LLM)
+                                                              └──► Voyage AI      (embeddings)
 ```
+
+**Request flow** (chat message):
+1. Widget sends message over SSE/WebSocket → API
+2. API retrieves relevant docs (vector + BM25 hybrid search)
+3. `agent_runtime` Orchestrator plans tool calls (retrieval, Shopify MCP, etc.)
+4. Results synthesized by LLM → streamed back to Widget
+5. Admin can take over any live conversation via dedicated WebSocket channel; on release, the conversation history is injected back into the agent's memory
+
+**Multi-instance ready**: All shared state (human-control flags, job status, WebSocket fanout) lives in Redis. Run as many API replicas as needed behind a load balancer.
 
 ---
 
@@ -212,236 +203,221 @@ agent-builder/
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Deployment and local development
+
+### Recommended deploy path: Docker Compose
+
+Use Docker Compose as the primary deployment path. The frontend containers now read API URLs from runtime-injected config, so you can switch between local and production targets without rebuilding the admin or widget images.
 
 ### Prerequisites
 
-- **Python 3.11+**
-- **Node.js 18+**
-- **MongoDB Atlas** account (free tier works)
-- **Redis** (optional, for caching)
-- **API Keys**:
-  - Azure Key Vault access
-  - Voyage AI (for embeddings)
-  - OpenAI or Qwen (for LLM)
-- **Azure CLI**: Logged in via `az login`
+- Docker + Docker Compose
+- API keys for your selected providers
+- MongoDB and Redis are included in Compose for the standard stack
 
-### 1. Clone Repository
+### 1. Configure environment
 
-```bash
-git clone https://github.com/yourusername/agent-builder.git
-cd agent-builder
+Create `.env.docker` for backend secrets and runtime settings.
+
+Required minimum values:
+
+```env
+OPENAI_API_KEY=sk-...
+VOYAGE_API_KEY=pa-...
+SECRET_KEY=<openssl rand -hex 32>
+PII_ENCRYPTION_KEY=<base64-32-byte-key>
+ADMIN_API_KEY=<openssl rand -hex 32>
+SESSION_SECRET=<openssl rand -hex 32>
+MONGODB_URI=mongodb://mongodb:27017
+REDIS_URL=redis://redis:6379
+CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost:5174
+ENVIRONMENT=production
+DEBUG=false
+ALLOW_ADMIN_KEY_BYPASS=false
+REQUIRE_MONGODB=true
+REQUIRE_REDIS=false
 ```
 
-### 2. Environment Setup
+Optional frontend runtime overrides in your shell or Compose env:
 
-The platform uses a consolidated environment management system with **Azure Key Vault** for secrets.
-
-1. **Login to Azure**:
-   ```bash
-   az login
-   ```
-
-2. **Root `.env`**: Create a `.env` file in the root for non-sensitive configuration:
-   ```bash
-   # Azure Configuration
-   USE_AZURE_KEYVAULT=true
-   AZURE_KEYVAULT_NAME=kv-agentbuilder-dev
-
-   # API Settings
-   API_HOST=0.0.0.0
-   API_PORT=8000
-   API_LOG_LEVEL=info
-
-   # CORS (comma-separated)
-   CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost:5173
-   ```
-
-3. **Sync JS Apps**: Run the sync script to generate local config for Admin/Widget (no secrets downloaded):
-   ```bash
-   python scripts/sync_secrets.py
-   ```
-
-### 3. MongoDB Atlas Setup
-
-#### Create Vector Search Index
-
-1. **Go to MongoDB Atlas Console**
-2. **Navigate to**: Cluster → Database → Search
-3. **Click**: Create Search Index → Visual Editor
-4. **Configure**:
-   - Database: `agent-builder`
-   - Collection: `knowledge_base`
-   - Index Name: `vector_index`
-5. **Add Vector Field**:
-   - Field Name: `embeddings`
-   - Data Type: `knnVector`
-   - Dimensions: `1024`
-   - Similarity: `cosine`
-6. **Add Filter Fields** (optional but recommended):
-   - `agent_id` → token
-   - `doc_id` → token
-   - `content_type` → token
-7. **Create Index** and wait for "Active" status
-
-**See detailed guide**: [`ATLAS_VECTOR_INDEX_VISUAL_GUIDE.md`](./ATLAS_VECTOR_INDEX_VISUAL_GUIDE.md)
-
-### 4. Install Dependencies
-
-#### Backend (API)
-
-```bash
-cd apps/api
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Install local packages in editable mode
-pip install -e ../../packages/commons
-pip install -e ../../packages/memory
-pip install -e ../../packages/retrieval
-pip install -e ../../packages/llm
+```env
+ADMIN_API_BASE_URL=http://localhost:8000
+WIDGET_API_BASE_URL=http://localhost:8000
 ```
 
-#### Frontend (Admin Dashboard)
+For production, point those to your public API origin instead.
+
+### 2. Build and start
 
 ```bash
-cd apps/admin
-npm install
+docker compose build
+docker compose up -d
 ```
 
-#### Widget (Optional)
+### 3. Verify
 
 ```bash
-cd apps/widget
-npm install
-```
-
-### 5. Run Servers
-
-#### Start API Server
-
-```bash
-cd apps/api
-python run.py
-# API running at http://localhost:8000
-# Docs at http://localhost:8000/docs
-```
-
-#### Start Admin Dashboard
-
-```bash
-cd apps/admin
-npm start
-# Dashboard at http://localhost:3000
-```
-
-#### Start Widget (Optional)
-
-```bash
-cd apps/widget
-npm run dev
-# Widget at http://localhost:5173
-```
-
-### 6. Verify Setup
-
-```bash
-# Check API health
+curl http://localhost:8000/live
 curl http://localhost:8000/health
-
-# Check MongoDB connection
-curl http://localhost:8000/api/v1/health/mongodb
-
-# Verify vector search index
-python scripts/verify_vector_index.py
+curl http://localhost:8000/ready
+curl http://localhost:8000/config-check
 ```
+
+Open:
+
+- Admin: http://localhost:3000
+- Widget: http://localhost:5174
+- API: http://localhost:8000
+
+### Runtime switching: local vs production URLs
+
+The admin and widget no longer depend on build-time baked API URLs in Docker deployments.
+
+At container startup they generate `runtime-config.js` from environment variables:
+
+- Admin uses `API_BASE_URL`
+- Widget uses `API_BASE_URL`
+
+That means you can point the same built image at different API origins just by changing container env values.
+
+### Local non-Docker development
+
+You can still run services directly:
+
+```bash
+cd apps/api && python run.py
+cd apps/admin && npm start
+cd apps/widget && npm run dev
+cd apps/shopify-mcp && npm start
+```
+
+Local frontend builds still support `REACT_APP_API_URL` and `VITE_API_BASE_URL`, but Docker runtime env injection is the preferred deployment mechanism.
+
+### Security baseline
+
+Current deployment hardening includes:
+
+- runtime-config separation for browser-safe values only
+- admin write protection via `X-Admin-Key`
+- production guardrails for `DEBUG`, wildcard CORS, and admin-key bypass
+- readiness/liveness endpoints for orchestration
+- baseline security headers in API and nginx-served frontends
+- optional metrics endpoint controlled by config
+
+For enterprise deployment, keep TLS termination in front of these services and set production CORS origins to exact domains only.
+
+> **Azure Key Vault** is supported but not required. Set `USE_AZURE_KEYVAULT=true` and `AZURE_KEYVAULT_NAME` if you want to pull secrets from AKV instead.
+
+### MongoDB Atlas Vector Index (required for RAG)
+
+1. Atlas Console → your cluster → Search → Create Search Index
+2. Database: your agent DB, Collection: `knowledge_base`, Index name: `vector_index`
+3. Add vector field: `embeddings`, type `knnVector`, dimensions `1024`, similarity `cosine`
+4. Optional filter fields: `agent_id`, `doc_id`, `content_type` (all `token` type)
+5. Wait for "Active" status
+
+See [`ATLAS_VECTOR_INDEX_VISUAL_GUIDE.md`](./ATLAS_VECTOR_INDEX_VISUAL_GUIDE.md) for screenshots.
 
 ---
 
-## 🐳 Docker Quick Start
+## 🐳 Production (Docker Compose)
 
-The fastest way to run the full stack — no local Python, Node, MongoDB, or Redis installs needed. One command brings up all services.
+The full stack — API, Admin, Widget, Shopify MCP, MongoDB, Redis — in one command. No local Python, Node, MongoDB, or Redis installs needed.
 
 ### Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (macOS / Windows / Linux)
 
-### 1. Copy & fill the environment file
+### 1. Create `.env.docker`
 
 ```bash
-cp .env.docker.example .env
+cp .env.example .env.docker
 ```
 
-Open `.env` and fill in at minimum:
+Fill in the required variables:
 
-| Variable | Description |
-|---|---|
-| `OPENAI_API_KEY` | Your OpenAI key (`sk-...`) |
-| `VOYAGE_API_KEY` | Voyage AI embeddings key (`pa-...`) |
-| `SECRET_KEY` | Random 32-char string (JWT signing) |
-| `PII_ENCRYPTION_KEY` | Random 32-char string (PII vault) |
-| `FIRECRAWL_API_KEY` | Optional — only needed for Scrape tab |
+| Variable | Required | Description |
+|---|---|---|
+| `OPENAI_API_KEY` | Yes | OpenAI API key (`sk-...`) |
+| `VOYAGE_API_KEY` | Yes | Voyage AI embeddings key (`pa-...`) |
+| `SECRET_KEY` | Yes | JWT signing key — `openssl rand -hex 32` |
+| `PII_ENCRYPTION_KEY` | Yes | PII vault key — `openssl rand -hex 32` |
+| `ADMIN_API_KEY` | Recommended | Protects all admin write routes |
+| `SESSION_SECRET` | Yes | Shopify MCP session key — `openssl rand -hex 32` |
+| `SHOPIFY_WEBHOOK_SECRET` | If using webhooks | From Shopify Partner Dashboard |
+| `CORS_ALLOW_ORIGINS` | Production | Your frontend domains (comma-separated) |
+| `FIRECRAWL_API_KEY` | Optional | Only needed for web-scrape catalog imports |
+| `STRAPI_API_TOKEN` | Optional | If using Strapi CMS integration |
 
-> MongoDB and Redis are started automatically as containers — leave their URLs as-is.
+> MongoDB and Redis are started as containers — leave `MONGODB_URI` and `REDIS_URL` pointing at the internal Docker hostnames (`mongodb://mongodb:27017`, `redis://redis:6379`).
 
-### 2. Build & start all services
+### 2. Build & run
 
 ```bash
 docker compose up --build
 ```
 
-First build takes ~3–5 minutes (downloads base images, installs deps). Subsequent starts are instant.
+First build: ~3–5 minutes. Subsequent starts: instant (images cached).
 
-### 3. Open the apps
+### 3. Services
 
-| Service | URL |
-|---|---|
-| Admin Dashboard | http://localhost:3000 |
-| Chat Widget | http://localhost:5174 |
-| API + Swagger docs | http://localhost:8000/docs |
-| MongoDB (Compass) | mongodb://localhost:27017 |
-| Redis | redis://localhost:6379 |
-
-### What each container does
-
-| Container | Image | Role |
+| Container | URL | Role |
 |---|---|---|
-| `agentbuilder-api` | Python 3.12 + FastAPI | Backend API, RAG, memory, streaming |
-| `agentbuilder-admin` | Node 20 build → nginx | React admin dashboard |
-| `agentbuilder-widget` | Node 20 build → nginx | React chat widget |
-| `agentbuilder-mongodb` | mongo:7 | Primary database |
-| `agentbuilder-redis` | redis:7-alpine | Caching & session store |
+| `agentbuilder-api` | http://localhost:8000 | FastAPI backend + Swagger at `/docs` |
+| `agentbuilder-admin` | http://localhost:3000 | React admin dashboard (nginx) |
+| `agentbuilder-widget` | http://localhost:5174 | Embeddable chat widget (nginx) |
+| `agentbuilder-shopify` | http://localhost:3005 | Shopify MCP bridge |
+| `agentbuilder-mongodb` | internal only | MongoDB 7 (no host port exposed) |
+| `agentbuilder-redis` | internal only | Redis 7 (no host port exposed) |
 
-### Useful Docker commands
+All six containers have healthchecks. The `api` service won't start until MongoDB and Redis pass their checks.
+
+> To connect MongoDB Compass or redis-cli locally, temporarily add `ports: ["27017:27017"]` / `ports: ["6379:6379"]` to the respective service in `docker-compose.yml` — comments in the file explain exactly where.
+
+### 4. Useful commands
 
 ```bash
-# Run in background (detached)
+# Detached (background)
 docker compose up --build -d
 
-# View logs for a specific service
+# Tail logs
 docker compose logs -f api
 docker compose logs -f admin
 
-# Stop all services (keeps data volumes)
+# Rebuild one service after a code change
+docker compose up --build api
+
+# Stop (keep data)
 docker compose down
 
-# Stop and wipe all data (fresh slate)
+# Stop + wipe all data (fresh slate)
 docker compose down -v
-
-# Rebuild a single service after code change
-docker compose up --build api
 ```
+
+### 5. Scaling the API
+
+The API is Redis pub/sub ready for WebSocket fanout and uses Redis-backed job state — safe to run multiple replicas. With Docker Compose:
+
+```yaml
+# docker-compose.yml
+api:
+  deploy:
+    replicas: 3
+```
+
+In ECS/Kubernetes, point multiple task instances at the same Redis and MongoDB.
 
 ### Notes
 
-- **Strapi CMS** is a separate repository (`agentbuilder-strapi`) and is **not** included in this compose file. Run it independently if needed.
-- The `.env` file is never baked into any image — it's mounted at runtime via `env_file` so secrets stay local.
-- Data persists across restarts in named Docker volumes (`mongo_data`, `redis_data`). Use `down -v` only when you want a full reset.
+- **Admin & Widget build args**: `REACT_APP_API_URL` and `VITE_API_BASE_URL` are baked into the nginx images at build time. If your API is behind a public domain, set them:
+  ```bash
+  docker compose build \
+    --build-arg REACT_APP_API_URL=https://api.yourdomain.com \
+    --build-arg VITE_API_BASE_URL=https://api.yourdomain.com
+  ```
+- **HTTPS**: Add a reverse proxy (nginx, Caddy, or an AWS ALB) in front — the containers themselves serve plain HTTP internally.
+- **Strapi CMS** is a separate repository (`agentbuilder-strapi`) — not included in this Compose file. Run it independently if needed.
+- Secrets are never baked into images — loaded at runtime via `env_file: .env.docker`.
 
 ---
 
@@ -607,16 +583,43 @@ features:
 
 ### Environment Variables
 
-| Variable | Location | Required | Description |
-|----------|----------|----------|-------------|
-| `AZURE_KEYVAULT_NAME` | Root `.env` | ✅ Yes | Name of your Azure Key Vault |
-| `USE_AZURE_KEYVAULT` | Root `.env` | ✅ Yes | Set to `true` to enable AKV |
-| `MONGODB_URI` | **AKV** | ✅ Yes | MongoDB Atlas connection string |
-| `OPENAI_API_KEY` | **AKV** | Conditional | OpenAI API key |
-| `VOYAGE_API_KEY` | **AKV** | ✅ Yes | Voyage AI API key |
-| `SECRET_KEY` | **AKV** | ✅ Yes | Django-style secret key |
-| `API_PORT` | Root `.env` | No | API server port (default 8000) |
-| `LOG_LEVEL` | Root `.env` | No | Logging level |
+**Required to start:**
+
+| Variable | App | Description |
+|---|---|---|
+| `OPENAI_API_KEY` | api | OpenAI API key (`sk-...`) |
+| `VOYAGE_API_KEY` | api | Voyage AI embeddings key |
+| `SECRET_KEY` | api | JWT signing key (32-char random) |
+| `PII_ENCRYPTION_KEY` | api | PII vault encryption key (32-char random) |
+| `SESSION_SECRET` | shopify-mcp | express-session secret |
+| `MONGODB_URI` | api | MongoDB connection string |
+| `REDIS_URL` | api, shopify-mcp | Redis connection string |
+
+**Recommended for production:**
+
+| Variable | App | Description |
+|---|---|---|
+| `ADMIN_API_KEY` | api | Protects all admin write routes (`X-Admin-Key` header) |
+| `CORS_ALLOW_ORIGINS` | api, shopify-mcp | Comma-separated allowed origins |
+| `SHOPIFY_WEBHOOK_SECRET` | shopify-mcp | HMAC signing secret for webhook verification |
+
+**Optional / feature-specific:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `FIRECRAWL_API_KEY` | — | Web scraping for catalog imports |
+| `STRAPI_URL` | `http://localhost:1337` | Strapi CMS URL |
+| `STRAPI_API_TOKEN` | — | Strapi API token |
+| `SHOPIFY_SHOP_URL` | — | Shopify storefront URL |
+| `SHOPIFY_CLIENT_ID` | — | Shopify OAuth app client ID |
+| `SHOPIFY_CLIENT_SECRET` | — | Shopify OAuth app client secret |
+| `OPENAI_MODEL` | `gpt-4o-mini` | LLM model name |
+| `VOYAGE_MODEL` | `voyage-large-2-instruct` | Embeddings model |
+| `RATE_LIMIT_REQUESTS_PER_MINUTE` | `60` | Per-user rate limit |
+| `ENABLE_WEBSOCKETS` | `true` | WebSocket support |
+| `ENABLE_METRICS` | `true` | Prometheus metrics at `/api/v1/status/metrics` |
+| `USE_AZURE_KEYVAULT` | `false` | Pull secrets from Azure Key Vault |
+| `AZURE_KEYVAULT_NAME` | — | AKV name (if `USE_AZURE_KEYVAULT=true`) |
 
 ---
 
@@ -736,34 +739,26 @@ Set the following in your root `.env` file:
 
 ## 🛣️ Roadmap
 
-### ✅ Completed (Phase 0-5)
-- [x] Admin dashboard with agent builder
-- [x] Structured knowledge base upload (6 content types)
-- [x] Flexible field mapping (3 modes)
-- [x] Documents list with view/delete
-- [x] Hybrid retrieval (Vector + BM25 + RRF)
-- [x] 4-layer memory system
+### ✅ Completed
+- [x] Admin dashboard with 7-step agent builder wizard
+- [x] Structured knowledge base upload (6 content types + field mapping)
+- [x] Hybrid retrieval (Vector + BM25 + RRF fusion + cross-encoder reranking)
+- [x] 4-layer memory system (short-term, episodic, semantic, graph)
 - [x] Multi-LLM support (OpenAI, Qwen)
-- [x] WebSocket/SSE streaming
-- [x] MongoDB Atlas integration
-- [x] Voyage AI embeddings
-
-### 🚧 In Progress
-- [ ] MongoDB indexes for performance
-- [ ] End-to-end upload testing
-- [ ] Production deployment
-- [ ] Monitoring dashboards
+- [x] WebSocket/SSE streaming with human takeover channel
+- [x] MongoDB Atlas integration + Voyage AI embeddings
+- [x] Shopify MCP bridge (OAuth, product/order/customer tools)
+- [x] Plan-Execute-Synthesize-Critic agent orchestrator
+- [x] Production hardening: Redis pub/sub WebSocket fanout, Redis-backed job state, HMAC webhook verification, auth wiring, CORS lockdown, rate limiting, Docker healthchecks
 
 ### 📋 Planned
-- [ ] Batch delete documents
-- [ ] Export documents to JSON
-- [ ] Version history for documents
-- [ ] Advanced search/filtering
-- [ ] A/B testing for prompts
+- [ ] Batch delete / export documents
+- [ ] Version history for knowledge base
+- [ ] A/B testing for system prompts
 - [ ] Cost tracking per agent
-- [ ] Multi-modal support (images, PDFs)
+- [ ] Multi-modal support (images in chat)
+- [ ] Anthropic Claude provider
 - [ ] Fine-tuning pipeline
-- [ ] Anthropic Claude integration
 
 ---
 

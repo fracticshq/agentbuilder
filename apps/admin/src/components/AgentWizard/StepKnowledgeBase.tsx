@@ -4,6 +4,8 @@ import DocumentUploadWizard from '../KnowledgeBase/DocumentUploadWizard';
 import DocumentsList from '../KnowledgeBase/DocumentsList';
 import { knowledgeApi } from '../../api/knowledge';
 
+const isDev = process.env.NODE_ENV !== 'production';
+
 interface StepKnowledgeBaseProps {
   data: {
     documents: Array<{
@@ -39,7 +41,7 @@ export default function StepKnowledgeBase({ data, onChange, agentId, brandId }: 
           const agent = resp.data as any;
           // Always use brand_id (UUID) for consistency — storage key must not change between create and edit
           const slug = (agent && (agent.brand_id || agent.brand_slug)) || null;
-          console.log('[StepKnowledgeBase] Resolved agent to brand:', { agentId, brandSlug: slug });
+          isDev && console.log('[StepKnowledgeBase] Resolved agent to brand:', { agentId, brandSlug: slug });
           setResolvedBrandId(slug);
         } catch (err) {
           console.warn('[StepKnowledgeBase] Failed to resolve agent -> brand', err);
@@ -47,7 +49,7 @@ export default function StepKnowledgeBase({ data, onChange, agentId, brandId }: 
         }
       } else if (brandId) {
         // No agentId, just use brandId directly
-        console.log('[StepKnowledgeBase] Using brandId directly:', brandId);
+        isDev && console.log('[StepKnowledgeBase] Using brandId directly:', brandId);
         setResolvedBrandId(brandId);
       }
     };
@@ -60,14 +62,14 @@ export default function StepKnowledgeBase({ data, onChange, agentId, brandId }: 
     const fetchDocumentsCount = async () => {
       // Wait for resolvedBrandId to be set
       if (!resolvedBrandId) {
-        console.log('[StepKnowledgeBase] Waiting for brand resolution...');
+        isDev && console.log('[StepKnowledgeBase] Waiting for brand resolution...');
         return;
       }
 
       try {
-        console.log('[StepKnowledgeBase] Fetching documents for brand:', resolvedBrandId);
+        isDev && console.log('[StepKnowledgeBase] Fetching documents for brand:', resolvedBrandId);
         const docs = await knowledgeApi.getDocuments(resolvedBrandId);
-        console.log('[StepKnowledgeBase] Fetched documents:', docs.length);
+        isDev && console.log('[StepKnowledgeBase] Fetched documents:', docs.length);
         // Update the data with fetched documents for validation
         onChange('documents', docs.map(doc => ({
           id: doc.doc_id,

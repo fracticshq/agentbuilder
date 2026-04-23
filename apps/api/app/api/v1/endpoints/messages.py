@@ -246,7 +246,15 @@ async def admin_websocket_endpoint(
                 # Buffer for memory injection on release
                 await ws_manager.buffer_takeover_message(conversation_id, "assistant", content)
                 # Persist to Strapi (role 'agent' matches Strapi convention)
-                message_service.strapi.save_message(conversation_id, content, "agent")
+                agent_id = await ws_manager.get_agent_id(conversation_id)
+                brand_slug = message_service.brand_id if message_service.brand_id != "default-brand" else None
+                message_service.strapi.save_message(
+                    conversation_id,
+                    content,
+                    "agent",
+                    brand_slug=brand_slug,
+                    agent_id=agent_id,
+                )
 
     except WebSocketDisconnect:
         logger.info("Admin WebSocket disconnected", conversation_id=conversation_id)
@@ -321,7 +329,14 @@ async def widget_control_channel(
                     # Buffer for memory injection on release
                     await ws_manager.buffer_takeover_message(conversation_id, "user", content)
                     # Persist to Strapi
-                    message_service.strapi.save_message(conversation_id, content, "user")
+                    brand_slug = message_service.brand_id if message_service.brand_id != "default-brand" else None
+                    message_service.strapi.save_message(
+                        conversation_id,
+                        content,
+                        "user",
+                        brand_slug=brand_slug,
+                        agent_id=agent_id or None,
+                    )
 
     except WebSocketDisconnect:
         logger.info("Widget control channel disconnected", conversation_id=conversation_id)

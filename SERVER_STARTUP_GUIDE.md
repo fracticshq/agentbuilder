@@ -1,223 +1,83 @@
 # Server Startup Guide
 
-This guide explains how to start all three servers for the Agent Builder Platform.
+This guide explains the current supported startup paths for the Agent Builder Platform.
 
-## Azure Authentication (for Key Vault access)
+## Recommended path: Docker Compose
 
-The API server needs to authenticate with Azure to access Key Vault secrets. Choose one of the following methods:
+Use Docker Compose for the easiest deployment and the most accurate production-like setup.
 
-### Option 1: Interactive Login (Simplest)
-1. Run `az login` and authenticate.
-2. The API will automatically pick up your credentials.
+### Configure runtime env
 
-### Option 2: Service Principal (Environment Variables)
-If you prefer not to use `az login` or are running in Docker/CI:
+Backend secrets belong in `.env.docker`.
+Frontend API targets are injected at runtime through container env vars, so you can switch local vs production URLs without rebuilding frontend images.
 
-1. **Create a Service Principal**:
-   ```bash
-   az ad sp create-for-rbac --name agentbuilder-sp --role "Key Vault Secrets User" --scopes /subscriptions/<sub-id>/resourceGroups/<rg-name>/providers/Microsoft.KeyVault/vaults/kv-agentbuilder-dev
-   ```
+Key variables:
 
-2. **Configure Environment**:
-   Add the output values to your root `.env` file:
-   ```env
-   AZURE_CLIENT_ID=<appId>
-   AZURE_CLIENT_SECRET=<password>
-   AZURE_TENANT_ID=<tenant>
-   ```
-
-## Quick Start (Recommended)
-
-Open **three separate terminal windows/tabs** and run each server in its own terminal:
-
-### Terminal 1: API Server
-```bash
-cd /Users/anantmendiratta/Desktop/anant2/agent-builder/apps/api
-bash start.sh
+```env
+ENVIRONMENT=production
+DEBUG=false
+ALLOW_ADMIN_KEY_BYPASS=false
+SESSION_SECRET=<openssl rand -hex 32>
+ADMIN_API_BASE_URL=http://localhost:8000
+WIDGET_API_BASE_URL=http://localhost:8000
 ```
 
-### Terminal 2: Admin Dashboard
-```bash
-cd /Users/anantmendiratta/Desktop/anant2/agent-builder/apps/admin
-PORT=3000 npm start
-```
-
-### Terminal 3: Widget
-```bash
-cd /Users/anantmendiratta/Desktop/anant2/agent-builder/apps/widget
-bash start.sh
-```
-
----
-
-## Alternative: Using the start-all.sh Script
-
-You can also use the provided `start-all.sh` script to start all servers:
+### Start the stack
 
 ```bash
-cd /Users/anantmendiratta/Desktop/anant2/agent-builder
-bash start-all.sh
+docker compose build
+docker compose up -d
 ```
 
-**Note:** This runs all servers in the background. To view logs, check the `logs/` directory.
-
----
-
-## Checking Server Status
-
-Run the status check script:
+### Verify
 
 ```bash
-bash /Users/anantmendiratta/Desktop/anant2/agent-builder/check-servers.sh
+curl http://localhost:8000/live
+curl http://localhost:8000/health
+curl http://localhost:8000/ready
 ```
 
-Or manually check ports:
+### Access URLs
+
+- API: http://localhost:8000
+- Admin: http://localhost:3000
+- Widget: http://localhost:5174
+- Shopify MCP: http://localhost:3005/health
+
+## Azure Authentication for Key Vault
+
+If you enable Azure Key Vault, the API can authenticate using either:
+
+1. `az login` for local interactive use
+2. Service principal env vars:
+
+```env
+AZURE_CLIENT_ID=<appId>
+AZURE_CLIENT_SECRET=<password>
+AZURE_TENANT_ID=<tenant>
+```
+
+## Direct local development
+
+If you are iterating locally without Docker, run each app in its own terminal:
 
 ```bash
-lsof -i:8000 -i:3000 -i:5173 | grep LISTEN
+cd apps/api && python run.py
+cd apps/admin && npm start
+cd apps/widget && npm run dev
+cd apps/shopify-mcp && npm start
 ```
 
----
+Widget runs on port `5174`, not `5173`.
 
-## Expected Output
+## Notes
 
-When all servers are running, you should see:
+- `/live` is process liveness.
+- `/ready` is deployment readiness and returns `503` if required dependencies are unavailable.
+- `/health` returns dependency status details.
+- In production, keep `DEBUG=false`, avoid wildcard CORS, and set `ADMIN_API_KEY`.
+- Frontend runtime config is generated at container startup from environment variables.
 
-```
-✅ API Server (8000) - Running & Healthy
-✅ Admin Dashboard (3000) - Running & Healthy  
-✅ Widget (5173) - Running & Healthy
-```
+## Legacy notes
 
----
-
-## Access URLs
-
-| Service | URL | Purpose |
-|---------|-----|---------|
-| **API** | http://localhost:8000 | Backend API |
-| **API Docs** | http://localhost:8000/docs | Interactive API documentation |
-| **Admin Dashboard** | http://localhost:3000 | Brand & Agent management |
-| **Widget** | http://localhost:5173 | Chat widget interface |
-
----
-
-## Troubleshooting
-
-### Port Already in Use
-
-If you get "port already in use" errors, kill existing processes:
-
-```bash
-# Kill specific port
-lsof -ti:8000 | xargs kill -9
-
-# Kill all three ports
-lsof -ti:8000,3000,5173 | xargs kill -9
-```
-
-### Widget Server Keeps Stopping
-
-**Problem:** The widget server keeps getting interrupted.
-
-**Solution:** Run the widget server in its **own dedicated terminal window** (not a shared terminal).
-
-```bash
-# Open a new terminal window (Cmd+T in macOS Terminal)
-cd /Users/anantmendiratta/Desktop/anant2/agent-builder/apps/widget
-bash start.sh
-
-# Leave this terminal open - do not run other commands here
-```
-
-### MongoDB Permission Errors
-
-If you see "Unauthorized" errors in the API logs:
-
-**Current Fix:** The system uses `agent-builder` as the system database (configured in the root `.env`):
-
-**Permanent Fix:** Update MongoDB Atlas user permissions to access all databases.
-
-See `MONGODB_PERMISSIONS_FIX.md` for details.
-
----
-
-## Stopping Servers
-
-### Stop Individual Server
-
-Press `Ctrl+C` in the terminal running that server.
-
-### Stop All Servers
-
-```bash
-bash /Users/anantmendiratta/Desktop/anant2/agent-builder/stop-all.sh
-```
-
-Or manually:
-
-```bash
-lsof -ti:8000,3000,5173 | xargs kill -9
-```
-
----
-
-## Current Server Configuration
-
-| Server | Port | Technology | Auto-reload |
-|--------|------|-----------|-------------|
-| API | 8000 | FastAPI + Uvicorn | ✅ Yes |
-| Admin | 3000 | React + CRA | ✅ Yes |
-| Widget | 5173 | React + Vite | ✅ Yes |
-
-All servers support **hot module replacement (HMR)** - changes to code will automatically reload.
-
----
-
-## Development Workflow
-
-1. **Start all three servers** in separate terminals
-2. **Leave them running** during development
-3. **Make code changes** - servers will auto-reload
-4. **Test changes** in the browser
-5. **Stop servers** when done (Ctrl+C or stop-all.sh)
-
----
-
-## Important Notes
-
-⚠️ **Keep Terminals Open**
-
-Each server terminal must stay open and not be used for other commands. If you run other commands in a server terminal, it may interrupt the server.
-
-✅ **Use Separate Terminals**
-
-- Terminal 1: API server (keep open)
-- Terminal 2: Admin dashboard (keep open)
-- Terminal 3: Widget (keep open)
-- Terminal 4+: For running other commands (tests, checks, etc.)
-
-🔄 **Auto-Reload**
-
-All servers watch for file changes and automatically reload. No need to restart manually after code changes.
-
----
-
-## Quick Reference
-
-```bash
-# Check if servers are running
-bash check-servers.sh
-
-# Start all servers
-bash start-all.sh
-
-# Stop all servers  
-bash stop-all.sh
-
-# View API logs
-tail -f apps/api/logs/api.log
-
-# View status
-lsof -i:8000 -i:3000 -i:5173 | grep LISTEN
-```
+Older instructions in this repo referenced outdated paths and widget port `5173`. Those are no longer the recommended setup.

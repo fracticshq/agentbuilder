@@ -12,7 +12,7 @@ RUN npm ci
 
 COPY apps/widget .
 
-# API URL baked in at build time
+# API URL can still be provided for non-Docker builds, but runtime config is preferred
 ARG VITE_API_BASE_URL=http://localhost:8000
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 
@@ -24,6 +24,11 @@ FROM nginx:1.27-alpine
 
 COPY --from=builder /app/dist /usr/share/nginx/html
 COPY nginx/widget.conf /etc/nginx/conf.d/default.conf
+COPY apps/widget/docker-entrypoint.sh /docker-entrypoint.d/40-runtime-config.sh
+
+ENV API_BASE_URL=http://localhost:8000
+
+RUN chmod +x /docker-entrypoint.d/40-runtime-config.sh
 
 EXPOSE 5174
 

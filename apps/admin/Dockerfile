@@ -14,9 +14,11 @@ RUN npm ci --legacy-peer-deps
 # Copy source and build
 COPY apps/admin .
 
-# API URL is baked in at build time (browser connects to localhost:8000 via port mapping)
+# Runtime config is preferred for deployed environments; build args remain for local builds
 ARG REACT_APP_API_URL=http://localhost:8000
 ENV REACT_APP_API_URL=$REACT_APP_API_URL
+
+ENV GENERATE_SOURCEMAP=false
 
 RUN npm run build
 
@@ -28,6 +30,11 @@ COPY --from=builder /app/build /usr/share/nginx/html
 
 # nginx config: handle React Router (all paths → index.html)
 COPY nginx/admin.conf /etc/nginx/conf.d/default.conf
+COPY apps/admin/docker-entrypoint.sh /docker-entrypoint.d/40-runtime-config.sh
+
+ENV API_BASE_URL=http://localhost:8000
+
+RUN chmod +x /docker-entrypoint.d/40-runtime-config.sh
 
 EXPOSE 3000
 

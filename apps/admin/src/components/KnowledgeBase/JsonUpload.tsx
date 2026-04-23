@@ -141,7 +141,7 @@ export default function JsonUpload({ contentType, onUpload, onBack, brandId = ''
     const items = validationResult.fullData;
 
     if (items.length > 0) {
-      console.log(`[JsonUpload] Passing ${items.length} items to mapper`);
+      process.env.NODE_ENV !== 'production' && console.log(`[JsonUpload] Passing ${items.length} items to mapper`);
       onUpload(items);
     }
   };
