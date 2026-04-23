@@ -4,7 +4,6 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import StepLLMConfig from './StepLLMConfig';
 import { api } from '../../api/client';
-import { useAdminApiKey } from '../../hooks/useAdminApiKey';
 
 jest.mock('../../api/client', () => ({
   api: {
@@ -12,12 +11,7 @@ jest.mock('../../api/client', () => ({
   },
 }));
 
-jest.mock('../../hooks/useAdminApiKey', () => ({
-  useAdminApiKey: jest.fn(),
-}));
-
 const mockGetAzureDeployments = api.getAzureDeployments as jest.Mock;
-const mockUseAdminApiKey = useAdminApiKey as jest.Mock;
 
 function renderStep(initialData?: Partial<React.ComponentProps<typeof StepLLMConfig>['data']>) {
   const queryClient = new QueryClient({
@@ -63,8 +57,6 @@ function renderStep(initialData?: Partial<React.ComponentProps<typeof StepLLMCon
 
 beforeEach(() => {
   mockGetAzureDeployments.mockReset();
-  mockUseAdminApiKey.mockReset();
-  mockUseAdminApiKey.mockReturnValue(true);
 });
 
 test('renders Azure deployments and auto-selects the configured default deployment', async () => {
@@ -163,17 +155,16 @@ test('shows the empty state when no Azure deployments are available', async () =
   });
 });
 
-test('shows admin key guidance instead of a red auth error when no admin key is saved', async () => {
-  mockUseAdminApiKey.mockReturnValue(false);
+test('requests deployments immediately for an authenticated dashboard session', async () => {
+  mockGetAzureDeployments.mockResolvedValue({
+    provider: 'azure_openai',
+    default_deployment: 'gpt-5.4-mini',
+    deployments: [],
+  });
 
   renderStep({ model: 'gpt-5.4-mini' });
 
-  expect(
-    screen.getByText((_, element) =>
-      element?.textContent ===
-      'Save the Admin write access key in the top bar to load Azure deployments. Existing saved deployment values can still be reviewed here.'
-    )
-  ).toBeInTheDocument();
-  expect(screen.queryByText(/Could not load Azure deployments/i)).not.toBeInTheDocument();
-  expect(mockGetAzureDeployments).not.toHaveBeenCalled();
+  await waitFor(() => {
+    expect(mockGetAzureDeployments).toHaveBeenCalledTimes(1);
+  });
 });

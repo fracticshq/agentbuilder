@@ -11,49 +11,117 @@ declare global {
 
 const runtimeConfig = window.__APP_CONFIG__ || {};
 const API_BASE_URL = runtimeConfig.API_BASE_URL || process.env.REACT_APP_API_URL || window.location.origin;
-const ADMIN_API_KEY_STORAGE_KEY = 'agentbuilder.admin_api_key';
-export const ADMIN_API_KEY_CHANGED_EVENT = 'agentbuilder.admin_api_key_changed';
+const AUTH_STORAGE_KEY = 'agentbuilder.auth_session';
+export const AUTH_SESSION_CHANGED_EVENT = 'agentbuilder.auth_session_changed';
 
-function notifyAdminApiKeyChanged(): void {
+export interface AuthUser {
+  id: string;
+  username: string;
+  email: string;
+  full_name?: string | null;
+  role: string;
+  brand_id?: string | null;
+  disabled: boolean;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface AuthSession {
+  accessToken: string;
+  refreshToken?: string | null;
+  expiresAt: number;
+  user?: AuthUser | null;
+}
+
+export interface AuthTokenResponse {
+  access_token: string;
+  refresh_token?: string | null;
+  token_type: string;
+  expires_in: number;
+}
+
+export interface AuthConfigResponse {
+  signup_enabled: boolean;
+  google_enabled: boolean;
+  google_client_id?: string | null;
+}
+
+function notifyAuthSessionChanged(): void {
   if (typeof window === 'undefined') {
     return;
   }
-  window.dispatchEvent(new CustomEvent(ADMIN_API_KEY_CHANGED_EVENT, {
-    detail: { hasKey: hasAdminApiKey() },
+  window.dispatchEvent(new CustomEvent(AUTH_SESSION_CHANGED_EVENT, {
+    detail: { authenticated: isAuthenticated() },
   }));
 }
 
-export function getAdminApiKey(): string {
+export function getStoredAuthSession(): AuthSession | null {
   if (typeof window === 'undefined') {
-    return '';
+    return null;
   }
-  return window.sessionStorage.getItem(ADMIN_API_KEY_STORAGE_KEY) || '';
+  const rawValue = window.localStorage.getItem(AUTH_STORAGE_KEY);
+  if (!rawValue) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawValue) as AuthSession;
+  } catch {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    return null;
+  }
 }
 
-export function hasAdminApiKey(): boolean {
-  return getAdminApiKey().trim().length > 0;
+export function getAccessToken(): string {
+  return getStoredAuthSession()?.accessToken || '';
 }
 
-export function setAdminApiKey(value: string): void {
+export function isAuthenticated(): boolean {
+  const session = getStoredAuthSession();
+  if (!session?.accessToken) {
+    return false;
+  }
+  return session.expiresAt > Date.now();
+}
+
+export function setStoredAuthSession(session: AuthSession): void {
   if (typeof window === 'undefined') {
     return;
   }
-  const trimmedValue = value.trim();
-  if (trimmedValue) {
-    window.sessionStorage.setItem(ADMIN_API_KEY_STORAGE_KEY, trimmedValue);
-    notifyAdminApiKeyChanged();
-    return;
-  }
-  window.sessionStorage.removeItem(ADMIN_API_KEY_STORAGE_KEY);
-  notifyAdminApiKeyChanged();
+  window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session));
+  notifyAuthSessionChanged();
 }
 
-export function clearAdminApiKey(): void {
+export function updateStoredAuthUser(user: AuthUser | null): void {
+  const session = getStoredAuthSession();
+  if (!session) {
+    return;
+  }
+  setStoredAuthSession({
+    ...session,
+    user,
+  });
+}
+
+export function clearStoredAuthSession(): void {
   if (typeof window === 'undefined') {
     return;
   }
-  window.sessionStorage.removeItem(ADMIN_API_KEY_STORAGE_KEY);
-  notifyAdminApiKeyChanged();
+  window.localStorage.removeItem(AUTH_STORAGE_KEY);
+  notifyAuthSessionChanged();
+}
+
+export function createAuthSession(
+  tokenResponse: AuthTokenResponse,
+  user?: AuthUser | null,
+  fallbackRefreshToken?: string | null,
+): AuthSession {
+  return {
+    accessToken: tokenResponse.access_token,
+    refreshToken: tokenResponse.refresh_token || fallbackRefreshToken || null,
+    expiresAt: Date.now() + tokenResponse.expires_in * 1000,
+    user: user || null,
+  };
 }
 
 // Create axios instance
@@ -64,21 +132,78 @@ export const apiClient = axios.create({
   },
 });
 
+const bareHttpClient = axios.create({
+  baseURL: API_BASE_URL,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+
 apiClient.interceptors.request.use((config) => {
-  const adminApiKey = getAdminApiKey();
-  if (adminApiKey) {
+  const accessToken = getAccessToken();
+  if (accessToken) {
     config.headers = config.headers || {};
-    config.headers['X-Admin-Key'] = adminApiKey;
-  } else if (config.headers && 'X-Admin-Key' in config.headers) {
-    delete config.headers['X-Admin-Key'];
+    config.headers.Authorization = `Bearer ${accessToken}`;
+  } else if (config.headers && 'Authorization' in config.headers) {
+    delete config.headers.Authorization;
   }
   return config;
 });
 
+let refreshPromise: Promise<string | null> | null = null;
+
+async function refreshAccessToken(): Promise<string | null> {
+  const session = getStoredAuthSession();
+  if (!session?.refreshToken) {
+    clearStoredAuthSession();
+    return null;
+  }
+
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  refreshPromise = bareHttpClient
+    .post<AuthTokenResponse>('/api/v1/auth/refresh', {
+      refresh_token: session.refreshToken,
+    })
+    .then((response) => {
+      const nextSession = createAuthSession(response.data, session.user || null, session.refreshToken);
+      setStoredAuthSession(nextSession);
+      return nextSession.accessToken;
+    })
+    .catch(() => {
+      clearStoredAuthSession();
+      return null;
+    })
+    .finally(() => {
+      refreshPromise = null;
+    });
+
+  return refreshPromise;
+}
+
 // Add response interceptor for consistent error handling
 apiClient.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
+    const originalRequest = error.config as typeof error.config & { _retry?: boolean };
+
+    if (
+      error.response?.status === 401 &&
+      originalRequest &&
+      !originalRequest._retry &&
+      !String(originalRequest.url || '').includes('/api/v1/auth/')
+    ) {
+      originalRequest._retry = true;
+      const nextAccessToken = await refreshAccessToken();
+      if (nextAccessToken) {
+        originalRequest.headers = originalRequest.headers || {};
+        originalRequest.headers.Authorization = `Bearer ${nextAccessToken}`;
+        return apiClient(originalRequest);
+      }
+    }
+
     const apiError = handleApiError(error);
     return Promise.reject(apiError);
   }
@@ -269,6 +394,38 @@ export interface RuntimeSettingsTestResponse {
   }>;
 }
 
+export interface AuthRequest {
+  email: string;
+  password: string;
+  full_name?: string;
+}
+
+export const authApi = {
+  getConfig: () => bareHttpClient.get<AuthConfigResponse>('/api/v1/auth/config'),
+  login: (data: AuthRequest) =>
+    bareHttpClient.post<AuthTokenResponse>('/api/v1/auth/login', {
+      username: data.email,
+      password: data.password,
+    }),
+  register: (data: AuthRequest) =>
+    bareHttpClient.post<AuthUser>('/api/v1/auth/register', {
+      email: data.email,
+      password: data.password,
+      full_name: data.full_name,
+    }),
+  me: () => apiClient.get<AuthUser>('/api/v1/auth/me'),
+  logout: () => apiClient.post('/api/v1/auth/logout'),
+  forgotPassword: (email: string) =>
+    bareHttpClient.post<{ message: string; reset_url?: string | null }>('/api/v1/auth/forgot-password', { email }),
+  resetPassword: (token: string, newPassword: string) =>
+    bareHttpClient.post<{ message: string }>('/api/v1/auth/reset-password', {
+      token,
+      new_password: newPassword,
+    }),
+  google: (credential: string) =>
+    bareHttpClient.post<AuthTokenResponse>('/api/v1/auth/google', { credential }),
+};
+
 // Brand API
 export const brandApi = {
   list: () => apiClient.get<Brand[]>('/api/v1/admin/brands/'),
@@ -295,10 +452,6 @@ export const agentApi = {
 export const llmApi = {
   getAzureDeployments: () =>
     apiClient.get<AzureOpenAIDeploymentsResponse>('/api/v1/admin/llm/azure/deployments'),
-};
-
-export const adminSessionApi = {
-  validate: () => apiClient.get<{ authorized: true }>('/api/v1/admin/session/validate'),
 };
 
 export const runtimeSettingsApi = {

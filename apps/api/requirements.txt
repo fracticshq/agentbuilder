@@ -29,6 +29,7 @@ openai>=1.23.6
 python-dotenv>=1.0.1
 azure-identity>=1.15.0
 azure-keyvault-secrets>=4.8.0
+google-auth>=2.38.0
 
 # Additional utilities
 aiofiles>=23.2.1

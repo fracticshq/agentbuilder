@@ -111,7 +111,7 @@ function App({ config }: AppProps) {
     if (scriptTag?.dataset.agentId) { setAgentId(scriptTag.dataset.agentId); return; }
 
     // Fallback: first available agent
-    fetch(`${API_BASE}/api/v1/admin/agents/`)
+    fetch(`${API_BASE}/api/v1/public/agents`)
       .then(r => r.ok ? r.json() : [])
       .then(agents => { if (agents.length > 0) setAgentId(agents[0].id); })
       .catch(() => {});
@@ -124,7 +124,7 @@ function App({ config }: AppProps) {
     const fetchBrandTheme = async () => {
       try {
         // 1. Get agent → extract brand_id
-        const agentRes = await fetch(`${API_BASE}/api/v1/admin/agents/${agentId}`);
+        const agentRes = await fetch(`${API_BASE}/api/v1/public/agents/${agentId}`);
         if (!agentRes.ok) return;
         const agent = await agentRes.json();
         const brandId: string | undefined = agent.brand_id;
@@ -136,7 +136,7 @@ function App({ config }: AppProps) {
         if (!brandId) return;
 
         // 2. Get brand → extract colors / identity
-        const brandRes = await fetch(`${API_BASE}/api/v1/admin/brands/${brandId}`);
+        const brandRes = await fetch(`${API_BASE}/api/v1/public/brands/${brandId}`);
         if (!brandRes.ok) return;
         const brand = await brandRes.json();
 

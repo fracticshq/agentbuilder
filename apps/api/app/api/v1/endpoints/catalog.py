@@ -22,12 +22,12 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from pydantic import BaseModel
 import structlog
 
-from app.auth.admin_key import require_admin_key
+from app.auth.dependencies import require_dashboard_access
 from app.connections import connection_manager
 from app.services import catalog_service
 
 logger = structlog.get_logger()
-router = APIRouter(dependencies=[Depends(require_admin_key)])
+router = APIRouter(dependencies=[Depends(require_dashboard_access)])
 
 
 def _firecrawl_key() -> str:

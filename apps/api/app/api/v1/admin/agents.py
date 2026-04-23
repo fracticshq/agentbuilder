@@ -6,10 +6,10 @@ from datetime import datetime
 import structlog
 
 from app.connections import connection_manager, get_system_db
-from app.auth.admin_key import require_admin_key
+from app.auth.dependencies import require_dashboard_access
 
 logger = structlog.get_logger()
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_dashboard_access)])
 
 # Pydantic models for request/response
 class AgentBase(BaseModel):
@@ -79,7 +79,7 @@ async def get_agent(agent_id: str):
         logger.error("Failed to get agent", agent_id=agent_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to get agent: {str(e)}")
 
-@router.post("/", response_model=Agent, dependencies=[Depends(require_admin_key)])
+@router.post("/", response_model=Agent)
 async def create_agent(agent: AgentCreate):
     """Create a new agent."""
     try:
@@ -126,7 +126,7 @@ async def create_agent(agent: AgentCreate):
         logger.error("Failed to create agent", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
 
-@router.put("/{agent_id}", response_model=Agent, dependencies=[Depends(require_admin_key)])
+@router.put("/{agent_id}", response_model=Agent)
 async def update_agent(agent_id: str, agent_update: AgentUpdate):
     """Update an existing agent."""
     try:
@@ -162,7 +162,7 @@ async def update_agent(agent_id: str, agent_update: AgentUpdate):
         logger.error("Failed to update agent", agent_id=agent_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to update agent: {str(e)}")
 
-@router.delete("/{agent_id}", dependencies=[Depends(require_admin_key)])
+@router.delete("/{agent_id}")
 async def delete_agent(agent_id: str):
     """Delete an agent."""
     try:

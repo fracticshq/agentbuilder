@@ -7,18 +7,20 @@ from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 from datetime import datetime
 
+from ....config import Settings
 from ....auth.models import User, UserRole
 from ....auth.password import hash_password, validate_password_strength
 from ....auth.dependencies import get_db
+from ....auth.service import generate_unique_username, is_signup_open, resolve_signup_role
 
 router = APIRouter()
 
 
 class RegisterRequest(BaseModel):
     """User registration request."""
-    username: str = Field(..., min_length=3, max_length=50)
     email: EmailStr
     password: str = Field(..., min_length=8)
+    username: Optional[str] = Field(default=None, min_length=3, max_length=50)
     full_name: Optional[str] = None
     brand_id: Optional[str] = None
 
@@ -48,6 +50,13 @@ async def register_user(
     - **full_name**: Optional full name
     - **brand_id**: Optional brand association (for brand-specific users)
     """
+    settings = Settings()
+    if not await is_signup_open(db, settings):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public signup is disabled. Ask an administrator to create your account."
+        )
+
     # Validate password strength
     is_valid, error_msg = validate_password_strength(request.password)
     if not is_valid:
@@ -57,12 +66,13 @@ async def register_user(
         )
     
     # Check if username already exists
-    existing_user = await db.users.find_one({"username": request.username})
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already registered"
-        )
+    if request.username:
+        existing_user = await db.users.find_one({"username": request.username})
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username already registered"
+            )
     
     # Check if email already exists
     existing_email = await db.users.find_one({"email": request.email})
@@ -72,16 +82,19 @@ async def register_user(
             detail="Email already registered"
         )
     
+    username = await generate_unique_username(db, request.email, request.username)
+    role = await resolve_signup_role(db)
+
     # Hash password
     password_hash = hash_password(request.password)
     
     # Create user document
     user_doc = {
-        "username": request.username,
+        "username": username,
         "email": request.email,
         "password_hash": password_hash,
         "full_name": request.full_name,
-        "role": UserRole.USER.value,  # Default role
+        "role": role.value,
         "brands": [request.brand_id] if request.brand_id else [],
         "is_active": True,
         "is_verified": False,
@@ -100,9 +113,9 @@ async def register_user(
     # Return response
     return RegisterResponse(
         id=user_doc["id"],
-        username=user_doc["username"],
+        username=username,
         email=user_doc["email"],
         full_name=user_doc.get("full_name"),
-        role=UserRole(user_doc["role"]),
+        role=role,
         created_at=user_doc["created_at"]
     )

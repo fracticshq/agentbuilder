@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.v1.admin.llm import router
+from app.auth.dependencies import get_db, require_dashboard_access
 from app.dependencies import get_settings
 from app.services.azure_openai_deployment_service import (
     AzureDeploymentAuthError,
@@ -31,6 +32,7 @@ def build_test_client(settings):
     app = FastAPI()
     app.include_router(router, prefix="/api/v1/admin/llm")
     app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_db] = lambda: object()
     return TestClient(app)
 
 
@@ -82,22 +84,20 @@ async def test_service_filters_non_succeeded_deployments(monkeypatch):
     assert response["deployments"][0]["model_name"] == "gpt-4.1-mini"
 
 
-def test_route_rejects_missing_admin_key():
+def test_route_rejects_missing_dashboard_auth():
     client = build_test_client(build_settings())
 
     response = client.get("/api/v1/admin/llm/azure/deployments")
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "X-Admin-Key header required"
+    assert response.json()["detail"] == "Authentication required"
 
 
 def test_route_returns_503_when_arm_config_missing():
     client = build_test_client(build_settings(AZURE_SUBSCRIPTION_ID=""))
+    client.app.dependency_overrides[require_dashboard_access] = lambda: None
 
-    response = client.get(
-        "/api/v1/admin/llm/azure/deployments",
-        headers={"X-Admin-Key": "test-admin-key"},
-    )
+    response = client.get("/api/v1/admin/llm/azure/deployments")
 
     assert response.status_code == 503
     assert "AZURE_SUBSCRIPTION_ID" in response.json()["detail"]
@@ -105,16 +105,14 @@ def test_route_returns_503_when_arm_config_missing():
 
 def test_route_returns_503_for_auth_failures(monkeypatch):
     client = build_test_client(build_settings())
+    client.app.dependency_overrides[require_dashboard_access] = lambda: None
 
     async def fake_list_deployments(self):
         raise AzureDeploymentAuthError("Failed to acquire Azure management token.")
 
     monkeypatch.setattr(AzureOpenAIDeploymentService, "list_deployments", fake_list_deployments)
 
-    response = client.get(
-        "/api/v1/admin/llm/azure/deployments",
-        headers={"X-Admin-Key": "test-admin-key"},
-    )
+    response = client.get("/api/v1/admin/llm/azure/deployments")
 
     assert response.status_code == 503
     assert "Failed to acquire Azure management token" in response.json()["detail"]
@@ -122,16 +120,14 @@ def test_route_returns_503_for_auth_failures(monkeypatch):
 
 def test_route_returns_502_for_arm_request_failures(monkeypatch):
     client = build_test_client(build_settings())
+    client.app.dependency_overrides[require_dashboard_access] = lambda: None
 
     async def fake_list_deployments(self):
         raise AzureDeploymentRequestError("Azure ARM request failed with status 403.")
 
     monkeypatch.setattr(AzureOpenAIDeploymentService, "list_deployments", fake_list_deployments)
 
-    response = client.get(
-        "/api/v1/admin/llm/azure/deployments",
-        headers={"X-Admin-Key": "test-admin-key"},
-    )
+    response = client.get("/api/v1/admin/llm/azure/deployments")
 
     assert response.status_code == 502
     assert "Azure ARM request failed" in response.json()["detail"]

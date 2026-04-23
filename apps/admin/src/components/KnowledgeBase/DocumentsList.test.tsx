@@ -1,38 +1,60 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import DocumentsList from './DocumentsList';
 import { knowledgeApi } from '../../api/knowledge';
-import { useAdminApiKey } from '../../hooks/useAdminApiKey';
 
 jest.mock('../../api/knowledge', () => ({
   knowledgeApi: {
     getDocuments: jest.fn(),
+    deleteDocument: jest.fn(),
   },
 }));
 
-jest.mock('../../hooks/useAdminApiKey', () => ({
-  useAdminApiKey: jest.fn(),
-}));
-
 const mockGetDocuments = knowledgeApi.getDocuments as jest.Mock;
-const mockUseAdminApiKey = useAdminApiKey as jest.Mock;
 
 beforeEach(() => {
   mockGetDocuments.mockReset();
-  mockUseAdminApiKey.mockReset();
-  mockUseAdminApiKey.mockReturnValue(true);
 });
 
-test('shows admin key guidance instead of an auth error when no admin key is saved', async () => {
-  mockUseAdminApiKey.mockReturnValue(false);
+test('loads and renders uploaded documents for the authenticated dashboard', async () => {
+  mockGetDocuments.mockResolvedValue([
+    {
+      doc_id: 'doc-1',
+      title: 'Essco Shower Catalog',
+      content_type: 'product',
+      chunks_count: 12,
+      item_count: 5,
+      created_at: '2026-04-23T00:00:00Z',
+    },
+  ]);
 
-  render(<DocumentsList brandId="essco-bathware" />);
+  render(<DocumentsList brandId="brand-123" />);
+
+  expect(screen.getByText(/Loading documents/i)).toBeInTheDocument();
 
   await waitFor(() => {
-    expect(screen.getByText(/Admin write access key required/i)).toBeInTheDocument();
+    expect(screen.getByText('Essco Shower Catalog')).toBeInTheDocument();
   });
 
-  expect(screen.getByText(/Save the admin key in the top bar to load and manage knowledge base documents/i)).toBeInTheDocument();
-  expect(mockGetDocuments).not.toHaveBeenCalled();
+  expect(mockGetDocuments).toHaveBeenCalledWith('brand-123', undefined);
+});
+
+test('shows an error state and lets the operator retry', async () => {
+  mockGetDocuments
+    .mockRejectedValueOnce(new Error('Authentication required'))
+    .mockResolvedValueOnce([]);
+
+  render(<DocumentsList brandId="brand-123" contentType="faq" />);
+
+  await waitFor(() => {
+    expect(screen.getByText(/Error loading documents/i)).toBeInTheDocument();
+    expect(screen.getByText(/Authentication required/i)).toBeInTheDocument();
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: /Try again/i }));
+
+  await waitFor(() => {
+    expect(mockGetDocuments).toHaveBeenCalledTimes(2);
+  });
 });
