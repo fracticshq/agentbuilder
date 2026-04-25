@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -87,6 +89,25 @@ class RuntimeSettingsService:
             value = str(value)
         trimmed = value.strip()
         return trimmed or None
+
+    def _normalize_container_base_url(self, value: str | None) -> str:
+        """Rewrite local loopback URLs so sibling containers can reach host services."""
+        if not value:
+            return ""
+
+        parsed = urlparse(value)
+        if not parsed.hostname:
+            return value
+
+        is_container_runtime = Path("/.dockerenv").exists()
+        if not is_container_runtime:
+            return value
+
+        if parsed.hostname not in {"localhost", "127.0.0.1", "0.0.0.0"}:
+            return value
+
+        netloc = parsed.netloc.replace(parsed.hostname, "host.docker.internal", 1)
+        return urlunparse(parsed._replace(netloc=netloc))
 
     def _setting_env_value(self, definition: RuntimeSettingDefinition) -> str | None:
         if not definition.env_var:
@@ -373,8 +394,9 @@ class RuntimeSettingsService:
         overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         values = await self.get_effective_values(overrides=overrides)
+        base_url = self._normalize_container_base_url(values.get("strapi.url") or "")
         return {
-            "base_url": values.get("strapi.url") or "",
+            "base_url": base_url,
             "api_token": values.get("strapi.api_token") or "",
         }
 

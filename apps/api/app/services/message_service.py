@@ -265,6 +265,17 @@ class MessageService:
             critic=self.response_validator,
             system_prompt=self.system_prompt,
         )
+
+        strapi_runtime_config = await self.runtime_settings_service.get_strapi_runtime_config()
+        self.strapi = StrapiClient(
+            base_url=strapi_runtime_config.get("base_url") or "",
+            api_token=strapi_runtime_config.get("api_token") or "",
+        )
+        logger.info(
+            "strapi_client_configured",
+            base_url=strapi_runtime_config.get("base_url") or "",
+            enabled=bool(strapi_runtime_config.get("base_url") and strapi_runtime_config.get("api_token")),
+        )
     
     async def _initialize_brand_database(self, agent_id: str):
         """Initialize brand-specific database and memory system."""
@@ -568,6 +579,14 @@ class MessageService:
                     "captured_ids": agent_result.metadata.get("captured_ids"),
                     "last_searched": agent_result.metadata.get("last_searched"),
                 }
+            )
+
+            self.strapi.sync_conversation(
+                conversation_id=conversation_id,
+                user_message=request.message,
+                assistant_message=response_text,
+                brand_slug=self.brand_id,
+                agent_id=agent_id,
             )
             
             # 6. Extract Facts & Auto-Summary (Async)

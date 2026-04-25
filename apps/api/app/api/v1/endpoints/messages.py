@@ -9,10 +9,12 @@ from sse_starlette.sse import EventSourceResponse
 import json
 import asyncio
 import structlog
+from urllib.parse import urlparse
 
 from commons.types.requests import MessageRequest
 from commons.types.responses import MessageResponse, StreamingMessageResponse
 from ....auth.admin_key import is_admin_key_authorized
+from ....connections import connection_manager
 from ....dependencies import get_message_service, get_settings
 from ....security.rate_limiter import check_rate_limit
 from ....services.message_service import MessageService
@@ -51,6 +53,43 @@ async def _enforce_websocket_rate_limit(websocket: WebSocket, endpoint: str) -> 
         await _close_websocket(websocket, "Rate limit exceeded")
         return False
     return True
+
+
+async def _get_agent_brand_slug(agent_id: str | None) -> str | None:
+    if not agent_id:
+        return None
+
+    try:
+        system_db = connection_manager.get_system_db()
+        agent = await system_db.agents.find_one({"id": agent_id}, {"brand_slug": 1})
+    except Exception as exc:
+        logger.warning("agent_brand_lookup_failed", agent_id=agent_id, error=str(exc))
+        return None
+
+    brand_slug = agent.get("brand_slug") if agent else None
+    return brand_slug or None
+
+
+def _origin_matches_base_url(origin: str | None, base_url: str | None) -> bool:
+    if not origin or not base_url:
+        return False
+
+    try:
+        origin_parts = urlparse(origin)
+        base_parts = urlparse(base_url)
+    except Exception:
+        return False
+
+    if not origin_parts.hostname or not base_parts.hostname:
+        return False
+
+    origin_port = origin_parts.port or (443 if origin_parts.scheme == "https" else 80)
+    base_port = base_parts.port or (443 if base_parts.scheme == "https" else 80)
+    return (
+        origin_parts.scheme == base_parts.scheme
+        and origin_parts.hostname == base_parts.hostname
+        and origin_port == base_port
+    )
 
 
 @router.post("/", response_model=MessageResponse)
@@ -163,11 +202,25 @@ async def admin_websocket_endpoint(
         return
     settings = get_settings()
     if not settings.ENABLE_HUMAN_TAKEOVER:
+        logger.warning(
+            "admin_websocket_rejected_human_takeover_disabled",
+            conversation_id=conversation_id,
+        )
         await _close_websocket(websocket, "Human takeover is disabled")
         return
 
     admin_key = websocket.headers.get("x-admin-key") or websocket.query_params.get("admin_key")
-    if not is_admin_key_authorized(admin_key, settings):
+    trusted_strapi_origin = (
+        not settings.is_production
+        and _origin_matches_base_url(websocket.headers.get("origin"), settings.STRAPI_URL)
+    )
+    if not is_admin_key_authorized(admin_key, settings) and not trusted_strapi_origin:
+        logger.warning(
+            "admin_websocket_rejected_invalid_admin_key",
+            conversation_id=conversation_id,
+            origin=websocket.headers.get("origin"),
+            has_admin_key=bool(admin_key),
+        )
         await _close_websocket(websocket, "Invalid admin key")
         return
 
@@ -247,7 +300,7 @@ async def admin_websocket_endpoint(
                 await ws_manager.buffer_takeover_message(conversation_id, "assistant", content)
                 # Persist to Strapi (role 'agent' matches Strapi convention)
                 agent_id = await ws_manager.get_agent_id(conversation_id)
-                brand_slug = message_service.brand_id if message_service.brand_id != "default-brand" else None
+                brand_slug = await _get_agent_brand_slug(agent_id)
                 message_service.strapi.save_message(
                     conversation_id,
                     content,
@@ -281,6 +334,11 @@ async def widget_control_channel(
         return
     settings = get_settings()
     if not settings.ENABLE_HUMAN_TAKEOVER:
+        logger.warning(
+            "widget_control_rejected_human_takeover_disabled",
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+        )
         await _close_websocket(websocket, "Human takeover is disabled")
         return
 
@@ -292,6 +350,12 @@ async def widget_control_channel(
         control_secret,
     )
     if not is_authorized:
+        logger.warning(
+            "widget_control_rejected_unauthorized",
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            control_secret_length=len(control_secret),
+        )
         await _close_websocket(websocket, "Unauthorized widget control channel")
         return
 
@@ -329,7 +393,7 @@ async def widget_control_channel(
                     # Buffer for memory injection on release
                     await ws_manager.buffer_takeover_message(conversation_id, "user", content)
                     # Persist to Strapi
-                    brand_slug = message_service.brand_id if message_service.brand_id != "default-brand" else None
+                    brand_slug = await _get_agent_brand_slug(agent_id or None)
                     message_service.strapi.save_message(
                         conversation_id,
                         content,
