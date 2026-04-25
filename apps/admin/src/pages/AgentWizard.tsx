@@ -77,6 +77,7 @@ interface AgentData {
   // Features
   websockets: boolean;
   file_upload: boolean;
+  human_takeover: boolean;
   conversation_memory: boolean;
   typing_indicators: boolean;
   response_streaming: boolean;
@@ -135,6 +136,7 @@ const initialData: AgentData = {
   // Features
   websockets: true,
   file_upload: false,
+  human_takeover: true,
   conversation_memory: true,
   typing_indicators: true,
   response_streaming: true,
@@ -342,6 +344,7 @@ export default function AgentWizard() {
         // Features - with file_upload details
         websockets: features.websockets ?? true,
         file_upload: features.file_upload?.enabled ?? features.file_upload ?? false,
+        human_takeover: features.human_takeover ?? false,
         conversation_memory: features.conversation_memory ?? true,
         typing_indicators: features.typing_indicators ?? true,
         response_streaming: features.response_streaming ?? true,
@@ -509,6 +512,7 @@ export default function AgentWizard() {
               enabled: false,
             },
             conversation_memory: agentData.conversation_memory,
+            human_takeover: agentData.human_takeover,
             typing_indicators: agentData.typing_indicators,
             response_streaming: agentData.response_streaming,
           },

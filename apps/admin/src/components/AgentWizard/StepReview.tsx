@@ -84,6 +84,7 @@ export default function StepReview({
           max_size_mb: data.max_file_size
         } : { enabled: false },
         conversation_memory: data.conversation_memory,
+        human_takeover: data.human_takeover,
         typing_indicators: data.typing_indicators,
         response_streaming: data.response_streaming
       },
@@ -286,6 +287,7 @@ export default function StepReview({
             <div className="mt-1 text-sm text-gray-600">
               <p><strong>RAG:</strong> {data.rag_enabled ? 'Enabled' : 'Disabled'}</p>
               <p><strong>File Upload:</strong> {data.file_upload ? 'Enabled' : 'Disabled'}</p>
+              <p><strong>Human Takeover:</strong> {data.human_takeover ? 'Enabled' : 'Disabled'}</p>
               <p><strong>Memory:</strong> {data.conversation_memory ? 'Enabled' : 'Disabled'}</p>
             </div>
           </div>

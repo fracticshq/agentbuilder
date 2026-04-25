@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import uuid
 from typing import Dict, Set, Optional
 
 import structlog
@@ -47,6 +48,8 @@ def _channel(conversation_id: str, target: str) -> str:
 
 class ConnectionManager:
     def __init__(self):
+        self._instance_id = str(uuid.uuid4())
+
         # Local (per-process) WebSocket registries
         self.widget_connections: Dict[str, Set[WebSocket]] = {}
         self.admin_connections:  Dict[str, Set[WebSocket]] = {}
@@ -74,7 +77,10 @@ class ConnectionManager:
         if not r:
             return False
         try:
-            await r.publish(channel, json.dumps(message))
+            await r.publish(channel, json.dumps({
+                "origin": self._instance_id,
+                "message": message,
+            }))
             return True
         except Exception as e:
             logger.warning("redis_publish_failed", channel=channel, error=str(e))
@@ -116,6 +122,14 @@ class ConnectionManager:
                 try:
                     data = json.loads(raw["data"])
                 except (json.JSONDecodeError, TypeError):
+                    continue
+
+                if isinstance(data, dict) and "message" in data:
+                    if data.get("origin") == self._instance_id:
+                        continue
+                    data = data.get("message")
+
+                if not isinstance(data, dict):
                     continue
 
                 registry = (
@@ -202,18 +216,15 @@ class ConnectionManager:
         """
         Deliver message to all widget connections for this conversation,
         across all API instances via Redis pub/sub.
-        Falls back to direct local send if Redis is unavailable.
+        Local delivery happens immediately; Redis fans out to other instances.
         """
-        published = await self._publish(_channel(conversation_id, "widget"), message)
-        if not published:
-            # Redis unavailable — deliver to local connections directly
-            await self._send_local(self.widget_connections, conversation_id, message)
+        await self._send_local(self.widget_connections, conversation_id, message)
+        await self._publish(_channel(conversation_id, "widget"), message)
 
     async def send_to_admin(self, conversation_id: str, message: dict):
         """Same as send_to_widget but for admin connections."""
-        published = await self._publish(_channel(conversation_id, "admin"), message)
-        if not published:
-            await self._send_local(self.admin_connections, conversation_id, message)
+        await self._send_local(self.admin_connections, conversation_id, message)
+        await self._publish(_channel(conversation_id, "admin"), message)
 
     # ── shared state — Redis hash with local fallback ────────────────────────
 

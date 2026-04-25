@@ -20,6 +20,7 @@ services:
       REQUIRE_REDIS: "${REQUIRE_REDIS:-false}"
       ENABLE_HUMAN_TAKEOVER: "${ENABLE_HUMAN_TAKEOVER:-true}"
       ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+      STRAPI_URL: "${DOCKER_STRAPI_URL:-http://host.docker.internal:1337}"
     depends_on:
       mongodb:
         condition: service_healthy
