@@ -16,30 +16,29 @@ from typing import Any, Dict, List, Optional
 import httpx
 import structlog
 
+from .job_store import JobStore
+
 logger = structlog.get_logger()
 
-# ── In-memory job store (same pattern as ingestion_service.py) ────────────────
-_jobs: Dict[str, Dict[str, Any]] = {}
+_job_store = JobStore()
 
 
-def create_job(job_id: str, job_type: str) -> Dict[str, Any]:
-    job: Dict[str, Any] = {
+async def create_job(job_id: str, job_type: str, total: int = 0) -> None:
+    await _job_store.set(job_id, {
         "job_id": job_id,
         "type": job_type,
         "status": "processing",
         "processed": 0,
-        "total": 0,
+        "total": total,
         "items": [],
         "results": [],
         "error": None,
         "created_at": datetime.utcnow().isoformat(),
-    }
-    _jobs[job_id] = job
-    return job
+    })
 
 
-def get_job(job_id: str) -> Optional[Dict[str, Any]]:
-    return _jobs.get(job_id)
+async def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    return await _job_store.get(job_id)
 
 
 # ── Format detection ──────────────────────────────────────────────────────────
@@ -213,8 +212,7 @@ async def fetch_shopify_products(
     job_id: str,
 ) -> None:
     """Background task: paginate Shopify /products.json and store results in job."""
-    job = _jobs.get(job_id)
-    if not job:
+    if not await _job_store.get(job_id):
         return
 
     base = store_url.strip().rstrip("/")
@@ -286,8 +284,7 @@ async def fetch_shopify_products(
 
                 batch = _normalize_shopify(data, base_url=base)
                 all_items.extend(batch)
-                job["processed"] = len(all_items)
-                job["total"] = max(job["total"], len(all_items))
+                await _job_store.update(job_id, {"processed": len(all_items), "total": len(all_items)})
 
                 # Cursor-based pagination via Link header
                 link = resp.headers.get("Link", "")
@@ -298,14 +295,11 @@ async def fetch_shopify_products(
                 else:
                     break
 
-        job["items"] = all_items
-        job["status"] = "completed"
-        job["total"] = len(all_items)
+        await _job_store.update(job_id, {"items": all_items, "status": "completed", "total": len(all_items)})
         logger.info("shopify_fetch_complete", items=len(all_items))
 
     except Exception as exc:
-        job["status"] = "error"
-        job["error"] = str(exc)
+        await _job_store.update(job_id, {"status": "error", "error": str(exc)})
         logger.error("shopify_fetch_failed", error=str(exc))
 
 
@@ -349,15 +343,13 @@ def parse_csv(content: str) -> List[dict]:
 
 async def run_firecrawl_scrape(urls: List[str], job_id: str, api_key: str) -> None:
     """Background task: Firecrawl-extract product data from each URL."""
-    job = _jobs.get(job_id)
-    if not job:
+    if not await _job_store.get(job_id):
         return
 
     try:
         from firecrawl import V1FirecrawlApp, V1JsonConfig  # type: ignore
     except ImportError:
-        job["status"] = "error"
-        job["error"] = "firecrawl-py is not installed. Run: pip install firecrawl-py"
+        await _job_store.update(job_id, {"status": "error", "error": "firecrawl-py is not installed. Run: pip install firecrawl-py"})
         return
 
     extraction_schema = {
@@ -396,7 +388,7 @@ async def run_firecrawl_scrape(urls: List[str], job_id: str, api_key: str) -> No
     per_url: List[dict] = []
 
     for i, url in enumerate(urls):
-        job["processed"] = i
+        await _job_store.update(job_id, {"processed": i})
         try:
             extract_cfg = V1JsonConfig(
                 schema_field=extraction_schema,
@@ -495,9 +487,11 @@ async def run_firecrawl_scrape(urls: List[str], job_id: str, api_key: str) -> No
             logger.error("firecrawl_url_error", url=url, error=str(exc))
             per_url.append({"url": url, "status": "error", "error": str(exc), "item_count": 0})
 
-    job["items"] = all_items
-    job["results"] = per_url
-    job["status"] = "completed"
-    job["processed"] = len(urls)
-    job["total"] = len(urls)
+    await _job_store.update(job_id, {
+        "items": all_items,
+        "results": per_url,
+        "status": "completed",
+        "processed": len(urls),
+        "total": len(urls),
+    })
     logger.info("firecrawl_scrape_complete", urls=len(urls), items=len(all_items))

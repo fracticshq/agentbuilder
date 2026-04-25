@@ -6,9 +6,10 @@ from datetime import datetime
 import structlog
 
 from app.connections import connection_manager, get_system_db
+from app.auth.dependencies import require_dashboard_access
 
 logger = structlog.get_logger()
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_dashboard_access)])
 
 # Pydantic models for request/response
 class BrandBase(BaseModel):

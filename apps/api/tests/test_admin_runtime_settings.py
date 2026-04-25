@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.v1.admin.settings import router
+from app.auth.dependencies import get_db, require_dashboard_access
 from app.dependencies import get_runtime_settings_service, get_settings
 from app.services.runtime_settings_service import (
     RuntimeSettingsService,
@@ -95,6 +96,7 @@ def build_test_client(settings, runtime_settings_service):
     app.include_router(router, prefix="/api/v1/admin/settings")
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_runtime_settings_service] = lambda: runtime_settings_service
+    app.dependency_overrides[get_db] = lambda: object()
     return TestClient(app)
 
 
@@ -134,22 +136,20 @@ async def test_update_settings_rejects_unknown_keys():
         await service.update_settings({"unknown.setting": "value"})
 
 
-def test_route_rejects_missing_admin_key():
+def test_route_rejects_missing_dashboard_auth():
     client = build_test_client(build_settings(), FakeRuntimeSettingsService())
 
     response = client.get("/api/v1/admin/settings/runtime")
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "X-Admin-Key header required"
+    assert response.json()["detail"] == "Authentication required"
 
 
-def test_route_returns_runtime_settings():
+def test_route_returns_runtime_settings_for_authenticated_dashboard_user():
     client = build_test_client(build_settings(), FakeRuntimeSettingsService())
+    client.app.dependency_overrides[require_dashboard_access] = lambda: None
 
-    response = client.get(
-        "/api/v1/admin/settings/runtime",
-        headers={"X-Admin-Key": "test-admin-key"},
-    )
+    response = client.get("/api/v1/admin/settings/runtime")
 
     assert response.status_code == 200
     payload = response.json()
@@ -158,10 +158,10 @@ def test_route_returns_runtime_settings():
 
 def test_route_updates_runtime_settings():
     client = build_test_client(build_settings(), FakeRuntimeSettingsService())
+    client.app.dependency_overrides[require_dashboard_access] = lambda: None
 
     response = client.put(
         "/api/v1/admin/settings/runtime",
-        headers={"X-Admin-Key": "test-admin-key"},
         json={"updates": {"azure_openai.endpoint": "https://example.openai.azure.com/"}},
     )
 
@@ -171,10 +171,10 @@ def test_route_updates_runtime_settings():
 
 def test_route_tests_runtime_settings_connections():
     client = build_test_client(build_settings(), FakeRuntimeSettingsService())
+    client.app.dependency_overrides[require_dashboard_access] = lambda: None
 
     response = client.post(
         "/api/v1/admin/settings/runtime/test",
-        headers={"X-Admin-Key": "test-admin-key"},
         json={"sections": ["azure_openai"]},
     )
 

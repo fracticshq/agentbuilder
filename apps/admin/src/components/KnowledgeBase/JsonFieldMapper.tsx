@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { ArrowRightIcon, CheckCircleIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 
+const isDev = process.env.NODE_ENV !== 'production';
+
 interface JsonFieldMapperProps {
   jsonData: any[];
   contentType: 'product' | 'dealer';
@@ -260,7 +262,7 @@ export default function JsonFieldMapper({
   const handleConfirm = () => {
     if (errors.length > 0) return;
 
-    console.log('[JsonFieldMapper] handleConfirm - Starting mapping with config:', mapping);
+    isDev && console.log('[JsonFieldMapper] handleConfirm - Starting mapping with config:', mapping);
 
     const mappedData = jsonData.map((item, idx) => {
       const newItem: any = {};
@@ -280,20 +282,20 @@ export default function JsonFieldMapper({
           newItem[field] = parsedValue;
 
           if (idx === 0) {
-            console.log(`[JsonFieldMapper] Fixed field "${field}": "${config.value}" → type: ${typeof parsedValue}, value:`, parsedValue);
+            isDev && console.log(`[JsonFieldMapper] Fixed field "${field}": "${config.value}" → type: ${typeof parsedValue}, value:`, parsedValue);
           }
         }
       });
 
       if (idx === 0) {
-        console.log('[JsonFieldMapper] First mapped item:', newItem);
+        isDev && console.log('[JsonFieldMapper] First mapped item:', newItem);
       }
 
       return newItem;
     });
 
-    console.log('[JsonFieldMapper] Total mapped items:', mappedData.length);
-    console.log('[JsonFieldMapper] Sample mapped data:', mappedData.slice(0, 2));
+    isDev && console.log('[JsonFieldMapper] Total mapped items:', mappedData.length);
+    isDev && console.log('[JsonFieldMapper] Sample mapped data:', mappedData.slice(0, 2));
 
     onMappingComplete(mappedData);
   };

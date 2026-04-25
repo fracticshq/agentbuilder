@@ -19,6 +19,7 @@ import {
   isAzureOpenAIProvider,
 } from '../utils/llmOptions';
 
+const isDev = process.env.NODE_ENV !== 'production';
 
 type StepStatus = 'complete' | 'current' | 'upcoming';
 
@@ -76,6 +77,7 @@ interface AgentData {
   // Features
   websockets: boolean;
   file_upload: boolean;
+  human_takeover: boolean;
   conversation_memory: boolean;
   typing_indicators: boolean;
   response_streaming: boolean;
@@ -134,6 +136,7 @@ const initialData: AgentData = {
   // Features
   websockets: true,
   file_upload: false,
+  human_takeover: true,
   conversation_memory: true,
   typing_indicators: true,
   response_streaming: true,
@@ -225,7 +228,7 @@ export default function AgentWizard() {
     if (id && existingAgent) {
       const loadDocuments = async () => {
         try {
-          console.log('📄 Loading documents for agent:', id);
+          isDev && console.log('📄 Loading documents for agent:', id);
 
           // Resolve agent -> brand_slug first
           // Agent might have brand_slug in response or just brand_id
@@ -235,13 +238,13 @@ export default function AgentWizard() {
             return;
           }
 
-          console.log('🔍 Using brand_slug for document query:', brandSlug);
+          isDev && console.log('🔍 Using brand_slug for document query:', brandSlug);
 
           // Use the new knowledge API endpoint
           const { knowledgeApi } = await import('../api/knowledge');
           const docs = await knowledgeApi.getDocuments(brandSlug);
 
-          console.log('📦 Raw documents from API:', docs);
+          isDev && console.log('📦 Raw documents from API:', docs);
 
           // Map documents to wizard format
           const mappedDocs = docs.map(doc => ({
@@ -255,7 +258,7 @@ export default function AgentWizard() {
           }));
 
           setAgentData(prev => ({ ...prev, documents: mappedDocs }));
-          console.log(`✅ Loaded ${mappedDocs.length} documents into wizard`, mappedDocs);
+          isDev && console.log(`✅ Loaded ${mappedDocs.length} documents into wizard`, mappedDocs);
         } catch (error) {
           console.error('❌ Failed to load documents:', error);
         }
@@ -268,11 +271,11 @@ export default function AgentWizard() {
   // Create/update agent mutation
   const createAgentMutation = useMutation({
     mutationFn: (data: CreateAgentRequest) => {
-      console.log('API call with data:', data);
+      isDev && console.log('API call with data:', data);
       return id ? api.updateAgent(id, data) : api.createAgent(data);
     },
     onSuccess: (result) => {
-      console.log('Agent created successfully:', result);
+      isDev && console.log('Agent created successfully:', result);
       queryClient.invalidateQueries({ queryKey: ['agents'] });
       // Note: We DON'T clear localStorage here anymore - it's done in handleDeploy after document upload
     },
@@ -285,8 +288,8 @@ export default function AgentWizard() {
 
   useEffect(() => {
     if (existingAgent) {
-      console.log('📥 Loading existing agent into wizard:', existingAgent);
-      console.log('📋 Agent metadata:', existingAgent.metadata);
+      isDev && console.log('📥 Loading existing agent into wizard:', existingAgent);
+      isDev && console.log('📋 Agent metadata:', existingAgent.metadata);
 
       // Extract configuration from the nested structure
       const config = existingAgent.configuration || {};
@@ -341,6 +344,7 @@ export default function AgentWizard() {
         // Features - with file_upload details
         websockets: features.websockets ?? true,
         file_upload: features.file_upload?.enabled ?? features.file_upload ?? false,
+        human_takeover: features.human_takeover ?? false,
         conversation_memory: features.conversation_memory ?? true,
         typing_indicators: features.typing_indicators ?? true,
         response_streaming: features.response_streaming ?? true,
@@ -357,7 +361,7 @@ export default function AgentWizard() {
         documents: [],
       };
 
-      console.log('🔄 Mapped data to set:', {
+      isDev && console.log('🔄 Mapped data to set:', {
         purpose: mappedData.purpose,
         role: mappedData.role,
         name: mappedData.name,
@@ -365,7 +369,7 @@ export default function AgentWizard() {
       });
 
       setAgentData(prev => ({ ...prev, ...normalizeAzureLlmState(mappedData) }));
-      console.log('✅ Agent data loaded into wizard state');
+      isDev && console.log('✅ Agent data loaded into wizard state');
     }
   }, [existingAgent]);
 
@@ -508,6 +512,7 @@ export default function AgentWizard() {
               enabled: false,
             },
             conversation_memory: agentData.conversation_memory,
+            human_takeover: agentData.human_takeover,
             typing_indicators: agentData.typing_indicators,
             response_streaming: agentData.response_streaming,
           },
@@ -520,25 +525,25 @@ export default function AgentWizard() {
         },
       };
 
-      console.log('🚀 Deploying agent with complete payload:', JSON.stringify(apiPayload, null, 2));
+      isDev && console.log('🚀 Deploying agent with complete payload:', JSON.stringify(apiPayload, null, 2));
       const createdAgent = await createAgentMutation.mutateAsync(apiPayload);
-      console.log('✅ Agent created successfully:', createdAgent);
+      isDev && console.log('✅ Agent created successfully:', createdAgent);
 
       // Upload documents if any exist with File objects
-      console.log('📦 Checking documents:', agentData.documents);
+      isDev && console.log('📦 Checking documents:', agentData.documents);
       if (agentData.documents && agentData.documents.length > 0) {
-        console.log('📄 Total documents:', agentData.documents.length);
+        isDev && console.log('📄 Total documents:', agentData.documents.length);
         const filesToUpload = agentData.documents
           .filter((doc): doc is typeof doc & { file: File } => {
-            console.log(`  - ${doc.filename}: has file object?`, !!doc.file);
+            isDev && console.log(`  - ${doc.filename}: has file object?`, !!doc.file);
             return !!doc.file;
           })
           .map(doc => doc.file);
 
-        console.log('📤 Files to upload:', filesToUpload.length, filesToUpload.map(f => f.name));
+        isDev && console.log('📤 Files to upload:', filesToUpload.length, filesToUpload.map(f => f.name));
 
         if (filesToUpload.length > 0) {
-          console.log('📄 Uploading documents for agent:', createdAgent.id);
+          isDev && console.log('📄 Uploading documents for agent:', createdAgent.id);
           try {
             const { documentApi } = await import('../api/client');
             const uploadResult = await documentApi.uploadDocuments(filesToUpload, {
@@ -546,16 +551,16 @@ export default function AgentWizard() {
               category: 'knowledge_base',
               document_type: 'other'
             });
-            console.log('✅ Documents uploaded successfully:', uploadResult);
+            isDev && console.log('✅ Documents uploaded successfully:', uploadResult);
           } catch (docError) {
             console.error('❌ Failed to upload documents:', docError);
             // Don't fail the whole deployment if documents fail
           }
         } else {
-          console.log('ℹ️ No files with File objects to upload');
+          isDev && console.log('ℹ️ No files with File objects to upload');
         }
       } else {
-        console.log('ℹ️ No documents in agentData');
+        isDev && console.log('ℹ️ No documents in agentData');
       }
 
       // Clear the draft
@@ -567,7 +572,7 @@ export default function AgentWizard() {
           deployedAgent: {
             id: createdAgent.id,
             name: createdAgent.name,
-            url: `http://localhost:5174/?agent_id=${createdAgent.id}`
+            url: `http://localhost:5174/?agent_id=${createdAgent.id}&open=1`
           }
         }
       });

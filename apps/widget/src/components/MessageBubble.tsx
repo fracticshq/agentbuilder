@@ -4,6 +4,7 @@ import { ThumbsUp, ThumbsDown, Copy, RotateCcw } from 'lucide-react';
 import type { Message } from '../types';
 import { ProductCard } from './ProductCard';
 import { DealerCard } from './DealerCard';
+import { DEFAULT_API_BASE_URL } from '../utils/apiClient';
 
 interface MessageBubbleProps {
   message: Message;
@@ -16,7 +17,7 @@ interface MessageBubbleProps {
 }
 
 interface Product {
-  sku: string;
+  sku?: string;
   name: string;
   price: number;
   currency: string;
@@ -56,11 +57,26 @@ const parseProductInfo = (content: string): { cleanContent: string; productSkus:
   return { cleanContent, productSkus };
 };
 
+const getProductKey = (product: Partial<Product>): string =>
+  product.sku || (product as { product_id?: string }).product_id || (product as { id?: string }).id || product.name || JSON.stringify(product);
+
+const getUrlHost = (url?: string): string => {
+  if (!url) {
+    return '';
+  }
+
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+};
+
 // Fetch product details from API
 const fetchProductDetails = async (skus: string[], agentId: string): Promise<Product[]> => {
   try {
     console.log('[MessageBubble] Fetching products for SKUs:', skus, 'agentId:', agentId);
-    const response = await fetch(`http://localhost:8000/api/v1/knowledge/products/by-skus`, {
+    const response = await fetch(`${DEFAULT_API_BASE_URL}/api/v1/knowledge/products/by-skus`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -130,11 +146,11 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   // Combine products from message metadata and extracted from tags
   const allProducts = useMemo(() => {
     const products = [...(message.products || []), ...extractedProducts];
-    // Deduplicate by SKU
-    const seen = new Set();
-    return products.filter(p => {
-      if (seen.has(p.sku)) return false;
-      seen.add(p.sku);
+    const seen = new Set<string>();
+    return products.filter((product) => {
+      const key = getProductKey(product);
+      if (seen.has(key)) return false;
+      seen.add(key);
       return true;
     });
   }, [message.products, extractedProducts]);
@@ -143,9 +159,10 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   const getProductForCitation = (citation: { doc_id: string; title?: string; url?: string; snippet?: string }) => {
     // Check if citation title or snippet contains a product SKU
     for (const product of allProducts) {
-      if (citation.title?.includes(product.sku) || 
-          citation.snippet?.includes(product.sku) ||
-          citation.doc_id?.includes(product.sku)) {
+      const sku = product.sku || '';
+      if ((sku && citation.title?.includes(sku)) || 
+          (sku && citation.snippet?.includes(sku)) ||
+          (sku && citation.doc_id?.includes(sku))) {
         return product;
       }
     }
@@ -198,7 +215,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             </div>
             <div className="cards-grid">
               {allProducts.map((product) => (
-                <ProductCard key={product.sku} product={product} />
+                <ProductCard key={getProductKey(product)} product={product} />
               ))}
             </div>
           </div>
@@ -242,9 +259,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                       </a>
                       {(relatedProduct?.product_url || citation.url) && (
                         <div className="citation-url">
-                          {relatedProduct?.product_url 
-                            ? new URL(relatedProduct.product_url).hostname
-                            : citation.url ? new URL(citation.url).hostname : ''}
+                          {relatedProduct?.product_url
+                            ? getUrlHost(relatedProduct.product_url)
+                            : getUrlHost(citation.url)}
                         </div>
                       )}
                       {citation.snippet && !relatedProduct && (

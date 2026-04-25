@@ -3,6 +3,7 @@ import { CheckCircleIcon, ExclamationTriangleIcon, ClipboardDocumentIcon } from 
 import type { AzureOpenAIDeployment } from '../../api/client';
 import { getModelLabel, getProviderLabel } from '../../utils/llmOptions';
 
+const isDev = process.env.NODE_ENV !== 'production';
 
 interface StepReviewProps {
   data: any;
@@ -83,6 +84,7 @@ export default function StepReview({
           max_size_mb: data.max_file_size
         } : { enabled: false },
         conversation_memory: data.conversation_memory,
+        human_takeover: data.human_takeover,
         typing_indicators: data.typing_indicators,
         response_streaming: data.response_streaming
       },
@@ -127,8 +129,8 @@ export default function StepReview({
       const apiBaseUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
       
       console.log('🧪 Testing agent with message:', testMessage);
-      console.log('📡 Agent ID:', agentId);
-      console.log('📡 API URL:', `${apiBaseUrl}/api/v1/messages/`);
+      isDev && console.log('📡 Agent ID:', agentId);
+      isDev && console.log('📡 API URL:', `${apiBaseUrl}/api/v1/messages/`);
       
       const response = await fetch(`${apiBaseUrl}/api/v1/messages/`, {
         method: 'POST',
@@ -147,7 +149,7 @@ export default function StepReview({
         }),
       });
 
-      console.log('📨 Response status:', response.status);
+      isDev && console.log('📨 Response status:', response.status);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -156,7 +158,7 @@ export default function StepReview({
       }
 
       const result = await response.json();
-      console.log('✅ Test response:', result);
+      isDev && console.log('✅ Test response:', result);
       
       // Extract the response text
       const responseText = result.response || result.message || JSON.stringify(result);
@@ -285,6 +287,7 @@ export default function StepReview({
             <div className="mt-1 text-sm text-gray-600">
               <p><strong>RAG:</strong> {data.rag_enabled ? 'Enabled' : 'Disabled'}</p>
               <p><strong>File Upload:</strong> {data.file_upload ? 'Enabled' : 'Disabled'}</p>
+              <p><strong>Human Takeover:</strong> {data.human_takeover ? 'Enabled' : 'Disabled'}</p>
               <p><strong>Memory:</strong> {data.conversation_memory ? 'Enabled' : 'Disabled'}</p>
             </div>
           </div>

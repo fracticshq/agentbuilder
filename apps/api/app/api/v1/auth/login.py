@@ -9,18 +9,14 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 import structlog
 
 from ....config import Settings
-from ....auth import (
-    verify_password,
-    create_access_token,
-    create_refresh_token,
-    hash_password,
-)
+from ....auth import verify_password
 from ....auth.models import (
     LoginRequest,
     Token,
     User,
 )
 from ....auth.dependencies import get_db, get_current_active_user
+from ....auth.service import issue_user_tokens
 
 logger = structlog.get_logger()
 settings = Settings()
@@ -133,27 +129,7 @@ async def login(
         }
     )
     
-    # Create tokens
-    token_data = {
-        "user_id": user.id,
-        "email": user.email,
-        "role": user.role.value,
-        "brands": user.brands
-    }
-    
-    access_token = create_access_token(token_data)
-    refresh_token = create_refresh_token({"user_id": user.id})
-    
-    # Store refresh token in database
-    refresh_tokens_collection = db.refresh_tokens
-    await refresh_tokens_collection.insert_one({
-        "token_hash": hash_password(refresh_token),  # Reuse password hash function
-        "user_id": str(user.id),
-        "expires_at": datetime.utcnow() + timedelta(days=7),
-        "is_revoked": False,
-        "created_at": datetime.utcnow(),
-        "device_info": None  # Can be extracted from User-Agent header
-    })
+    token_response = await issue_user_tokens(db, settings, user_doc)
     
     logger.info(
         "user_logged_in",
@@ -162,12 +138,7 @@ async def login(
         email=user.email
     )
     
-    return Token(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        token_type="bearer",
-        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60  # Convert to seconds
-    )
+    return token_response
 
 
 @router.post("/logout")

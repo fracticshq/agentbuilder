@@ -70,6 +70,7 @@ AgentWidget.init({
 - **Positioning:** Bottom-right, bottom-left, sidebar
 - **Branding:** Custom colors, logos, messaging
 - **Behavior:** Auto-open, greeting messages, triggers
+- **Preview URLs:** Admin preview links may pass `?agent_id=...&open=1` so standalone widget previews open immediately for the selected agent
 
 ---
 
@@ -120,4 +121,3 @@ npm run test:e2e
 - Page context extraction for better responses
 
 **End of widget AGENTS.md.** 
-

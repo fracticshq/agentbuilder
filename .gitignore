@@ -206,6 +206,9 @@ build/Release
 node_modules/
 jspm_packages/
 
+# Vite internal cache files
+vite.config.ts.timestamp-*.mjs
+
 # Snowpack dependency directory (https://snowpack.dev/)
 web_modules/
 

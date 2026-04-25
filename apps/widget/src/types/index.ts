@@ -88,7 +88,7 @@ export interface Citation {
 
 // Phase 5: Product card data
 export interface ProductData {
-  sku: string;
+  sku?: string;
   name: string;
   price?: number;
   currency?: string;

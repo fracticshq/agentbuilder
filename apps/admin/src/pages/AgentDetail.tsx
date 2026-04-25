@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api, documentApi, Agent, KnowledgeDocument } from '../api/client';
 
+const isDev = process.env.NODE_ENV !== 'production';
+
 const DocumentTypeLabels = {
   product_data: 'Product Data',
   category_data: 'Category Data',
@@ -172,8 +174,8 @@ export default function AgentDetail() {
     );
   }
 
-  console.log('🔧 AgentDetail rendering with agent:', agent.id, agent.name);
-  console.log('📄 Documents count:', documents.length);
+  isDev && console.log('🔧 AgentDetail rendering with agent:', agent.id, agent.name);
+  isDev && console.log('📄 Documents count:', documents.length);
 
   return (
     <div className="space-y-6">

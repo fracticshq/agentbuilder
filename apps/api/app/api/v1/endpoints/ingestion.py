@@ -11,10 +11,10 @@ from commons.types.requests import IngestionRequest
 from commons.types.responses import IngestionResponse, IngestionStatus
 from ....dependencies import get_ingestion_service
 from ....services.ingestion_service import IngestionService
-from ....auth.admin_key import require_admin_key
+from ....auth.dependencies import require_dashboard_access
 
 logger = structlog.get_logger()
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_dashboard_access)])
 
 
 class DocumentUploadResponse(BaseModel):
@@ -32,7 +32,7 @@ class ChunkRequest(BaseModel):
     doc_id: Optional[str] = None
 
 
-@router.post("/documents", response_model=DocumentUploadResponse, dependencies=[Depends(require_admin_key)])
+@router.post("/documents", response_model=DocumentUploadResponse)
 async def upload_documents(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
@@ -91,7 +91,7 @@ async def upload_documents(
         raise HTTPException(status_code=500, detail="Error uploading documents")
 
 
-@router.post("/chunks", response_model=IngestionResponse, dependencies=[Depends(require_admin_key)])
+@router.post("/chunks", response_model=IngestionResponse)
 async def process_chunk(
     request: ChunkRequest,
     ingestion_service: IngestionService = Depends(get_ingestion_service)
@@ -114,7 +114,7 @@ async def process_chunk(
         raise HTTPException(status_code=500, detail="Error processing chunk")
 
 
-@router.get("/status/{job_id}", response_model=IngestionStatus, dependencies=[Depends(require_admin_key)])
+@router.get("/status/{job_id}", response_model=IngestionStatus)
 async def get_ingestion_status(
     job_id: str,
     ingestion_service: IngestionService = Depends(get_ingestion_service)
@@ -133,7 +133,7 @@ async def get_ingestion_status(
         raise HTTPException(status_code=500, detail="Error getting job status")
 
 
-@router.delete("/jobs/{job_id}", dependencies=[Depends(require_admin_key)])
+@router.delete("/jobs/{job_id}")
 async def cancel_ingestion_job(
     job_id: str,
     ingestion_service: IngestionService = Depends(get_ingestion_service)
@@ -152,7 +152,7 @@ async def cancel_ingestion_job(
         raise HTTPException(status_code=500, detail="Error cancelling job")
 
 
-@router.get("/documents", dependencies=[Depends(require_admin_key)])
+@router.get("/documents")
 async def get_documents(
     agent_id: Optional[str] = None,
     ingestion_service: IngestionService = Depends(get_ingestion_service)

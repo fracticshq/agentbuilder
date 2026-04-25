@@ -6,6 +6,7 @@ import { useFullscreen } from './hooks/useFullscreen';
 import { APIClient } from './utils/apiClient';
 import { WebSocketClient } from './utils/wsClient';
 import { buildBrandTheme } from './utils/brandTheme';
+import { getConversationStorageKey, shouldAutoOpenFromSearch } from './utils/bootstrap';
 import { extractPageContext } from './utils/pageContext';
 import { trackEvent } from './utils/activityClient';
 import type { WidgetConfig } from './types';
@@ -111,7 +112,7 @@ function App({ config }: AppProps) {
     if (scriptTag?.dataset.agentId) { setAgentId(scriptTag.dataset.agentId); return; }
 
     // Fallback: first available agent
-    fetch(`${API_BASE}/api/v1/admin/agents/`)
+    fetch(`${API_BASE}/api/v1/public/agents`)
       .then(r => r.ok ? r.json() : [])
       .then(agents => { if (agents.length > 0) setAgentId(agents[0].id); })
       .catch(() => {});
@@ -124,7 +125,7 @@ function App({ config }: AppProps) {
     const fetchBrandTheme = async () => {
       try {
         // 1. Get agent → extract brand_id
-        const agentRes = await fetch(`${API_BASE}/api/v1/admin/agents/${agentId}`);
+        const agentRes = await fetch(`${API_BASE}/api/v1/public/agents/${agentId}`);
         if (!agentRes.ok) return;
         const agent = await agentRes.json();
         const brandId: string | undefined = agent.brand_id;
@@ -136,7 +137,7 @@ function App({ config }: AppProps) {
         if (!brandId) return;
 
         // 2. Get brand → extract colors / identity
-        const brandRes = await fetch(`${API_BASE}/api/v1/admin/brands/${brandId}`);
+        const brandRes = await fetch(`${API_BASE}/api/v1/public/brands/${brandId}`);
         if (!brandRes.ok) return;
         const brand = await brandRes.json();
 
@@ -156,6 +157,12 @@ function App({ config }: AppProps) {
   React.useEffect(() => {
     if (config) setConfig(config);
   }, [config, setConfig]);
+
+  React.useEffect(() => {
+    if (shouldAutoOpenFromSearch(window.location.search)) {
+      setIsOpen(true);
+    }
+  }, [setIsOpen]);
 
   // ── Widget control channel (human takeover) ───────────────────
   React.useEffect(() => {
@@ -244,19 +251,20 @@ function App({ config }: AppProps) {
 
   // ── Initialize conversation ID ────────────────────────────────
   React.useEffect(() => {
-    if (isOpen && !conversationId) {
-      const stored = sessionStorage.getItem('agent_widget_conversation_id');
+    if (isOpen && !conversationId && agentId) {
+      const storageKey = getConversationStorageKey(agentId);
+      const stored = sessionStorage.getItem(storageKey);
       if (stored) {
         setConversationId(stored);
         setConvStartEvent('conversation_resumed');
       } else {
         const newConvId = createSecureClientId('conv');
         setConversationId(newConvId);
-        sessionStorage.setItem('agent_widget_conversation_id', newConvId);
+        sessionStorage.setItem(storageKey, newConvId);
         setConvStartEvent('conversation_started');
       }
     }
-  }, [isOpen, conversationId, setConversationId]);
+  }, [isOpen, conversationId, agentId, setConversationId]);
 
   // ── Fire conversation lifecycle event once both IDs are ready ─
   React.useEffect(() => {
@@ -306,16 +314,16 @@ function App({ config }: AppProps) {
       page_context: extractPageContext(),
     });
 
+    const assistantMessageId = (Date.now() + 1).toString();
+    let streamedContent = '';
+
     try {
       const context = extractPageContext();
       const currentConvId = conversationId || createSecureClientId('conv');
       if (!conversationId) {
         setConversationId(currentConvId);
-        sessionStorage.setItem('agent_widget_conversation_id', currentConvId);
+        sessionStorage.setItem(getConversationStorageKey(agentId), currentConvId);
       }
-
-      const assistantMessageId = (Date.now() + 1).toString();
-      let streamedContent = '';
 
       addMessage({ id: assistantMessageId, content: '', role: 'assistant', timestamp: new Date(), citations: [] });
 
@@ -350,11 +358,11 @@ function App({ config }: AppProps) {
       });
     } catch (err) {
       console.error('[Widget] Chat error:', err);
-      addMessage({
-        id: (Date.now() + 1).toString(),
-        content: 'Sorry, I encountered an error. Please try again.',
-        role: 'assistant',
-        timestamp: new Date(),
+      updateMessage(assistantMessageId, {
+        content: streamedContent || 'Sorry, I encountered an error. Please try again.',
+        citations: [],
+        products: [],
+        dealers: [],
       });
     } finally {
       setIsTyping(false);

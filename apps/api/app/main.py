@@ -77,6 +77,24 @@ async def lifespan(app: FastAPI):
                     raise
 
             try:
+                await system_db.users.create_index("email", unique=True, name="users_email_idx")
+            except Exception as e:
+                if "already exists" not in str(e):
+                    raise
+
+            try:
+                await system_db.users.create_index("username", unique=True, name="users_username_idx")
+            except Exception as e:
+                if "already exists" not in str(e):
+                    raise
+
+            try:
+                await system_db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0, name="password_reset_expiry_idx")
+            except Exception as e:
+                if "already exists" not in str(e):
+                    raise
+
+            try:
                 await RuntimeSettingsService(settings).ensure_indexes()
             except Exception as e:
                 if "already exists" not in str(e):

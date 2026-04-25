@@ -15,6 +15,7 @@ from ..connections import connection_manager
 from .jwt import decode_and_verify_token
 from .api_keys import verify_api_key, extract_key_id
 from .models import User, UserRole, Permission, APIKey, ROLE_PERMISSIONS
+from .admin_key import is_admin_key_authorized
 
 logger = structlog.get_logger()
 settings = Settings()
@@ -252,6 +253,29 @@ async def get_user_from_token_or_api_key(
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Authentication required (JWT token or API key)"
+    )
+
+
+async def require_dashboard_access(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    x_admin_key: Optional[str] = Header(None),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Optional[User]:
+    """
+    Allow access from an authenticated dashboard user or a valid admin API key.
+
+    The admin key path remains as a compatibility fallback for operator scripts.
+    """
+    if credentials is not None:
+        return await get_current_active_user(await get_current_user(credentials, db))
+
+    if x_admin_key and is_admin_key_authorized(x_admin_key, settings):
+        return None
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required",
+        headers={"WWW-Authenticate": "Bearer"},
     )
 
 

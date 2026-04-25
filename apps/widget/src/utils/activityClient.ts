@@ -3,7 +3,15 @@
  * Never throws; errors are silently swallowed so tracking never breaks the chat flow.
  */
 
-const API_BASE = 'http://localhost:8000';
+declare global {
+  interface Window {
+    __APP_CONFIG__?: {
+      API_BASE_URL?: string;
+    };
+  }
+}
+
+const API_BASE = window.__APP_CONFIG__?.API_BASE_URL || import.meta.env.VITE_API_BASE_URL || window.location.origin;
 
 export interface TrackEventOptions {
   event_type: string;

@@ -2,12 +2,15 @@
 Application Monitoring and Observability
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
 import structlog
 
+from .config import Settings
+
 logger = structlog.get_logger()
+settings = Settings()
 
 # Prometheus metrics
 REQUEST_COUNT = Counter('http_requests_total', 'Total HTTP requests', ['method', 'endpoint', 'status'])
@@ -18,10 +21,12 @@ MESSAGE_DURATION = Histogram('message_processing_seconds', 'Message processing d
 
 def setup_monitoring(app: FastAPI):
     """Setup monitoring and metrics."""
-    
+
     @app.get("/metrics")
     async def get_metrics():
         """Prometheus metrics endpoint."""
+        if not settings.ENABLE_METRICS:
+            raise HTTPException(status_code=404, detail="Metrics disabled")
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-    
+
     logger.info("Monitoring setup complete")

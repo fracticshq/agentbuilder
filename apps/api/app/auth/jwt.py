@@ -13,6 +13,34 @@ logger = structlog.get_logger()
 settings = Settings()
 
 
+def create_signed_token(
+    data: Dict[str, Any],
+    token_type: str,
+    expires_delta: Optional[timedelta] = None,
+) -> str:
+    """Create a JWT token for the given token type."""
+    to_encode = data.copy()
+
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+
+    to_encode.update({
+        "exp": expire,
+        "iat": datetime.utcnow(),
+        "type": token_type
+    })
+
+    encoded_jwt = jwt.encode(
+        to_encode,
+        settings.SECRET_KEY,
+        algorithm="HS256"
+    )
+
+    return encoded_jwt
+
+
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
     """
     Create a JWT access token.
@@ -24,25 +52,9 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta]
     Returns:
         Encoded JWT token
     """
-    to_encode = data.copy()
-    
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    
-    to_encode.update({
-        "exp": expire,
-        "iat": datetime.utcnow(),
-        "type": "access"
-    })
-    
-    encoded_jwt = jwt.encode(
-        to_encode,
-        settings.SECRET_KEY,
-        algorithm="HS256"
-    )
-    
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
+    encoded_jwt = create_signed_token(data, "access", expires_delta)
+
     logger.debug(
         "access_token_created",
         user_id=data.get("user_id"),
@@ -63,23 +75,11 @@ def create_refresh_token(data: Dict[str, Any], expires_delta: Optional[timedelta
     Returns:
         Encoded JWT refresh token
     """
-    to_encode = data.copy()
-    
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(days=7)  # 7 days default
-    
-    to_encode.update({
-        "exp": expire,
-        "iat": datetime.utcnow(),
-        "type": "refresh"
-    })
-    
-    encoded_jwt = jwt.encode(
-        to_encode,
-        settings.SECRET_KEY,
-        algorithm="HS256"
+    expire = datetime.utcnow() + (expires_delta or timedelta(days=7))
+    encoded_jwt = create_signed_token(
+        data,
+        "refresh",
+        expires_delta or timedelta(days=7),
     )
     
     logger.debug(

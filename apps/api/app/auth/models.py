@@ -110,6 +110,8 @@ class User(BaseModel):
             return data
 
         normalized = dict(data)
+        if isinstance(normalized.get("_id"), ObjectId):
+            normalized["_id"] = str(normalized["_id"])
         if "password_hash" not in normalized and normalized.get("hashed_password"):
             normalized["password_hash"] = normalized["hashed_password"]
         if "brands" not in normalized:
@@ -246,6 +248,8 @@ class APIKey(BaseModel):
             return data
 
         normalized = dict(data)
+        if isinstance(normalized.get("_id"), ObjectId):
+            normalized["_id"] = str(normalized["_id"])
         if "key_id" not in normalized and normalized.get("key_prefix"):
             normalized["key_id"] = normalized["key_prefix"]
         if "scopes" not in normalized and normalized.get("permissions"):

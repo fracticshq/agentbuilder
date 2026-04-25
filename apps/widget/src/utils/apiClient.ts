@@ -1,5 +1,17 @@
 import type { Message, StreamingMessage, PageContext, APIError } from '../types';
 
+const isDev = import.meta.env.DEV;
+
+declare global {
+  interface Window {
+    __APP_CONFIG__?: {
+      API_BASE_URL?: string;
+    };
+  }
+}
+
+export const DEFAULT_API_BASE_URL = window.__APP_CONFIG__?.API_BASE_URL || import.meta.env.VITE_API_BASE_URL || window.location.origin;
+
 export class APIClient {
   private baseUrl: string;
 
@@ -57,7 +69,7 @@ export class APIClient {
     requestBody: any,
     onStream: (chunk: StreamingMessage) => void
   ): Promise<Message> {
-    console.log('[APIClient] Starting stream with body:', requestBody);
+    isDev && console.log('[APIClient] Starting stream with body:', requestBody);
     
     return new Promise((resolve, reject) => {
       // Use fetch API for POST streaming (EventSource doesn't support POST)
@@ -69,7 +81,7 @@ export class APIClient {
         },
         body: JSON.stringify(requestBody),
       }).then(async (response) => {
-        console.log('[APIClient] Stream response received:', response.status, response.statusText);
+        isDev && console.log('[APIClient] Stream response received:', response.status, response.statusText);
         
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -87,39 +99,39 @@ export class APIClient {
         let buffer = '';
 
         try {
-          console.log('[APIClient] Starting to read stream...');
+          isDev && console.log('[APIClient] Starting to read stream...');
           while (true) {
             const { done, value } = await reader.read();
             
             if (done) {
-              console.log('[APIClient] Stream complete');
+              isDev && console.log('[APIClient] Stream complete');
               break;
             }
 
             // Decode and append to buffer
             const chunk = decoder.decode(value, { stream: true });
-            console.log('[APIClient] Received chunk:', chunk);
-            console.log('[APIClient] Buffer before split:', buffer.length, 'chars');
+            isDev && console.log('[APIClient] Received chunk:', chunk);
+            isDev && console.log('[APIClient] Buffer before split:', buffer.length, 'chars');
             buffer += chunk;
-            console.log('[APIClient] Buffer after append:', buffer.length, 'chars');
+            isDev && console.log('[APIClient] Buffer after append:', buffer.length, 'chars');
             
             // Process complete SSE messages (separated by \n\n)
             const lines = buffer.split('\n\n');
-            console.log('[APIClient] Split into', lines.length, 'lines');
+            isDev && console.log('[APIClient] Split into', lines.length, 'lines');
             buffer = lines.pop() || ''; // Keep incomplete message in buffer
-            console.log('[APIClient] Lines to process:', lines.length);
+            isDev && console.log('[APIClient] Lines to process:', lines.length);
 
             for (const line of lines) {
-              console.log('[APIClient] Processing line:', line.substring(0, 100));
+              isDev && console.log('[APIClient] Processing line:', line.substring(0, 100));
               // Skip empty lines
               if (!line.trim()) {
-                console.log('[APIClient] Skipping empty line');
+                isDev && console.log('[APIClient] Skipping empty line');
                 continue;
               }
               
               // SSE format is "data: <json>"
               if (!line.startsWith('data: ')) {
-                console.warn('[APIClient] Unexpected line format:', line);
+                isDev && console.warn('[APIClient] Unexpected line format:', line);
                 continue;
               }
 
@@ -128,13 +140,13 @@ export class APIClient {
                 
                 // Skip empty data lines
                 if (!data) {
-                  console.log('[APIClient] Skipping empty data');
+                  isDev && console.log('[APIClient] Skipping empty data');
                   continue;
                 }
                 
-                console.log('[APIClient] Parsing SSE data:', data);
+                isDev && console.log('[APIClient] Parsing SSE data:', data);
                 const chunk: StreamingMessage = JSON.parse(data);
-                console.log('[APIClient] Parsed chunk:', chunk);
+                isDev && console.log('[APIClient] Parsed chunk:', chunk);
                 
                 if (chunk.type === 'content') {
                   fullMessage += chunk.content || '';
@@ -173,7 +185,7 @@ export class APIClient {
             dealers: messageData.dealers || [],    // Phase 5: Dealer cards
           };
           
-          console.log('[APIClient] Resolving with final message:', finalMessage);
+          isDev && console.log('[APIClient] Resolving with final message:', finalMessage);
           resolve(finalMessage);
         } catch (error) {
           console.error('[APIClient] Stream reading error:', error);

@@ -159,6 +159,18 @@ describe('WebSocketClient', () => {
       lastWS().simulateMessage({ type: 'error', content: 'Something went wrong', conversation_id: 'c' });
       await expect(p).rejects.toThrow('Something went wrong');
     });
+
+    it('resolves with partial content if the socket closes after streaming has started', async () => {
+      const p = client.sendMessage({ content: 'hi' });
+      await flushMicrotasks();
+      lastWS().simulateMessage({ type: 'content', content: 'Partial answer', conversation_id: 'c' });
+      lastWS().simulateClose();
+
+      await expect(p).resolves.toMatchObject({
+        content: 'Partial answer',
+        role: 'assistant',
+      });
+    });
   });
 
   describe('connection reuse', () => {
@@ -228,7 +240,7 @@ describe('WebSocketClient', () => {
       ws.simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
       await p;
 
-      ws.send.mockClear();
+      vi.mocked(ws.send).mockClear();
       vi.advanceTimersByTime(1_000);
       expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'ping' }));
     });
@@ -305,7 +317,7 @@ describe('WebSocketClient', () => {
       expect(lastWS()).toBe(ws1);    // no new WS created
     });
 
-    it('rejects a pending stream promise when connection drops mid-stream', async () => {
+    it('preserves a pending partial stream when connection drops mid-stream', async () => {
       const p = client.sendMessage({ content: 'hi' });
       await flushMicrotasks();
       const ws1 = lastWS();
@@ -314,7 +326,10 @@ describe('WebSocketClient', () => {
       ws1.simulateMessage({ type: 'content', content: 'partial...', conversation_id: 'c' });
       ws1.simulateClose();
 
-      await expect(p).rejects.toThrow('WebSocket connection closed');
+      await expect(p).resolves.toMatchObject({
+        content: 'partial...',
+        role: 'assistant',
+      });
     });
   });
 });

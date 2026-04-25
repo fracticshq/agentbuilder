@@ -93,3 +93,4 @@ curl http://localhost:8000/health
 - All responses include citation tracking
 - Azure deployment discovery for the admin UI uses ARM + `DefaultAzureCredential`; if the ARM env vars are missing, the endpoint returns `503`
 - Runtime provider secrets are resolved from encrypted records in the system DB first, then from environment variables as bootstrap/fallback
+- Strapi dashboard provisioning for agents must be best-effort and non-blocking; agent create/update/delete should not fail after Mongo writes because Strapi is unavailable

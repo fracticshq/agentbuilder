@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { TrashIcon, DocumentTextIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
 import { knowledgeApi } from '../../api/knowledge';
-import { useAdminApiKey } from '../../hooks/useAdminApiKey';
 import type { DocumentSummary, ContentType } from '../../types/knowledge';
 
 const isDev = process.env.NODE_ENV !== 'production';
@@ -13,20 +12,12 @@ interface DocumentsListProps {
 }
 
 export default function DocumentsList({ brandId, contentType, onRefresh }: DocumentsListProps) {
-  const hasAdminAccess = useAdminApiKey();
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
 
   const fetchDocuments = async () => {
-    if (!hasAdminAccess) {
-      setLoading(false);
-      setError(null);
-      setDocuments([]);
-      return;
-    }
-
     try {
       isDev && console.log('[DocumentsList] Fetching documents for:', { brandId, contentType });
       setLoading(true);
@@ -45,7 +36,7 @@ export default function DocumentsList({ brandId, contentType, onRefresh }: Docum
   useEffect(() => {
     fetchDocuments();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [brandId, contentType, hasAdminAccess]);
+  }, [brandId, contentType]);
 
   const handleDelete = async (docId: string, docName: string) => {
     // eslint-disable-next-line no-restricted-globals
@@ -111,26 +102,6 @@ export default function DocumentsList({ brandId, contentType, onRefresh }: Docum
         <div className="flex items-center justify-center">
           <ArrowPathIcon className="h-6 w-6 text-gray-400 animate-spin mr-2" />
           <span className="text-gray-600">Loading documents...</span>
-        </div>
-      </div>
-    );
-  }
-
-  if (!hasAdminAccess) {
-    return (
-      <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-        <div className="flex">
-          <div className="flex-shrink-0">
-            <svg className="h-5 w-5 text-amber-500" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM10 13a1 1 0 100 2 1 1 0 000-2zm-1-6a1 1 0 112 0v4a1 1 0 11-2 0V7z" clipRule="evenodd" />
-            </svg>
-          </div>
-          <div className="ml-3">
-            <h3 className="text-sm font-medium text-amber-900">Admin write access key required</h3>
-            <p className="mt-1 text-sm text-amber-800">
-              Save the admin key in the top bar to load and manage knowledge base documents.
-            </p>
-          </div>
         </div>
       </div>
     );

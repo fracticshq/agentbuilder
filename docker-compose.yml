@@ -14,6 +14,13 @@ services:
     environment:
       # Only Docker-internal service URLs that differ from .env.docker defaults
       SHOPIFY_MCP_URL: "http://shopify:3005/mcp"
+      ENVIRONMENT: "${ENVIRONMENT:-production}"
+      DEBUG: "${DEBUG:-false}"
+      REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
+      REQUIRE_REDIS: "${REQUIRE_REDIS:-false}"
+      ENABLE_HUMAN_TAKEOVER: "${ENABLE_HUMAN_TAKEOVER:-true}"
+      ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+      STRAPI_URL: "${DOCKER_STRAPI_URL:-http://host.docker.internal:1337}"
     depends_on:
       mongodb:
         condition: service_healthy
@@ -21,6 +28,8 @@ services:
         condition: service_healthy
       shopify:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -34,30 +43,42 @@ services:
     build:
       context: .
       dockerfile: apps/admin/Dockerfile
-      args:
-        REACT_APP_API_URL: http://localhost:8000
     image: agentbuilder-admin
     container_name: agentbuilder-admin
     ports:
       - "3000:3000"
+    environment:
+      API_BASE_URL: "${ADMIN_API_BASE_URL:-http://localhost:8000}"
     depends_on:
       - api
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # ── Chat Widget ──────────────────────────────────────────────────────────────
   widget:
     build:
       context: .
       dockerfile: apps/widget/Dockerfile
-      args:
-        VITE_API_BASE_URL: http://localhost:8000
     image: agentbuilder-widget
     container_name: agentbuilder-widget
     ports:
       - "5174:5174"
+    environment:
+      API_BASE_URL: "${WIDGET_API_BASE_URL:-http://localhost:8000}"
     depends_on:
       - api
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:5174/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # ── Shopify MCP ──────────────────────────────────────────────────────────────
   shopify:
@@ -68,6 +89,10 @@ services:
     container_name: agentbuilder-shopify
     ports:
       - "3005:3005"
+    env_file:
+      - .env.docker
+    environment:
+      NODE_ENV: production
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3005/health"]
@@ -80,8 +105,8 @@ services:
   mongodb:
     image: mongo:7
     container_name: agentbuilder-mongodb
-    ports:
-      - "27017:27017"                   # expose so you can connect with Compass
+    # Port not exposed to host in production. To connect with Compass locally,
+    # temporarily add: ports: ["27017:27017"]
     volumes:
       - mongo_data:/data/db
     restart: unless-stopped
@@ -96,8 +121,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: agentbuilder-redis
-    ports:
-      - "6379:6379"
+    # Port not exposed to host in production. To inspect locally,
+    # temporarily add: ports: ["6379:6379"]
     volumes:
       - redis_data:/data
     restart: unless-stopped

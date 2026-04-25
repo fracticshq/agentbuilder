@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -41,13 +43,24 @@ class RuntimeSettingsService:
 
     def _derive_encryption_key(self) -> bytes:
         seed = (
-            getattr(self.settings, "SETTINGS_ENCRYPTION_KEY", "")
-            or getattr(self.settings, "PII_ENCRYPTION_KEY", "")
-            or getattr(self.settings, "SECRET_KEY", "")
+            self._normalize_seed_candidate(getattr(self.settings, "SETTINGS_ENCRYPTION_KEY", None))
+            or self._normalize_seed_candidate(getattr(self.settings, "PII_ENCRYPTION_KEY", None))
+            or self._normalize_seed_candidate(getattr(self.settings, "SECRET_KEY", None))
             or "agentbuilder-runtime-settings"
         )
         digest = hashlib.sha256(seed.encode("utf-8")).digest()
         return base64.urlsafe_b64encode(digest)
+
+    def _normalize_seed_candidate(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            decoded = value.decode("utf-8", errors="ignore").strip()
+            return decoded or None
+        if isinstance(value, str):
+            trimmed = value.strip()
+            return trimmed or None
+        return None
 
     def _get_collection(self):
         try:
@@ -76,6 +89,25 @@ class RuntimeSettingsService:
             value = str(value)
         trimmed = value.strip()
         return trimmed or None
+
+    def _normalize_container_base_url(self, value: str | None) -> str:
+        """Rewrite local loopback URLs so sibling containers can reach host services."""
+        if not value:
+            return ""
+
+        parsed = urlparse(value)
+        if not parsed.hostname:
+            return value
+
+        is_container_runtime = Path("/.dockerenv").exists()
+        if not is_container_runtime:
+            return value
+
+        if parsed.hostname not in {"localhost", "127.0.0.1", "0.0.0.0"}:
+            return value
+
+        netloc = parsed.netloc.replace(parsed.hostname, "host.docker.internal", 1)
+        return urlunparse(parsed._replace(netloc=netloc))
 
     def _setting_env_value(self, definition: RuntimeSettingDefinition) -> str | None:
         if not definition.env_var:
@@ -354,6 +386,18 @@ class RuntimeSettingsService:
             "resource_group": values.get("azure_openai.resource_group") or "",
             "account_name": values.get("azure_openai.account_name") or "",
             "default_deployment": values.get("azure_openai.deployment") or "",
+        }
+
+    async def get_strapi_runtime_config(
+        self,
+        *,
+        overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        values = await self.get_effective_values(overrides=overrides)
+        base_url = self._normalize_container_base_url(values.get("strapi.url") or "")
+        return {
+            "base_url": base_url,
+            "api_token": values.get("strapi.api_token") or "",
         }
 
     def _filtered_overrides(

@@ -9,10 +9,12 @@ from sse_starlette.sse import EventSourceResponse
 import json
 import asyncio
 import structlog
+from urllib.parse import urlparse
 
 from commons.types.requests import MessageRequest
 from commons.types.responses import MessageResponse, StreamingMessageResponse
 from ....auth.admin_key import is_admin_key_authorized
+from ....connections import connection_manager
 from ....dependencies import get_message_service, get_settings
 from ....security.rate_limiter import check_rate_limit
 from ....services.message_service import MessageService
@@ -24,7 +26,19 @@ WS_POLICY_VIOLATION = 1008
 
 
 async def _close_websocket(websocket: WebSocket, reason: str) -> None:
-    await websocket.close(code=WS_POLICY_VIOLATION, reason=reason)
+    try:
+        await websocket.close(code=WS_POLICY_VIOLATION, reason=reason)
+    except RuntimeError:
+        logger.debug("websocket_already_closed", reason=reason)
+
+
+async def _safe_send_text(websocket: WebSocket, payload: str) -> bool:
+    try:
+        await websocket.send_text(payload)
+        return True
+    except (WebSocketDisconnect, RuntimeError):
+        logger.info("websocket_send_skipped_closed_socket")
+        return False
 
 
 async def _enforce_websocket_rate_limit(websocket: WebSocket, endpoint: str) -> bool:
@@ -39,6 +53,43 @@ async def _enforce_websocket_rate_limit(websocket: WebSocket, endpoint: str) -> 
         await _close_websocket(websocket, "Rate limit exceeded")
         return False
     return True
+
+
+async def _get_agent_brand_slug(agent_id: str | None) -> str | None:
+    if not agent_id:
+        return None
+
+    try:
+        system_db = connection_manager.get_system_db()
+        agent = await system_db.agents.find_one({"id": agent_id}, {"brand_slug": 1})
+    except Exception as exc:
+        logger.warning("agent_brand_lookup_failed", agent_id=agent_id, error=str(exc))
+        return None
+
+    brand_slug = agent.get("brand_slug") if agent else None
+    return brand_slug or None
+
+
+def _origin_matches_base_url(origin: str | None, base_url: str | None) -> bool:
+    if not origin or not base_url:
+        return False
+
+    try:
+        origin_parts = urlparse(origin)
+        base_parts = urlparse(base_url)
+    except Exception:
+        return False
+
+    if not origin_parts.hostname or not base_parts.hostname:
+        return False
+
+    origin_port = origin_parts.port or (443 if origin_parts.scheme == "https" else 80)
+    base_port = base_parts.port or (443 if base_parts.scheme == "https" else 80)
+    return (
+        origin_parts.scheme == base_parts.scheme
+        and origin_parts.hostname == base_parts.hostname
+        and origin_port == base_port
+    )
 
 
 @router.post("/", response_model=MessageResponse)
@@ -104,33 +155,40 @@ async def websocket_endpoint(
                 request_data = json.loads(data)
                 # Heartbeat ping — respond immediately and wait for next message
                 if request_data.get("type") == "ping":
-                    await websocket.send_text(json.dumps({"type": "pong"}))
+                    if not await _safe_send_text(websocket, json.dumps({"type": "pong"})):
+                        return
                     continue
                 request = MessageRequest(**request_data)
             except (json.JSONDecodeError, ValueError) as e:
-                await websocket.send_text(json.dumps({
+                if not await _safe_send_text(websocket, json.dumps({
                     "error": "Invalid message format",
                     "detail": str(e)
-                }))
+                })):
+                    return
                 continue
             
             # Process message and stream response
             try:
                 async for chunk in message_service.stream_message(request):
-                    await websocket.send_text(chunk.model_dump_json())
+                    if not await _safe_send_text(websocket, chunk.model_dump_json()):
+                        return
             except Exception as e:
                 logger.error("Error processing WebSocket message", error=str(e))
-                await websocket.send_text(json.dumps({
+                if not await _safe_send_text(websocket, json.dumps({
                     "type": "error",
                     "content": f"Error: {str(e)}",
                     "conversation_id": request.conversation_id or "",
-                }))
+                })):
+                    return
                 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception as e:
         logger.error("WebSocket error", error=str(e))
-        await websocket.close(code=1011, reason="Internal error")
+        try:
+            await websocket.close(code=1011, reason="Internal error")
+        except RuntimeError:
+            logger.debug("websocket_close_skipped_after_error")
 
 
 @router.websocket("/ws/admin/{conversation_id}")
@@ -144,11 +202,25 @@ async def admin_websocket_endpoint(
         return
     settings = get_settings()
     if not settings.ENABLE_HUMAN_TAKEOVER:
+        logger.warning(
+            "admin_websocket_rejected_human_takeover_disabled",
+            conversation_id=conversation_id,
+        )
         await _close_websocket(websocket, "Human takeover is disabled")
         return
 
     admin_key = websocket.headers.get("x-admin-key") or websocket.query_params.get("admin_key")
-    if not is_admin_key_authorized(admin_key, settings):
+    trusted_strapi_origin = (
+        not settings.is_production
+        and _origin_matches_base_url(websocket.headers.get("origin"), settings.STRAPI_URL)
+    )
+    if not is_admin_key_authorized(admin_key, settings) and not trusted_strapi_origin:
+        logger.warning(
+            "admin_websocket_rejected_invalid_admin_key",
+            conversation_id=conversation_id,
+            origin=websocket.headers.get("origin"),
+            has_admin_key=bool(admin_key),
+        )
         await _close_websocket(websocket, "Invalid admin key")
         return
 
@@ -227,7 +299,15 @@ async def admin_websocket_endpoint(
                 # Buffer for memory injection on release
                 await ws_manager.buffer_takeover_message(conversation_id, "assistant", content)
                 # Persist to Strapi (role 'agent' matches Strapi convention)
-                message_service.strapi.save_message(conversation_id, content, "agent")
+                agent_id = await ws_manager.get_agent_id(conversation_id)
+                brand_slug = await _get_agent_brand_slug(agent_id)
+                message_service.strapi.save_message(
+                    conversation_id,
+                    content,
+                    "agent",
+                    brand_slug=brand_slug,
+                    agent_id=agent_id,
+                )
 
     except WebSocketDisconnect:
         logger.info("Admin WebSocket disconnected", conversation_id=conversation_id)
@@ -254,6 +334,11 @@ async def widget_control_channel(
         return
     settings = get_settings()
     if not settings.ENABLE_HUMAN_TAKEOVER:
+        logger.warning(
+            "widget_control_rejected_human_takeover_disabled",
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+        )
         await _close_websocket(websocket, "Human takeover is disabled")
         return
 
@@ -265,6 +350,12 @@ async def widget_control_channel(
         control_secret,
     )
     if not is_authorized:
+        logger.warning(
+            "widget_control_rejected_unauthorized",
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            control_secret_length=len(control_secret),
+        )
         await _close_websocket(websocket, "Unauthorized widget control channel")
         return
 
@@ -282,7 +373,8 @@ async def widget_control_channel(
             msg_type = msg.get("type")
 
             if msg_type == "ping":
-                await websocket.send_text(json.dumps({"type": "pong"}))
+                if not await _safe_send_text(websocket, json.dumps({"type": "pong"})):
+                    return
 
             elif msg_type == "register":
                 # Widget sends its agent_id so we can inject history into the right memory
@@ -301,7 +393,14 @@ async def widget_control_channel(
                     # Buffer for memory injection on release
                     await ws_manager.buffer_takeover_message(conversation_id, "user", content)
                     # Persist to Strapi
-                    message_service.strapi.save_message(conversation_id, content, "user")
+                    brand_slug = await _get_agent_brand_slug(agent_id or None)
+                    message_service.strapi.save_message(
+                        conversation_id,
+                        content,
+                        "user",
+                        brand_slug=brand_slug,
+                        agent_id=agent_id or None,
+                    )
 
     except WebSocketDisconnect:
         logger.info("Widget control channel disconnected", conversation_id=conversation_id)

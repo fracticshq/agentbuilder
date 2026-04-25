@@ -97,6 +97,37 @@ def _extract_tool_result_metadata(tool_results: dict) -> tuple[list[dict], list[
     return citations, safe_products, safe_dealers
 
 
+def _entity_identity(entity: dict, *keys: str) -> Optional[str]:
+    """Build a stable identity string from the first populated key."""
+    for key in keys:
+        value = entity.get(key)
+        if value is None:
+            continue
+        normalized = str(value).strip()
+        if normalized:
+            return f"{key}:{normalized}"
+    return None
+
+
+def _deduplicate_entities(entities: list[dict], *identity_keys: str) -> list[dict]:
+    """Deduplicate metadata entities while tolerating inconsistent provider schemas."""
+    unique_entities: list[dict] = []
+    seen_keys: set[str] = set()
+
+    for entity in entities:
+        identity = _entity_identity(entity, *identity_keys)
+        if identity is None:
+            identity = f"json:{json.dumps(entity, sort_keys=True, default=str)}"
+
+        if identity in seen_keys:
+            continue
+
+        seen_keys.add(identity)
+        unique_entities.append(entity)
+
+    return unique_entities
+
+
 class MessageService:
     """
     Service for processing chat messages with Phase 5 Memory System.
@@ -233,6 +264,17 @@ class MessageService:
             tools=self.tool_registry,
             critic=self.response_validator,
             system_prompt=self.system_prompt,
+        )
+
+        strapi_runtime_config = await self.runtime_settings_service.get_strapi_runtime_config()
+        self.strapi = StrapiClient(
+            base_url=strapi_runtime_config.get("base_url") or "",
+            api_token=strapi_runtime_config.get("api_token") or "",
+        )
+        logger.info(
+            "strapi_client_configured",
+            base_url=strapi_runtime_config.get("base_url") or "",
+            enabled=bool(strapi_runtime_config.get("base_url") and strapi_runtime_config.get("api_token")),
         )
     
     async def _initialize_brand_database(self, agent_id: str):
@@ -538,6 +580,14 @@ class MessageService:
                     "last_searched": agent_result.metadata.get("last_searched"),
                 }
             )
+
+            self.strapi.sync_conversation(
+                conversation_id=conversation_id,
+                user_message=request.message,
+                assistant_message=response_text,
+                brand_slug=self.brand_id,
+                agent_id=agent_id,
+            )
             
             # 6. Extract Facts & Auto-Summary (Async)
             if self.memory_config.ENABLE_FACT_EXTRACTION:
@@ -783,9 +833,22 @@ class MessageService:
             tool_results = agent_result.metadata.get("tool_results", {})
             citations, safe_products, safe_dealers = _extract_tool_result_metadata(tool_results)
 
-            # Deduplicate products and dealers by ID
-            unique_products = {p['id']: p for p in safe_products if p.get('id')}.values()
-            unique_dealers  = {d['id']: d for d in safe_dealers  if d.get('id')}.values()
+            unique_products = _deduplicate_entities(
+                safe_products,
+                "id",
+                "sku",
+                "product_id",
+                "variant_id",
+                "name",
+            )
+            unique_dealers = _deduplicate_entities(
+                safe_dealers,
+                "id",
+                "dealer_id",
+                "email",
+                "phone",
+                "name",
+            )
 
             yield StreamingMessageResponse(
                 type="metadata",
@@ -794,8 +857,8 @@ class MessageService:
                 citations=citations,
                 context_used=len(tool_results),
                 confidence_score=min(1.0, max(0.0, float(agent_result.metadata.get("validation_confidence", 1.0)))),
-                products=list(unique_products),
-                dealers=list(unique_dealers)
+                products=unique_products,
+                dealers=unique_dealers
             )
             
             duration = (datetime.now(timezone.utc) - start_time).total_seconds()

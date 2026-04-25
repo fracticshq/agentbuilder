@@ -74,6 +74,13 @@ def _preload_akv_secrets():
 _load_root_env()
 _preload_akv_secrets()
 
+from app.config import Settings
+
+settings = Settings()
+
+if settings.is_production and settings.DEBUG:
+    raise RuntimeError("DEBUG must be false in production")
+
 # =============================================================================
 # Now add local packages to Python path
 # =============================================================================
@@ -99,7 +106,8 @@ if __name__ == "__main__":
     # Run with reload disabled since we're importing the app directly
     uvicorn.run(
         "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=False  # Disable reload since we're importing directly
+        host=settings.API_HOST,
+        port=settings.API_PORT,
+        reload=settings.API_RELOAD and not settings.is_production,
+        log_level=settings.API_LOG_LEVEL.lower()
     )

@@ -54,6 +54,11 @@ SECTIONS: tuple[RuntimeSettingSection, ...] = (
         description="Optional fallback provider settings for future multi-provider use.",
     ),
     RuntimeSettingSection(
+        id="strapi",
+        title="Strapi",
+        description="Strapi dashboard provisioning and activity sync settings.",
+    ),
+    RuntimeSettingSection(
         id="qwen",
         title="Qwen",
         description="Optional fallback provider settings for future multi-provider use.",
@@ -171,6 +176,22 @@ SETTINGS_REGISTRY: tuple[RuntimeSettingDefinition, ...] = (
         label="Default OpenAI model",
         description="Default model used by the OpenAI provider when an agent does not override it.",
         env_var="OPENAI_MODEL",
+    ),
+    RuntimeSettingDefinition(
+        key="strapi.url",
+        section="strapi",
+        label="Strapi base URL",
+        description="Base URL for the Strapi dashboard integration.",
+        env_var="STRAPI_URL",
+    ),
+    RuntimeSettingDefinition(
+        key="strapi.api_token",
+        section="strapi",
+        label="Strapi API token",
+        description="Bearer token used by Agent Builder to provision and sync Strapi data.",
+        env_var="STRAPI_API_TOKEN",
+        input_type="password",
+        secret=True,
     ),
     RuntimeSettingDefinition(
         key="qwen.api_key",

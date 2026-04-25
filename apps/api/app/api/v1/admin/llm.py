@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 import structlog
 
-from app.auth.admin_key import require_admin_key
+from app.auth.dependencies import require_dashboard_access
 from app.dependencies import get_settings
 from app.services.azure_openai_deployment_service import (
     AzureDeploymentAuthError,
@@ -36,7 +36,7 @@ class AzureDeploymentListResponse(BaseModel):
 @router.get(
     "/azure/deployments",
     response_model=AzureDeploymentListResponse,
-    dependencies=[Depends(require_admin_key)],
+    dependencies=[Depends(require_dashboard_access)],
 )
 async def list_azure_openai_deployments(settings=Depends(get_settings)):
     service = AzureOpenAIDeploymentService(settings)

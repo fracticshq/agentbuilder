@@ -4,6 +4,7 @@ interface StepFeaturesProps {
   data: {
     websockets: boolean;
     file_upload: boolean;
+    human_takeover: boolean;
     conversation_memory: boolean;
     typing_indicators: boolean;
     response_streaming: boolean;
@@ -63,6 +64,24 @@ export default function StepFeatures({ data, onChange }: StepFeaturesProps) {
               type="checkbox"
               checked={data.websockets}
               onChange={(e) => onChange('websockets', e.target.checked)}
+              className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+            <div>
+              <label htmlFor="human_takeover" className="text-sm font-medium text-gray-900">
+                Human Takeover
+              </label>
+              <p className="text-xs text-gray-500">
+                Allow admins to take over live widget conversations from Strapi.
+              </p>
+            </div>
+            <input
+              id="human_takeover"
+              type="checkbox"
+              checked={data.human_takeover}
+              onChange={(e) => onChange('human_takeover', e.target.checked)}
               className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
             />
           </div>
@@ -276,7 +295,7 @@ export default function StepFeatures({ data, onChange }: StepFeaturesProps) {
             </h3>
             <div className="mt-2 text-sm text-green-700">
               <ul className="list-disc pl-5 space-y-1">
-                <li><strong>Enable:</strong> WebSockets, Response Streaming, Conversation Memory</li>
+                <li><strong>Enable:</strong> WebSockets, Human Takeover, Response Streaming, Conversation Memory</li>
                 <li><strong>Security:</strong> Always enable Rate Limiting and Content Filtering</li>
                 <li><strong>Session Timeout:</strong> 30-60 minutes for most use cases</li>
                 <li><strong>File Upload:</strong> Only enable if your agent needs to process documents</li>

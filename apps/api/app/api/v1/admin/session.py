@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends
 
-from app.auth.admin_key import require_admin_key
+from app.auth.dependencies import get_current_active_user
 
 router = APIRouter()
 
 
-@router.get("/validate", dependencies=[Depends(require_admin_key)])
-async def validate_admin_session():
-    """Validate the current X-Admin-Key header."""
-    return {"authorized": True}
+@router.get("/validate")
+async def validate_admin_session(user=Depends(get_current_active_user)):
+    """Validate the current authenticated dashboard session."""
+    return {"authorized": True, "email": user.email, "role": user.role}

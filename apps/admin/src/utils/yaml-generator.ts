@@ -44,6 +44,7 @@ export interface AgentConfig {
   // Features
   websockets?: boolean;
   file_upload?: boolean;
+  human_takeover?: boolean;
   conversation_memory?: boolean;
   typing_indicators?: boolean;
   response_streaming?: boolean;
@@ -153,6 +154,7 @@ export function generateConfigObject(data: AgentConfig): Record<string, any> {
   // Features Configuration
   config.configuration.features = {
     websockets: data.websockets ?? true,
+    human_takeover: data.human_takeover ?? true,
     conversation_memory: data.conversation_memory ?? true,
     typing_indicators: data.typing_indicators ?? true,
     response_streaming: data.response_streaming ?? true,
@@ -334,6 +336,7 @@ export function generateAPIPayload(data: AgentConfig): Record<string, any> {
           enabled: false,
         },
         conversation_memory: data.conversation_memory,
+        human_takeover: data.human_takeover,
         typing_indicators: data.typing_indicators,
         response_streaming: data.response_streaming,
       },
