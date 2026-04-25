@@ -242,10 +242,11 @@ Optional frontend runtime overrides in your shell or Compose env:
 
 ```env
 ADMIN_API_BASE_URL=http://localhost:8000
+WIDGET_BASE_URL=http://localhost:5174
 WIDGET_API_BASE_URL=http://localhost:8000
 ```
 
-For production, point those to your public API origin instead.
+For production, point `ADMIN_API_BASE_URL` and `WIDGET_API_BASE_URL` to your public API origin, and `WIDGET_BASE_URL` to your public widget origin.
 
 ### 2. Build and start
 

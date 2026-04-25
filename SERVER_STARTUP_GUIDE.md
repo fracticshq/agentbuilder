@@ -19,6 +19,7 @@ DEBUG=false
 ALLOW_ADMIN_KEY_BYPASS=false
 SESSION_SECRET=<openssl rand -hex 32>
 ADMIN_API_BASE_URL=http://localhost:8000
+WIDGET_BASE_URL=http://localhost:5174
 WIDGET_API_BASE_URL=http://localhost:8000
 ```
 

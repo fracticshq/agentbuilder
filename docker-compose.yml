@@ -49,6 +49,7 @@ services:
       - "3000:3000"
     environment:
       API_BASE_URL: "${ADMIN_API_BASE_URL:-http://localhost:8000}"
+      WIDGET_BASE_URL: "${WIDGET_BASE_URL:-http://localhost:5174}"
     depends_on:
       - api
     restart: unless-stopped

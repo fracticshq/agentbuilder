@@ -28,6 +28,16 @@ const DocumentTypeIcons = {
   other: '📄',
 };
 
+function getWidgetBaseUrl(): string {
+  const runtimeWidgetUrl = window.__APP_CONFIG__?.WIDGET_BASE_URL;
+  const envWidgetUrl = process.env.REACT_APP_WIDGET_URL;
+  return (runtimeWidgetUrl || envWidgetUrl || 'http://localhost:5174').replace(/\/+$/, '');
+}
+
+function buildEmbedCode(widgetBaseUrl: string, agentId: string): string {
+  return `<script src="${widgetBaseUrl}/embed.js" data-agent-id="${agentId}" async></script>`;
+}
+
 export default function AgentDetail() {
   const { id } = useParams<{ id: string }>();
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -35,6 +45,7 @@ export default function AgentDetail() {
   const [loading, setLoading] = useState(true);
   const [uploadProgress, setUploadProgress] = useState<{ [key: string]: number }>({});
   const [selectedDocumentType, setSelectedDocumentType] = useState<string>('other');
+  const [copiedEmbed, setCopiedEmbed] = useState(false);
 
   useEffect(() => {
     if (id) {
@@ -177,6 +188,28 @@ export default function AgentDetail() {
   isDev && console.log('🔧 AgentDetail rendering with agent:', agent.id, agent.name);
   isDev && console.log('📄 Documents count:', documents.length);
 
+  const widgetBaseUrl = getWidgetBaseUrl();
+  const embedCode = buildEmbedCode(widgetBaseUrl, agent.id);
+
+  const handleCopyEmbedCode = async () => {
+    try {
+      await navigator.clipboard.writeText(embedCode);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = embedCode;
+      textarea.setAttribute('readonly', 'true');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+
+    setCopiedEmbed(true);
+    window.setTimeout(() => setCopiedEmbed(false), 2000);
+  };
+
   return (
     <div className="space-y-6">
       {/* Breadcrumb */}
@@ -229,6 +262,31 @@ export default function AgentDetail() {
             </Link>
           </div>
         </div>
+      </div>
+
+      {/* Embed Widget */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h2 className="text-xl font-semibold text-gray-900">Embed Widget</h2>
+            <p className="text-gray-600 mt-1">
+              Add this script before the closing body tag on any website.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleCopyEmbedCode}
+            className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
+          >
+            {copiedEmbed ? 'Copied' : 'Copy Script'}
+          </button>
+        </div>
+        <pre className="mt-4 overflow-x-auto rounded-lg bg-gray-950 p-4 text-sm text-gray-100">
+          <code>{embedCode}</code>
+        </pre>
+        <p className="mt-3 text-sm text-gray-500">
+          Widget URL: {widgetBaseUrl}
+        </p>
       </div>
 
       {/* Knowledge Base Section */}

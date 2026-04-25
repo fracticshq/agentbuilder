@@ -25,6 +25,7 @@ const API_BASE = window.__APP_CONFIG__?.API_BASE_URL || import.meta.env.VITE_API
 const WS_BASE = API_BASE.replace(/^http/, 'ws');
 const apiClient = new APIClient(API_BASE);
 const wsClient = new WebSocketClient(API_BASE);
+const isEmbedded = window.parent !== window || new URLSearchParams(window.location.search).get('embedded') === '1';
 
 function createSecureClientId(prefix: string): string {
   if (window.crypto?.randomUUID) {
@@ -163,6 +164,16 @@ function App({ config }: AppProps) {
       setIsOpen(true);
     }
   }, [setIsOpen]);
+
+  React.useEffect(() => {
+    if (!isEmbedded) return;
+
+    window.parent.postMessage({
+      type: 'agentbuilder-widget-state',
+      isOpen,
+      isExpanded,
+    }, '*');
+  }, [isOpen, isExpanded]);
 
   // ── Widget control channel (human takeover) ───────────────────
   React.useEffect(() => {
