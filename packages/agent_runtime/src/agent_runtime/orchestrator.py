@@ -14,6 +14,11 @@ from llm.reasoning.planning import Plan, PROMPT_PLANNING
 
 logger = structlog.get_logger()
 
+SAFE_FALLBACK_MESSAGE = (
+    "I’m not able to answer that reliably right now. Please try again in a moment "
+    "or contact the brand team for help."
+)
+
 @dataclass
 class AgentResult:
     answer: str
@@ -123,7 +128,7 @@ Output JSON Format:
         except Exception as e:
             logger.error("planning_failed", error=str(e))
             # Fallback to direct answer if planning fails (graceful degradation)
-            return await self._fallback_direct_answer(query)
+            return await self._fallback_direct_answer(query, reason="planning_failed")
 
         # 2. EXECUTION PHASE
         final_answer = None
@@ -156,7 +161,15 @@ Output JSON Format:
 
         # 3. SYNTHESIS / REVIEW PHASE
         # Aggregate results into a final answer
-        final_answer = await self._synthesize_answer(query, scratchpad)
+        if not scratchpad:
+            logger.warning("orchestrator_no_tool_results")
+            return await self._fallback_direct_answer(query, reason="no_tool_results")
+
+        try:
+            final_answer = await self._synthesize_answer(query, scratchpad)
+        except Exception as e:
+            logger.error("synthesis_failed", error=str(e))
+            return await self._fallback_direct_answer(query, reason="synthesis_failed")
         
         # 4. CRITIC / VERIFICATION PHASE (SOTA Self-Correction)
         # If a Critic is available, validate the answer and retry if needed
@@ -194,11 +207,15 @@ Output JSON Format:
                     else:
                         # Retry synthesis with critic feedback
                         logger.info("retrying_synthesis_with_feedback")
-                        final_answer = await self._retry_with_feedback(
-                            query, 
-                            scratchpad, 
-                            validation_result.issues
-                        )
+                        try:
+                            final_answer = await self._retry_with_feedback(
+                                query, 
+                                scratchpad, 
+                                validation_result.issues
+                            )
+                        except Exception as e:
+                            logger.error("critic_retry_failed", error=str(e))
+                            return await self._fallback_direct_answer(query, reason="critic_retry_failed")
                         
                         # Re-validate the retried answer
                         retry_validation = await self.critic.validate_response(
@@ -251,10 +268,37 @@ Output JSON Format:
         response = await self.llm.generate(prompt)
         return response.content
 
-    async def _fallback_direct_answer(self, query: str) -> AgentResult:
-        """fallback for when planning fails."""
-        response = await self.llm.generate(f"Please answer this directly: {query}")
-        return AgentResult(answer=response.content, metadata={"fallback": True}, success=True)
+    async def _fallback_direct_answer(self, query: str, reason: str) -> AgentResult:
+        """Fallback chain: direct answer first, then safe canned escalation."""
+        logger.warning("agent_fallback_direct_answer", reason=reason)
+        try:
+            response = await self.llm.generate(
+                f"{self.system_prompt}\n\n"
+                "Answer the user directly and conservatively. If the knowledge base or tools are needed "
+                "but unavailable, say you do not have enough verified information.\n\n"
+                f"User Request: {query}"
+            )
+            return AgentResult(
+                answer=response.content,
+                metadata={
+                    "fallback": True,
+                    "fallback_stage": "direct_answer",
+                    "fallback_reason": reason,
+                },
+                success=True,
+            )
+        except Exception as e:
+            logger.error("agent_fallback_safe_canned", reason=reason, error=str(e))
+            return AgentResult(
+                answer=SAFE_FALLBACK_MESSAGE,
+                metadata={
+                    "fallback": True,
+                    "fallback_stage": "safe_canned",
+                    "fallback_reason": reason,
+                    "fallback_error": str(e),
+                },
+                success=True,
+            )
 
     async def _retry_with_feedback(self, query: str, history: List[Dict], issues: List[str]) -> str:
         """Re-synthesize answer with critic feedback."""

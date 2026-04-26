@@ -16,7 +16,7 @@ from commons.types.responses import MessageResponse, StreamingMessageResponse
 from ....auth.admin_key import is_admin_key_authorized
 from ....connections import connection_manager
 from ....dependencies import get_message_service, get_settings
-from ....security.rate_limiter import check_rate_limit
+from ....security.rate_limiter import check_named_rate_limit
 from ....services.message_service import MessageService
 from ....websocket_manager import ws_manager
 
@@ -41,18 +41,57 @@ async def _safe_send_text(websocket: WebSocket, payload: str) -> bool:
         return False
 
 
-async def _enforce_websocket_rate_limit(websocket: WebSocket, endpoint: str) -> bool:
-    settings = get_settings()
+async def _enforce_websocket_rate_limit(
+    websocket: WebSocket,
+    endpoint: str,
+    policy: str,
+    *,
+    agent_id: str | None = None,
+    brand_slug: str | None = None,
+    conversation_id: str | None = None,
+) -> bool:
     ip_address = websocket.client.host if websocket.client else None
-    is_allowed, _info = await check_rate_limit(
+    is_allowed, info = await check_named_rate_limit(
+        policy,
         ip_address=ip_address,
         endpoint=endpoint,
-        limit=settings.RATE_LIMIT_REQUESTS_PER_MINUTE,
+        agent_id=agent_id,
+        brand_slug=brand_slug,
+        conversation_id=conversation_id,
     )
     if not is_allowed:
+        await _safe_send_text(websocket, json.dumps({
+            "type": "rate_limit",
+            "content": "Rate limit exceeded. Please wait before sending another message.",
+            "retry_after": info.get("retry_after") or 60,
+            "policy": info.get("policy") or policy,
+        }))
         await _close_websocket(websocket, "Rate limit exceeded")
         return False
     return True
+
+
+async def _enforce_message_rate_limit(request: MessageRequest, policy: str, endpoint: str) -> None:
+    brand_slug = await _get_agent_brand_slug(request.agent_id)
+    is_allowed, info = await check_named_rate_limit(
+        policy,
+        user_id=request.user_id,
+        agent_id=request.agent_id,
+        brand_slug=brand_slug,
+        conversation_id=request.conversation_id,
+        endpoint=endpoint,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded",
+            headers={
+                "X-RateLimit-Limit": str(info["limit"]),
+                "X-RateLimit-Remaining": str(info["remaining"]),
+                "X-RateLimit-Reset": str(info["reset_at"]),
+                "Retry-After": str(info["retry_after"] or 60),
+            },
+        )
 
 
 async def _get_agent_brand_slug(agent_id: str | None) -> str | None:
@@ -99,6 +138,7 @@ async def send_message(
 ):
     """Send a message and get a response."""
     try:
+        await _enforce_message_rate_limit(request, "widget_chat", "POST:/messages")
         response = await message_service.process_message(request)
         return response
     except Exception as e:
@@ -112,6 +152,8 @@ async def stream_message(
     message_service: MessageService = Depends(get_message_service)
 ):
     """Send a message and get a streaming response."""
+    await _enforce_message_rate_limit(request, "widget_stream", "POST:/messages/stream")
+
     async def generate_stream():
         try:
             async for chunk in message_service.stream_message(request):
@@ -141,7 +183,7 @@ async def websocket_endpoint(
     message_service: MessageService = Depends(get_message_service)
 ):
     """WebSocket endpoint for real-time messaging."""
-    if not await _enforce_websocket_rate_limit(websocket, "WS_CONNECT:/messages/ws"):
+    if not await _enforce_websocket_rate_limit(websocket, "WS_CONNECT:/messages/ws", "widget_ws_connect"):
         return
     await websocket.accept()
     
@@ -149,10 +191,16 @@ async def websocket_endpoint(
         while True:
             # Receive message from client
             data = await websocket.receive_text()
-            if not await _enforce_websocket_rate_limit(websocket, "WS_MESSAGE:/messages/ws"):
-                return
             try:
                 request_data = json.loads(data)
+                if not await _enforce_websocket_rate_limit(
+                    websocket,
+                    "WS_MESSAGE:/messages/ws",
+                    "widget_ws_message",
+                    agent_id=request_data.get("agent_id"),
+                    conversation_id=request_data.get("conversation_id"),
+                ):
+                    return
                 # Heartbeat ping — respond immediately and wait for next message
                 if request_data.get("type") == "ping":
                     if not await _safe_send_text(websocket, json.dumps({"type": "pong"})):
@@ -198,7 +246,12 @@ async def admin_websocket_endpoint(
     message_service: MessageService = Depends(get_message_service),
 ):
     """Admin WebSocket for human takeover and live conversation monitoring."""
-    if not await _enforce_websocket_rate_limit(websocket, "WS_CONNECT:/messages/ws/admin"):
+    if not await _enforce_websocket_rate_limit(
+        websocket,
+        "WS_CONNECT:/messages/ws/admin",
+        "admin_api",
+        conversation_id=conversation_id,
+    ):
         return
     settings = get_settings()
     if not settings.ENABLE_HUMAN_TAKEOVER:
@@ -228,7 +281,12 @@ async def admin_websocket_endpoint(
     try:
         while True:
             data = await websocket.receive_text()
-            if not await _enforce_websocket_rate_limit(websocket, "WS_MESSAGE:/messages/ws/admin"):
+            if not await _enforce_websocket_rate_limit(
+                websocket,
+                "WS_MESSAGE:/messages/ws/admin",
+                "admin_api",
+                conversation_id=conversation_id,
+            ):
                 return
             try:
                 msg = json.loads(data)
@@ -330,9 +388,16 @@ async def widget_control_channel(
     - ping: heartbeat
     - user_message: forwarded to admin during human takeover, buffered, and persisted
     """
-    if not await _enforce_websocket_rate_limit(websocket, "WS_CONNECT:/messages/ws/widget"):
-        return
     settings = get_settings()
+    agent_id = (websocket.query_params.get("agent_id") or "").strip()
+    if not await _enforce_websocket_rate_limit(
+        websocket,
+        "WS_CONNECT:/messages/ws/widget",
+        "widget_ws_connect",
+        agent_id=agent_id or None,
+        conversation_id=conversation_id,
+    ):
+        return
     if not settings.ENABLE_HUMAN_TAKEOVER:
         logger.warning(
             "widget_control_rejected_human_takeover_disabled",
@@ -342,7 +407,6 @@ async def widget_control_channel(
         await _close_websocket(websocket, "Human takeover is disabled")
         return
 
-    agent_id = (websocket.query_params.get("agent_id") or "").strip()
     control_secret = (websocket.query_params.get("control_secret") or "").strip()
     is_authorized = await ws_manager.authorize_widget_control(
         conversation_id,
@@ -363,7 +427,13 @@ async def widget_control_channel(
     try:
         while True:
             data = await websocket.receive_text()
-            if not await _enforce_websocket_rate_limit(websocket, "WS_MESSAGE:/messages/ws/widget"):
+            if not await _enforce_websocket_rate_limit(
+                websocket,
+                "WS_MESSAGE:/messages/ws/widget",
+                "widget_ws_message",
+                agent_id=agent_id or None,
+                conversation_id=conversation_id,
+            ):
                 return
             try:
                 msg = json.loads(data)

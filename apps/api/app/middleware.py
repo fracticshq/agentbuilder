@@ -9,6 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import structlog
 
 from .config import Settings
+from .monitoring import REQUEST_COUNT, REQUEST_DURATION
 
 logger = structlog.get_logger()
 settings = Settings()
@@ -76,6 +77,17 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         
         process_time = time.time() - start_time
+        endpoint = request.scope.get("route").path if request.scope.get("route") else request.url.path
+        REQUEST_COUNT.labels(
+            method=request.method,
+            endpoint=endpoint,
+            status=str(response.status_code),
+        ).inc()
+        REQUEST_DURATION.labels(
+            method=request.method,
+            endpoint=endpoint,
+        ).observe(process_time)
+
         logger.info(
             "Request completed",
             method=request.method,

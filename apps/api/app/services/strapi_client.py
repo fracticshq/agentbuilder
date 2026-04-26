@@ -5,6 +5,7 @@ to the Strapi dashboard at POST /session-save and POST /chat-save.
 
 import asyncio
 import structlog
+from ..monitoring import STRAPI_SYNC_COUNT
 
 try:
     import httpx
@@ -151,6 +152,8 @@ class StrapiClient:
         last_message_at: str | None = None,
     ) -> None:
         try:
+            if not await self._allow_sync("session", conversation_id, brand_slug, agent_id):
+                return
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.post(
                     f"{self.base_url}/api/session-save",
@@ -163,8 +166,10 @@ class StrapiClient:
                     headers=self._headers,
                 )
                 resp.raise_for_status()
+                STRAPI_SYNC_COUNT.labels(operation="session", status="success").inc()
                 logger.debug("strapi_session_saved", conversation_id=conversation_id, brand_slug=brand_slug, agent_id=agent_id)
         except Exception as e:
+            STRAPI_SYNC_COUNT.labels(operation="session", status="error").inc()
             logger.warning("strapi_session_save_failed", conversation_id=conversation_id, error=str(e))
 
     async def _save_message(
@@ -178,6 +183,8 @@ class StrapiClient:
         timestamp: str | None = None,
     ) -> None:
         try:
+            if not await self._allow_sync("message", conversation_id, brand_slug, agent_id):
+                return
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.post(
                     f"{self.base_url}/api/chat-save",
@@ -192,6 +199,37 @@ class StrapiClient:
                     headers=self._headers,
                 )
                 resp.raise_for_status()
+                STRAPI_SYNC_COUNT.labels(operation="message", status="success").inc()
                 logger.debug("strapi_message_saved", conversation_id=conversation_id, role=role, brand_slug=brand_slug, agent_id=agent_id)
         except Exception as e:
+            STRAPI_SYNC_COUNT.labels(operation="message", status="error").inc()
             logger.warning("strapi_message_save_failed", conversation_id=conversation_id, role=role, error=str(e))
+
+    async def _allow_sync(
+        self,
+        operation: str,
+        conversation_id: str,
+        brand_slug: str | None,
+        agent_id: str | None,
+    ) -> bool:
+        from ..security.rate_limiter import check_named_rate_limit
+
+        is_allowed, info = await check_named_rate_limit(
+            "strapi_sync",
+            agent_id=agent_id,
+            brand_slug=brand_slug,
+            conversation_id=conversation_id,
+            endpoint=f"strapi:{operation}",
+        )
+        if not is_allowed:
+            STRAPI_SYNC_COUNT.labels(operation=operation, status="rate_limited").inc()
+            logger.warning(
+                "strapi_sync_rate_limited",
+                operation=operation,
+                conversation_id=conversation_id,
+                brand_slug=brand_slug,
+                agent_id=agent_id,
+                retry_after=info.get("retry_after"),
+            )
+            return False
+        return True

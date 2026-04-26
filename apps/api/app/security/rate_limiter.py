@@ -18,6 +18,7 @@ If stricter behaviour is required, replace the ``return True, {...}`` in
 ``check_rate_limit``'s except block with a 503 raise.
 """
 
+import re
 import time
 from typing import Optional
 from fastapi import HTTPException, status
@@ -29,9 +30,46 @@ from ..auth.api_keys import extract_key_id
 from ..auth.jwt import decode_and_verify_token
 from ..config import Settings
 from ..connections import connection_manager
+from ..monitoring import RATE_LIMIT_COUNT
 
 logger = structlog.get_logger()
 settings = Settings()
+
+
+RATE_LIMIT_POLICIES = {
+    "widget_chat": ("RATE_LIMIT_POLICY_WIDGET_CHAT", 60, 2),
+    "widget_stream": ("RATE_LIMIT_POLICY_WIDGET_STREAM", 60, 3),
+    "widget_ws_connect": ("RATE_LIMIT_POLICY_WIDGET_WS_CONNECT", 60, 1),
+    "widget_ws_message": ("RATE_LIMIT_POLICY_WIDGET_WS_MESSAGE", 60, 1),
+    "admin_api": ("RATE_LIMIT_POLICY_ADMIN_API", 60, 1),
+    "upload": ("RATE_LIMIT_POLICY_UPLOAD", 60, 5),
+    "strapi_sync": ("RATE_LIMIT_POLICY_STRAPI_SYNC", 60, 1),
+    "default": ("RATE_LIMIT_REQUESTS_PER_MINUTE", 60, 1),
+}
+
+
+def _safe_key_part(value: Optional[str]) -> str:
+    if not value:
+        return "unknown"
+    return re.sub(r"[^a-zA-Z0-9_.:-]", "_", str(value).strip().lower())[:120] or "unknown"
+
+
+def _policy_config(policy: str) -> tuple[int, int, int]:
+    limit_attr, window, cost = RATE_LIMIT_POLICIES.get(policy, RATE_LIMIT_POLICIES["default"])
+    return int(getattr(settings, limit_attr)), window, cost
+
+
+def infer_policy(method: str, path: str) -> str:
+    normalized_path = path.rstrip("/")
+    if normalized_path.endswith("/messages/stream"):
+        return "widget_stream"
+    if normalized_path.endswith("/messages"):
+        return "widget_chat"
+    if "/knowledge" in normalized_path or "/ingestion" in normalized_path:
+        return "upload" if method.upper() in {"POST", "PUT"} else "default"
+    if "/admin/" in normalized_path or "/auth/" in normalized_path:
+        return "admin_api"
+    return "default"
 
 
 class RateLimiter:
@@ -91,8 +129,12 @@ class RateLimiter:
             # Count requests in current window
             pipe.zcard(rate_key)
             
-            # Add current request with score as timestamp
-            pipe.zadd(rate_key, {f"{now}:{cost}": now})
+            # Add one sorted-set member per cost unit so zcard reflects weighted usage.
+            weighted_entries = {
+                f"{now}:{index}": now
+                for index in range(max(1, cost))
+            }
+            pipe.zadd(rate_key, weighted_entries)
             
             # Set expiration on the key
             pipe.expire(rate_key, window + 1)
@@ -126,21 +168,30 @@ class RateLimiter:
             return is_allowed, info
             
         except Exception as e:
+            info = {
+                "limit": limit,
+                "remaining": 0 if settings.RATE_LIMIT_FAIL_CLOSED else limit,
+                "reset_at": int(now + window),
+                "retry_after": window if settings.RATE_LIMIT_FAIL_CLOSED else None,
+            }
+            if settings.RATE_LIMIT_FAIL_CLOSED:
+                logger.error(
+                    "rate_limiter_fail_closed",
+                    error=str(e),
+                    key=key,
+                    note="rate limiting enforced closed — Redis unreachable",
+                )
+                return False, info
+
             # FAIL-OPEN: Redis is unavailable — allow the request through.
             # See module docstring for trade-offs and alerting guidance.
             logger.warning(
                 "rate_limiter_fail_open",
-                event="rate_limiter_fail_open",
                 error=str(e),
                 key=key,
                 note="rate limiting bypassed — Redis unreachable",
             )
-            return True, {
-                "limit": limit,
-                "remaining": limit,
-                "reset_at": int(now + window),
-                "retry_after": None
-            }
+            return True, info
     
     async def check_user_rate_limit(
         self,
@@ -308,6 +359,63 @@ async def check_rate_limit(
         return True, {"limit": 0, "remaining": 0, "reset_at": 0, "retry_after": None}
 
 
+async def check_named_rate_limit(
+    policy: str,
+    *,
+    ip_address: Optional[str] = None,
+    user_id: Optional[str] = None,
+    api_key_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    brand_slug: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    limit: Optional[int] = None,
+    window: Optional[int] = None,
+    cost: Optional[int] = None,
+) -> tuple[bool, dict]:
+    policy_limit, policy_window, policy_cost = _policy_config(policy)
+    resolved_limit = limit or policy_limit
+    resolved_window = window or policy_window
+    resolved_cost = cost or policy_cost
+
+    identifier_type = "ip"
+    identifier = ip_address
+    if api_key_id:
+        identifier_type = "api_key"
+        identifier = api_key_id
+    elif user_id:
+        identifier_type = "user"
+        identifier = user_id
+
+    key = ":".join([
+        _safe_key_part(policy),
+        f"id:{_safe_key_part(identifier)}",
+        f"agent:{_safe_key_part(agent_id)}",
+        f"brand:{_safe_key_part(brand_slug)}",
+        f"conversation:{_safe_key_part(conversation_id)}",
+        f"endpoint:{_safe_key_part(endpoint)}",
+        str(resolved_window),
+    ])
+
+    is_allowed, info = await rate_limiter.check_rate_limit(
+        key,
+        resolved_limit,
+        resolved_window,
+        cost=resolved_cost,
+    )
+    RATE_LIMIT_COUNT.labels(
+        policy=policy,
+        identifier_type=identifier_type,
+        outcome="allowed" if is_allowed else "blocked",
+    ).inc()
+    info.update({
+        "policy": policy,
+        "identifier_type": identifier_type,
+        "cost": resolved_cost,
+    })
+    return is_allowed, info
+
+
 async def rate_limit_dependency(connection: HTTPConnection):
     """
     FastAPI dependency for rate limiting.
@@ -340,9 +448,20 @@ async def rate_limit_dependency(connection: HTTPConnection):
     ip_address = connection.client.host if connection.client else None
     connection_method = getattr(connection, "method", connection.scope["type"].upper())
     endpoint = f"{connection_method}:{connection.url.path}"
+    policy = infer_policy(connection_method, connection.url.path)
+    agent_id = connection.headers.get("X-Agent-ID") or connection.query_params.get("agent_id")
+    brand_slug = connection.headers.get("X-Brand-Slug") or connection.query_params.get("brand_slug")
+    conversation_id = connection.headers.get("X-Conversation-ID") or connection.query_params.get("conversation_id")
 
     async def _enforce(identifier_type: str, **kwargs) -> dict:
-        is_allowed, info = await check_rate_limit(endpoint=endpoint, **kwargs)
+        is_allowed, info = await check_named_rate_limit(
+            policy,
+            endpoint=endpoint,
+            agent_id=agent_id,
+            brand_slug=brand_slug,
+            conversation_id=conversation_id,
+            **kwargs,
+        )
         if not is_allowed:
             logger.warning(
                 "rate_limit_blocked",

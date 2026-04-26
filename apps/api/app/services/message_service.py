@@ -6,6 +6,7 @@ Phase 4: Response validation to prevent hallucinations.
 
 import asyncio
 import json
+import re
 import uuid
 from typing import AsyncGenerator, Optional
 from datetime import datetime, timezone
@@ -33,11 +34,42 @@ from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
 
 from ..config import Settings
 from ..connections import connection_manager
+from ..monitoring import AGENT_FALLBACK_COUNT, GUARDRAIL_COUNT, MESSAGE_COUNT, MESSAGE_DURATION
 from .response_validator import ResponseValidator  # Phase 4
 from .strapi_client import StrapiClient
 from .runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger(__name__)
+
+
+SENSITIVE_DATA_PATTERNS = [
+    re.compile(r"\b(?:\d[ -]*?){13,16}\b"),
+    re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+    re.compile(r"\b(?:api[_-]?key|secret|password|token)\s*[:=]\s*\S+", re.IGNORECASE),
+]
+
+PROMPT_ATTACK_PATTERNS = [
+    re.compile(r"ignore (?:all )?(?:previous|prior) instructions", re.IGNORECASE),
+    re.compile(r"reveal (?:your )?(?:system|developer) prompt", re.IGNORECASE),
+    re.compile(r"show me (?:your )?(?:system|developer) prompt", re.IGNORECASE),
+]
+
+GUARDRAIL_SENSITIVE_MESSAGE = (
+    "Please do not share sensitive personal data, passwords, tokens, or payment details here. "
+    "I can still help with product, dealer, order, and general pre-sales questions."
+)
+GUARDRAIL_POLICY_MESSAGE = (
+    "I can’t help with requests that try to bypass the assistant’s safety or operating rules. "
+    "I can help with product and brand questions instead."
+)
+GUARDRAIL_ESCALATION_MESSAGE = (
+    "This looks like it may need human support. I’m flagging it for assistance and can still help "
+    "with general product information in the meantime."
+)
+LOW_CONFIDENCE_MESSAGE = (
+    "I don’t have enough verified information in the knowledge base to answer that reliably. "
+    "Please share a little more detail or contact the brand team for confirmation."
+)
 
 
 def _sanitize_for_json(data: dict) -> dict:
@@ -201,6 +233,95 @@ class MessageService:
         )
 
         logger.info("message_service_initialized", brand_id=self.brand_id)
+
+    def _evaluate_pre_response_guardrails(self, message: str, escalations: list) -> dict:
+        if any(pattern.search(message or "") for pattern in SENSITIVE_DATA_PATTERNS):
+            GUARDRAIL_COUNT.labels(action="block", reason="sensitive_data").inc()
+            return {
+                "action": "block",
+                "reason": "sensitive_data",
+                "message": GUARDRAIL_SENSITIVE_MESSAGE,
+            }
+
+        if any(pattern.search(message or "") for pattern in PROMPT_ATTACK_PATTERNS):
+            GUARDRAIL_COUNT.labels(action="block", reason="prompt_attack").inc()
+            return {
+                "action": "block",
+                "reason": "prompt_attack",
+                "message": GUARDRAIL_POLICY_MESSAGE,
+            }
+
+        for escalation in escalations or []:
+            severity = getattr(escalation, "severity", None)
+            if isinstance(escalation, dict):
+                severity = escalation.get("severity")
+            if str(severity or "").lower() in {"high", "critical"}:
+                GUARDRAIL_COUNT.labels(action="escalate", reason="safety_escalation").inc()
+                return {
+                    "action": "escalate",
+                    "reason": "safety_escalation",
+                    "message": GUARDRAIL_ESCALATION_MESSAGE,
+                }
+
+        GUARDRAIL_COUNT.labels(action="allow", reason="none").inc()
+        return {"action": "allow", "reason": "none", "message": ""}
+
+    def _apply_post_response_guardrails(self, response_text: str, metadata: dict) -> tuple[str, dict]:
+        confidence = float(metadata.get("validation_confidence", 1.0) or 1.0)
+        threshold = getattr(self.settings, "CONFIDENCE_THRESHOLD", 0.70)
+        try:
+            threshold_value = float(threshold)
+        except (TypeError, ValueError):
+            threshold_value = 0.70
+        if confidence < threshold_value:
+            GUARDRAIL_COUNT.labels(action="fallback", reason="low_confidence").inc()
+            next_metadata = {
+                **metadata,
+                "guardrail_action": "fallback",
+                "guardrail_reason": "low_confidence",
+                "original_confidence": confidence,
+            }
+            return LOW_CONFIDENCE_MESSAGE, next_metadata
+
+        return response_text, metadata
+
+    async def _store_guardrail_response(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        agent_id: str,
+        user_message: str,
+        decision: dict,
+    ) -> MessageResponse:
+        response_text = decision["message"]
+        await self.short_term.add_message(
+            conversation_id=conversation_id,
+            role=MessageRole.ASSISTANT,
+            content=response_text,
+            metadata={
+                "user_id": user_id,
+                "guardrail_action": decision["action"],
+                "guardrail_reason": decision["reason"],
+                "validation_passed": False,
+            },
+        )
+        self.strapi.sync_conversation(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            assistant_message=response_text,
+            brand_slug=self.brand_id,
+            agent_id=agent_id,
+        )
+        MESSAGE_COUNT.labels(status=f"guardrail_{decision['action']}").inc()
+        return MessageResponse(
+            message=response_text,
+            conversation_id=conversation_id,
+            citations=[],
+            context_used=0,
+            confidence_score=1.0,
+            processing_time_ms=0,
+        )
 
     def _build_llm_provider(self, runtime_config: dict[str, Optional[str]]):
         """Build an LLM provider from resolved runtime settings."""
@@ -488,12 +609,21 @@ class MessageService:
                     "page_context": request.page_context or {},
                 }
             )
-            
-            # 2. Check for safety rules
+
             escalations = []
-            if self.memory_config.ENABLE_GRAPH_RULES:
+            if self.memory_config.ENABLE_GRAPH_RULES and self.graph:
                 escalations = await self.graph.check_escalation(request.message)
-            
+
+            guardrail_decision = self._evaluate_pre_response_guardrails(request.message, escalations)
+            if guardrail_decision["action"] in {"block", "escalate"}:
+                return await self._store_guardrail_response(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    user_message=request.message,
+                    decision=guardrail_decision,
+                )
+
             # 3. Build context for the agent (pass safe context)
             memory_context = await self._build_memory_context(
                 conversation_id=conversation_id,
@@ -547,7 +677,10 @@ class MessageService:
                     context={"memory": memory_context}
                 )
             
-            response_text = agent_result.answer
+            response_text, agent_metadata = self._apply_post_response_guardrails(
+                agent_result.answer,
+                agent_result.metadata,
+            )
             # Note: Validation now happens inside Orchestrator via Critic loop
             # Check agent_result.metadata for validation_passed and validation_issues
             
@@ -571,13 +704,17 @@ class MessageService:
                 content=response_text,
                 metadata={
                     "user_id": user_id,
-                    "agent_steps": agent_result.metadata.get("steps_executed", 0),
-                    "validation_passed": agent_result.metadata.get("validation_passed"),
-                    "validation_issues": agent_result.metadata.get("validation_issues", []),
-                    "plan": agent_result.metadata.get("plan"),
+                    "agent_steps": agent_metadata.get("steps_executed", 0),
+                    "validation_passed": agent_metadata.get("validation_passed"),
+                    "validation_issues": agent_metadata.get("validation_issues", []),
+                    "guardrail_action": agent_metadata.get("guardrail_action"),
+                    "guardrail_reason": agent_metadata.get("guardrail_reason"),
+                    "fallback_stage": agent_metadata.get("fallback_stage"),
+                    "fallback_reason": agent_metadata.get("fallback_reason"),
+                    "plan": agent_metadata.get("plan"),
                     "cart_id": saved_cart_id,
-                    "captured_ids": agent_result.metadata.get("captured_ids"),
-                    "last_searched": agent_result.metadata.get("last_searched"),
+                    "captured_ids": agent_metadata.get("captured_ids"),
+                    "last_searched": agent_metadata.get("last_searched"),
                 }
             )
 
@@ -602,9 +739,19 @@ class MessageService:
                 if await self.short_term.should_summarize(conversation_id):
                     await self.short_term.trigger_summary(conversation_id)
 
-            tool_results = agent_result.metadata.get("tool_results", {})
+            tool_results = agent_metadata.get("tool_results", {})
             citations, _products, _dealers = _extract_tool_result_metadata(tool_results)
             duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
+            status_label = "fallback" if agent_metadata.get("fallback") else "success"
+            if agent_metadata.get("guardrail_action") == "fallback":
+                status_label = "guardrail_fallback"
+            if agent_metadata.get("fallback"):
+                AGENT_FALLBACK_COUNT.labels(
+                    stage=str(agent_metadata.get("fallback_stage", "unknown")),
+                    reason=str(agent_metadata.get("fallback_reason", "unknown")),
+                ).inc()
+            MESSAGE_COUNT.labels(status=status_label).inc()
+            MESSAGE_DURATION.labels(mode="sync", status=status_label).observe(duration_ms / 1000)
                 
             # Return response
             return MessageResponse(
@@ -614,7 +761,7 @@ class MessageService:
                 context_used=len(tool_results),
                 confidence_score=min(
                     1.0,
-                    max(0.0, float(agent_result.metadata.get("validation_confidence", 1.0))),
+                    max(0.0, float(agent_metadata.get("validation_confidence", 1.0))),
                 ),
                 processing_time_ms=duration_ms,
             )
@@ -667,6 +814,47 @@ class MessageService:
                     "page_context": request.page_context or {},
                 }
             )
+
+            escalations = []
+            if self.memory_config.ENABLE_GRAPH_RULES and self.graph:
+                escalations = await self.graph.check_escalation(request.message)
+
+            guardrail_decision = self._evaluate_pre_response_guardrails(request.message, escalations)
+            if guardrail_decision["action"] in {"block", "escalate"}:
+                response_text = guardrail_decision["message"]
+                await self.short_term.add_message(
+                    conversation_id=conversation_id,
+                    role=MessageRole.ASSISTANT,
+                    content=response_text,
+                    metadata={
+                        "user_id": user_id,
+                        "guardrail_action": guardrail_decision["action"],
+                        "guardrail_reason": guardrail_decision["reason"],
+                        "validation_passed": False,
+                    },
+                )
+                self.strapi.sync_conversation(
+                    conversation_id=conversation_id,
+                    user_message=request.message,
+                    assistant_message=response_text,
+                    brand_slug=self.brand_id,
+                    agent_id=agent_id,
+                )
+                MESSAGE_COUNT.labels(status=f"guardrail_{guardrail_decision['action']}").inc()
+                yield StreamingMessageResponse(
+                    type="content",
+                    content=response_text,
+                    conversation_id=conversation_id,
+                )
+                yield StreamingMessageResponse(
+                    type="metadata",
+                    content="",
+                    conversation_id=conversation_id,
+                    citations=[],
+                    context_used=0,
+                    confidence_score=1.0,
+                )
+                return
             
             # Phase 6: Use SOTA Orchestrator for Planning, Execution, and Critic loop
             yield StreamingMessageResponse(
@@ -749,7 +937,10 @@ class MessageService:
                 )
             
             # Extract final answer
-            full_response = agent_result.answer
+            full_response, agent_metadata = self._apply_post_response_guardrails(
+                agent_result.answer,
+                agent_result.metadata,
+            )
             
             # Stream the result word by word (to maintain UI experience)
             words = full_response.split(' ')
@@ -770,7 +961,7 @@ class MessageService:
             
             # Extract cart_id from tool results for persistence across turns
             saved_cart_id = None
-            for _, tool_result in agent_result.metadata.get("tool_results", {}).items():
+            for _, tool_result in agent_metadata.get("tool_results", {}).items():
                 if hasattr(tool_result, "metadata") and tool_result.metadata:
                     cart = tool_result.metadata.get("cart")
                     if cart and isinstance(cart, dict) and cart.get("cart_id"):
@@ -784,7 +975,7 @@ class MessageService:
             logger.info("cart_persistence_final_state", 
                 saved_cart_id=saved_cart_id, 
                 from_session=session_state.get("cart_id"),
-                newly_found=any("cart" in str(tr.metadata) for tr in agent_result.metadata.get("tool_results", {}).values() if hasattr(tr, 'metadata') and tr.metadata)
+                newly_found=any("cart" in str(tr.metadata) for tr in agent_metadata.get("tool_results", {}).values() if hasattr(tr, 'metadata') and tr.metadata)
             )
 
             await self.short_term.add_message(
@@ -793,15 +984,19 @@ class MessageService:
                 content=full_response,
                 metadata={
                     "user_id": user_id,
-                    "agent_steps": agent_result.metadata.get("steps_executed", 0),
-                    "validation_passed": agent_result.metadata.get("validation_passed"),
-                    "validation_issues": agent_result.metadata.get("validation_issues", []),
-                    "plan": agent_result.metadata.get("plan"),
+                    "agent_steps": agent_metadata.get("steps_executed", 0),
+                    "validation_passed": agent_metadata.get("validation_passed"),
+                    "validation_issues": agent_metadata.get("validation_issues", []),
+                    "guardrail_action": agent_metadata.get("guardrail_action"),
+                    "guardrail_reason": agent_metadata.get("guardrail_reason"),
+                    "fallback_stage": agent_metadata.get("fallback_stage"),
+                    "fallback_reason": agent_metadata.get("fallback_reason"),
+                    "plan": agent_metadata.get("plan"),
                     "cart_id": saved_cart_id,
-                    "checkout_url": agent_result.metadata.get("checkout_url"),
-                    "cart_lines": agent_result.metadata.get("cart_lines"),
-                    "captured_ids": agent_result.metadata.get("captured_ids"),
-                    "last_searched": agent_result.metadata.get("last_searched"),
+                    "checkout_url": agent_metadata.get("checkout_url"),
+                    "cart_lines": agent_metadata.get("cart_lines"),
+                    "captured_ids": agent_metadata.get("captured_ids"),
+                    "last_searched": agent_metadata.get("last_searched"),
                 }
             )
 
@@ -830,7 +1025,7 @@ class MessageService:
                     await self.short_term.trigger_summary(conversation_id)
             
             # Send final metadata (orchestrator handles retrieval internally)
-            tool_results = agent_result.metadata.get("tool_results", {})
+            tool_results = agent_metadata.get("tool_results", {})
             citations, safe_products, safe_dealers = _extract_tool_result_metadata(tool_results)
 
             unique_products = _deduplicate_entities(
@@ -856,12 +1051,22 @@ class MessageService:
                 conversation_id=conversation_id,
                 citations=citations,
                 context_used=len(tool_results),
-                confidence_score=min(1.0, max(0.0, float(agent_result.metadata.get("validation_confidence", 1.0)))),
+                confidence_score=min(1.0, max(0.0, float(agent_metadata.get("validation_confidence", 1.0)))),
                 products=unique_products,
                 dealers=unique_dealers
             )
             
             duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+            status_label = "fallback" if agent_metadata.get("fallback") else "success"
+            if agent_metadata.get("guardrail_action") == "fallback":
+                status_label = "guardrail_fallback"
+            if agent_metadata.get("fallback"):
+                AGENT_FALLBACK_COUNT.labels(
+                    stage=str(agent_metadata.get("fallback_stage", "unknown")),
+                    reason=str(agent_metadata.get("fallback_reason", "unknown")),
+                ).inc()
+            MESSAGE_COUNT.labels(status=status_label).inc()
+            MESSAGE_DURATION.labels(mode="stream", status=status_label).observe(duration)
             logger.info(
                 "message_streaming_complete",
                 conversation_id=conversation_id,

@@ -22,6 +22,7 @@ def _make_settings() -> MagicMock:
     settings.QWEN_MODEL = "qwen-max"
     settings.STRAPI_URL = "http://localhost:1337"
     settings.STRAPI_API_TOKEN = ""
+    settings.CONFIDENCE_THRESHOLD = 0.7
     return settings
 
 
@@ -52,6 +53,7 @@ def service_bundle():
         from app.services.message_service import MessageService
 
         service = MessageService(settings=settings, brand_id="brand-test")
+        service.orchestrator = orchestrator
         service._load_agent_config = AsyncMock()
         service._ensure_memory_initialized = AsyncMock()
         service.memory_config = SimpleNamespace(
@@ -143,6 +145,68 @@ async def test_process_message_returns_valid_response_and_persists_memory(servic
     service.episodic.extract_and_store_facts.assert_awaited_once()
     service.short_term.should_summarize.assert_awaited_once_with("conv123")
     orchestrator.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_message_blocks_sensitive_data_before_orchestrator(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+
+    service._build_memory_context = AsyncMock(
+        return_value={
+            "recent_messages": [],
+            "user_facts": [],
+            "matched_rules": [],
+            "escalations": [],
+            "summaries": [],
+        }
+    )
+
+    request = MessageRequest(
+        message="My password: super-secret-123",
+        user_id="user123",
+        agent_id="agent-123",
+        conversation_id="conv123",
+    )
+
+    response = await service.process_message(request)
+
+    assert "Please do not share sensitive personal data" in response.message
+    orchestrator.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_message_uses_low_confidence_guardrail(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+
+    service._build_memory_context = AsyncMock(
+        return_value={
+            "recent_messages": [],
+            "user_facts": [],
+            "matched_rules": [],
+            "escalations": [],
+            "summaries": [],
+        }
+    )
+    orchestrator.run.return_value = AgentResult(
+        answer="Unsupported confident answer",
+        metadata={"validation_confidence": 0.2, "tool_results": {}},
+    )
+
+    request = MessageRequest(
+        message="Tell me something obscure",
+        user_id="user123",
+        agent_id="agent-123",
+        conversation_id="conv123",
+    )
+
+    response = await service.process_message(request)
+
+    assert response.message.startswith("I don’t have enough verified information")
+    second_write = service.short_term.add_message.await_args_list[1].kwargs
+    assert second_write["metadata"]["guardrail_action"] == "fallback"
+    assert second_write["metadata"]["guardrail_reason"] == "low_confidence"
 
 
 @pytest.mark.asyncio

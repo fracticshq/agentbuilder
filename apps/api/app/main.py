@@ -172,6 +172,7 @@ def create_app() -> FastAPI:
     
     # Custom middleware
     setup_middleware(app)
+    setup_monitoring(app)
     
     # Include API routes
     app.include_router(api_router, prefix="/api/v1")
@@ -236,8 +237,9 @@ def create_app() -> FastAPI:
             content={"error": "Internal server error", "detail": "An unexpected error occurred"}
         )
     
-    # Instrument with OpenTelemetry
-    FastAPIInstrumentor.instrument_app(app)
+    # Instrument with OpenTelemetry only when tracing is explicitly enabled.
+    if settings.ENABLE_TRACING:
+        FastAPIInstrumentor.instrument_app(app)
     
     return app
 
