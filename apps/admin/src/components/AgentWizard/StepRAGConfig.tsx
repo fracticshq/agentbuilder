@@ -6,6 +6,7 @@ interface StepRAGConfigProps {
     data_source: 'rag' | 'shopify' | 'none';
     shopify_shop_url: string;
     shopify_access_token: string;
+    shopify_access_token_configured?: boolean;
     embedding_provider: string;
     embedding_model: string;
     top_k: number;
@@ -157,7 +158,9 @@ export default function StepRAGConfig({ data, brandId, onChange }: StepRAGConfig
                 className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
               />
               <p className="mt-1 text-xs text-gray-500">
-                Required only if your store catalog is private or password-protected.
+                {data.shopify_access_token_configured
+                  ? 'A token is already saved for this agent. Enter a new token only to replace it.'
+                  : 'Required for store-specific Shopify tools and private catalogs.'}
               </p>
             </div>
           </div>

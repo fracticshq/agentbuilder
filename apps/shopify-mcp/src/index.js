@@ -125,7 +125,7 @@ app.post('/mcp', async (req, res) => {
  * Initiates the OAuth 2.0 PKCE Authorization Code flow.
  */
 app.get('/auth/login', async (req, res) => {
-  const shopUrl = req.query.shop || process.env.SHOPIFY_SHOP_URL;
+  const shopUrl = req.query.shop;
   const forcedSessionId = req.query.session_id;
   
   if (!shopUrl) {

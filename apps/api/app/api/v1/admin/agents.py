@@ -8,6 +8,10 @@ import structlog
 from app.connections import connection_manager
 from app.auth.dependencies import require_dashboard_access
 from app.dependencies import get_runtime_settings_service
+from app.services.agent_config_secrets import (
+    expose_agent_for_admin,
+    protect_agent_configuration_secrets,
+)
 from app.services.runtime_settings_service import RuntimeSettingsService
 from app.services.strapi_provisioning_service import StrapiProvisioningService
 
@@ -117,25 +121,34 @@ async def sync_agent_to_strapi_best_effort(
 
 
 @router.get("/", response_model=List[Agent])
-async def list_agents(brand_id: Optional[str] = Query(None)):
+async def list_agents(
+    brand_id: Optional[str] = Query(None),
+    runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+):
     try:
         collection = get_agents_collection()
         query = {"brand_id": brand_id} if brand_id else {}
         agents = await collection.find(query).to_list(length=None)
-        return [Agent(**{**agent, "_id": str(agent["_id"])}) for agent in agents]
+        return [
+            Agent(**{**expose_agent_for_admin(agent, runtime_settings_service), "_id": str(agent["_id"])})
+            for agent in agents
+        ]
     except Exception as e:
         logger.error("Failed to list agents", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
 
 
 @router.get("/{agent_id}", response_model=Agent)
-async def get_agent(agent_id: str):
+async def get_agent(
+    agent_id: str,
+    runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+):
     try:
         collection = get_agents_collection()
         agent = await collection.find_one({"id": agent_id})
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
-        return Agent(**{**agent, "_id": str(agent["_id"])})
+        return Agent(**{**expose_agent_for_admin(agent, runtime_settings_service), "_id": str(agent["_id"])})
     except HTTPException:
         raise
     except Exception as e:
@@ -172,7 +185,10 @@ async def create_agent(
             "name": agent.name,
             "description": agent.description,
             "system_prompt": agent.system_prompt,
-            "configuration": agent.configuration,
+            "configuration": protect_agent_configuration_secrets(
+                agent.configuration,
+                runtime_settings_service=runtime_settings_service,
+            ),
             "status": agent.status or "draft",
             "created_at": now,
             "updated_at": now,
@@ -187,7 +203,7 @@ async def create_agent(
                 agent_doc,
             )
         logger.info("Agent created", agent_id=agent_id, name=agent.name, brand_id=agent.brand_id, brand_slug=brand_slug)
-        return Agent(**agent_doc)
+        return Agent(**expose_agent_for_admin(agent_doc, runtime_settings_service))
     except HTTPException:
         raise
     except Exception as e:
@@ -209,6 +225,12 @@ async def update_agent(
             raise HTTPException(status_code=404, detail="Agent not found")
 
         update_data = agent_update.dict(exclude_unset=True)
+        if "configuration" in update_data:
+            update_data["configuration"] = protect_agent_configuration_secrets(
+                update_data["configuration"],
+                existing_config=existing_agent.get("configuration") or {},
+                runtime_settings_service=runtime_settings_service,
+            )
         if "name" in update_data:
             update_data["slug"] = generate_slug(update_data["name"])
         update_data["updated_at"] = datetime.utcnow()
@@ -224,7 +246,7 @@ async def update_agent(
                 updated_agent,
             )
         logger.info("Agent updated", agent_id=agent_id)
-        return Agent(**{**updated_agent, "_id": str(updated_agent["_id"])})
+        return Agent(**{**expose_agent_for_admin(updated_agent, runtime_settings_service), "_id": str(updated_agent["_id"])})
     except HTTPException:
         raise
     except Exception as e:

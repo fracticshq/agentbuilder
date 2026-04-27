@@ -38,6 +38,7 @@ from ..monitoring import AGENT_FALLBACK_COUNT, GUARDRAIL_COUNT, MESSAGE_COUNT, M
 from .response_validator import ResponseValidator  # Phase 4
 from .strapi_client import StrapiClient
 from .runtime_settings_service import RuntimeSettingsService
+from .agent_config_secrets import decrypt_shopify_configuration_for_runtime
 from .observability_service import ObservabilityService
 from .prompt_assembler import PromptAssembler
 
@@ -482,7 +483,10 @@ class MessageService:
             agent = await agents_collection.find_one({"id": agent_id})
             
             if agent:
-                config = agent.get("configuration", {})
+                config = decrypt_shopify_configuration_for_runtime(
+                    agent.get("configuration", {}),
+                    self.runtime_settings_service,
+                )
                 normalized_prompt_layers = self.prompt_assembler.normalize_prompt_layers(agent, config)
                 self.agent_config = {
                     **config,
@@ -525,23 +529,26 @@ class MessageService:
                     # In production this would be loaded from settings
                     mcp_endpoint = self.settings.SHOPIFY_MCP_URL if hasattr(self.settings, 'SHOPIFY_MCP_URL') else "http://localhost:3005/mcp"
                     
-                    # Extract credentials from Agent Config (nested or top-level), with environment fallbacks
-                    # The Wizard UI saves them in a 'shopify' sub-object
+                    # Extract per-agent Shopify credentials from dashboard-managed config.
+                    # Store identity and tokens must not fall back to global env values in production.
                     shopify_conf = config.get("shopify", {})
                     shopify_url = (
                         shopify_conf.get("shop_url") or 
-                        config.get("shopify_shop_url") or 
-                        self.settings.SHOPIFY_SHOP_URL
+                        config.get("shopify_shop_url")
                     )
                     shopify_token = (
                         shopify_conf.get("access_token") or
                         config.get("shopify_access_token") or 
-                        config.get("shopify_admin_token") or 
-                        self.settings.SHOPIFY_STOREFRONT_ADMIN_ACCESS_TOKEN
+                        config.get("shopify_admin_token")
                     )
 
                     if not shopify_url or not shopify_token:
-                        logger.warning("shopify_credentials_missing", agent_id=agent_id)
+                        logger.warning(
+                            "shopify_credentials_missing",
+                            agent_id=agent_id,
+                            has_shop_url=bool(shopify_url),
+                            has_access_token=bool(shopify_token),
+                        )
                         
                     mcp_headers = {
                         "x-shopify-shop-url": str(shopify_url or ""),
@@ -551,8 +558,7 @@ class MessageService:
                     # Also try to get a customer access token from config or settings
                     customer_token = (
                         shopify_conf.get("customer_access_token") or
-                        config.get("shopify_customer_access_token") or 
-                        self.settings.SHOPIFY_CUSTOMER_ACCESS_TOKEN
+                        config.get("shopify_customer_access_token")
                     )
                     
                     if customer_token:

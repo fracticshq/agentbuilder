@@ -11,6 +11,16 @@ class AuthRequiredError extends Error {
 // Map to track which MCP server handles which tool
 const toolServerMap = new Map();
 
+function toolCacheKey(shopUrl, toolName) {
+  return `${shopUrl}:${toolName}`;
+}
+
+function authUrlForShop(shopUrl) {
+  const baseUrl = process.env.SHOPIFY_BASE_URL || 'http://localhost:3005';
+  const params = new URLSearchParams({ shop: shopUrl });
+  return `${baseUrl}/auth/login?${params.toString()}`;
+}
+
 /**
  * Handles incoming JSON-RPC 2.0 requests for the Shopify MCP.
  * Delegates to official Shopify Storefront and Customer Account MCP servers.
@@ -42,7 +52,7 @@ export async function handleMcpRequest(payload, session, reqHeaders) {
   if (payload.method === 'tools/list') {
     // 1. Fetch Storefront Tools (No Auth)
     const storefrontTools = await fetchTools(endpoints.storefrontMcp);
-    storefrontTools.forEach(t => toolServerMap.set(t.name, endpoints.storefrontMcp));
+    storefrontTools.forEach(t => toolServerMap.set(toolCacheKey(shopUrl, t.name), endpoints.storefrontMcp));
 
     // 2. Fetch Customer Account Tools (Auth Required)
     let customerTools = [];
@@ -50,7 +60,7 @@ export async function handleMcpRequest(payload, session, reqHeaders) {
       customerTools = await fetchTools(endpoints.customerAccountMcp, {
         'Authorization': `Bearer ${customerToken}`
       });
-      customerTools.forEach(t => toolServerMap.set(t.name, endpoints.customerAccountMcp));
+      customerTools.forEach(t => toolServerMap.set(toolCacheKey(shopUrl, t.name), endpoints.customerAccountMcp));
     }
 
     return {
@@ -66,24 +76,24 @@ export async function handleMcpRequest(payload, session, reqHeaders) {
     const { name, arguments: args } = payload.params;
     
     // Find which server handles this tool
-    let targetUrl = toolServerMap.get(name);
+    let targetUrl = toolServerMap.get(toolCacheKey(shopUrl, name));
     
     // Fallback: If not in cache, try both (Storefront first)
     if (!targetUrl) {
       const storefrontTools = await fetchTools(endpoints.storefrontMcp);
       if (storefrontTools.some(t => t.name === name)) {
         targetUrl = endpoints.storefrontMcp;
-        toolServerMap.set(name, targetUrl);
+        toolServerMap.set(toolCacheKey(shopUrl, name), targetUrl);
       } else {
         targetUrl = endpoints.customerAccountMcp;
-        toolServerMap.set(name, targetUrl);
+        toolServerMap.set(toolCacheKey(shopUrl, name), targetUrl);
       }
     }
 
     const headers = {};
     if (targetUrl === endpoints.customerAccountMcp) {
       if (!customerToken) {
-        throw new AuthRequiredError();
+        throw new AuthRequiredError(authUrlForShop(shopUrl));
       }
       headers['Authorization'] = `Bearer ${customerToken}`;
     }
@@ -93,7 +103,7 @@ export async function handleMcpRequest(payload, session, reqHeaders) {
       return result;
     } catch (err) {
       if (err.status === 401) {
-        throw new AuthRequiredError();
+        throw new AuthRequiredError(authUrlForShop(shopUrl));
       }
       throw err;
     }
@@ -101,4 +111,3 @@ export async function handleMcpRequest(payload, session, reqHeaders) {
 
   throw new Error(`Unsupported method: ${payload.method}`);
 }
-

@@ -98,6 +98,7 @@ interface AgentData {
   data_source: 'rag' | 'shopify' | 'none';
   shopify_shop_url: string;
   shopify_access_token: string;
+  shopify_access_token_configured: boolean;
 
   // Features
   websockets: boolean;
@@ -187,6 +188,7 @@ const initialData: AgentData = {
   data_source: 'none',
   shopify_shop_url: '',
   shopify_access_token: '',
+  shopify_access_token_configured: false,
 
   // Features
   websockets: true,
@@ -380,6 +382,7 @@ export default function AgentWizard() {
         data_source: config.data_source || (rag.enabled ? 'rag' : (config.shopify ? 'shopify' : 'none')),
         shopify_shop_url: config.shopify?.shop_url || '',
         shopify_access_token: config.shopify?.access_token || '',
+        shopify_access_token_configured: Boolean(config.shopify?.access_token_configured),
 
         // System Prompt
         system_prompt: typeof promptLayers.soul === 'string'

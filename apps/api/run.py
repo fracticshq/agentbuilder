@@ -65,10 +65,7 @@ def _preload_akv_secrets():
             "QWEN-API-KEY",
             "STRAPI-API-TOKEN",
             "FIRECRAWL-API-KEY",
-            "GOOGLE-CLIENT-ID",
-            "SHOPIFY-SHOP-URL",
-            "SHOPIFY-STOREFRONT-ADMIN-ACCESS-TOKEN",
-            "SHOPIFY-CUSTOMER-ACCESS-TOKEN"
+            "GOOGLE-CLIENT-ID"
         ]
         
         for key in secret_keys:

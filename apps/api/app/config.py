@@ -38,10 +38,7 @@ def fetch_akv_secrets(vault_name: str) -> dict:
             "QWEN-API-KEY",
             "STRAPI-API-TOKEN",
             "FIRECRAWL-API-KEY",
-            "GOOGLE-CLIENT-ID",
-            "SHOPIFY-SHOP-URL",
-            "SHOPIFY-STOREFRONT-ADMIN-ACCESS-TOKEN",
-            "SHOPIFY-CUSTOMER-ACCESS-TOKEN"
+            "GOOGLE-CLIENT-ID"
         ]
         
         for key in secret_keys:
@@ -230,10 +227,8 @@ class Settings(BaseSettings):
     STRAPI_URL: str = "http://localhost:1337"
     STRAPI_API_TOKEN: str = ""
     
-    # Shopify Configuration
-    SHOPIFY_SHOP_URL: str = ""
-    SHOPIFY_STOREFRONT_ADMIN_ACCESS_TOKEN: str = ""
-    SHOPIFY_CUSTOMER_ACCESS_TOKEN: str = ""
+    # Shopify MCP service URL. Store identity and store tokens are per-agent
+    # configuration values managed from the dashboard, not global env vars.
     SHOPIFY_MCP_URL: str = "http://localhost:3005/mcp"
 
     # Firecrawl (product catalog scraping)
