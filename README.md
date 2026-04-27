@@ -276,6 +276,8 @@ Recommended Azure layout:
 - Secrets: Azure Key Vault
 - Edge/TLS: Azure Front Door or Application Gateway
 
+For independent Azure container deployments, configure each service through Azure Container Apps/App Service environment variables or Key Vault references. Root `.env.docker` is only for local Docker Compose and should not be required by deployed service containers.
+
 Keep Strapi deployed separately from this repository. Strapi is expected to run from the `agentbuilder-strapi` repository.
 
 ---

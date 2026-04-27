@@ -47,12 +47,28 @@ def _preload_akv_secrets():
         # Secrets to fetch (AKV uses dashes, env vars use underscores)
         secret_keys = [
             "OPENAI-API-KEY",
+            "AZURE-OPENAI-API-KEY",
+            "AZURE-OPENAI-ENDPOINT",
+            "AZURE-OPENAI-API-VERSION",
+            "AZURE-OPENAI-DEPLOYMENT",
+            "AZURE-SUBSCRIPTION-ID",
+            "AZURE-RESOURCE-GROUP",
+            "AZURE-OPENAI-ACCOUNT-NAME",
             "VOYAGE-API-KEY", 
             "MONGODB-URI",
+            "REDIS-URL",
             "SECRET-KEY",
+            "SETTINGS-ENCRYPTION-KEY",
             "PII-ENCRYPTION-KEY",
             "JWT-SECRET",
-            "QWEN-API-KEY"
+            "ADMIN-API-KEY",
+            "QWEN-API-KEY",
+            "STRAPI-API-TOKEN",
+            "FIRECRAWL-API-KEY",
+            "GOOGLE-CLIENT-ID",
+            "SHOPIFY-SHOP-URL",
+            "SHOPIFY-STOREFRONT-ADMIN-ACCESS-TOKEN",
+            "SHOPIFY-CUSTOMER-ACCESS-TOKEN"
         ]
         
         for key in secret_keys:

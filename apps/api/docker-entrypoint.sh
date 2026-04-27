@@ -6,7 +6,7 @@ require_env() {
   var_value="$(printenv "$var_name" || true)"
 
   if [ -z "$var_value" ]; then
-    echo "ERROR: $var_name is required. Set it in .env.docker before starting docker compose." >&2
+    echo "ERROR: $var_name is required. Set it in the container environment, Azure app settings, Key Vault, or local .env.docker before starting." >&2
     exit 1
   fi
 
