@@ -15,6 +15,7 @@ from pymongo import UpdateOne
 from ..config import Settings
 from ..connections import connection_manager
 from .job_store import JobStore
+from .qdrant_vector_service import QdrantVectorService
 from .runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger()
@@ -27,6 +28,7 @@ class KnowledgeService:
         self.settings = settings
         self.job_store = JobStore()
         self.runtime_settings_service = RuntimeSettingsService(settings)
+        self.qdrant = QdrantVectorService(settings) if settings.VECTOR_BACKEND == "qdrant" else None
         self.mongo_client = None
         self.db_cache = {}  # Cache brand-specific databases
         self.brand_scope_cache = {}
@@ -286,7 +288,7 @@ class KnowledgeService:
                     "doc_id": doc_id,
                     "chunk_id": f"{doc_id}_chunk_{i}",
                     "content": chunk_text,
-                    "embedding": embedding[0] if embedding else [],
+                    "embeddings": embedding[0] if embedding else [],
                     "title": filename,
                     
                     # Enhanced metadata
@@ -329,6 +331,8 @@ class KnowledgeService:
                 
                 # Store in MongoDB
                 await self.collection.insert_one(chunk_doc)
+                if self.qdrant:
+                    await self.qdrant.upsert_chunk(chunk_doc, brand_scope.get("brand_slug") or brand_id)
                 
                 # Update progress
                 await self.job_store.update(job_id, {"processed_chunks": i + 1})
@@ -414,7 +418,7 @@ class KnowledgeService:
                 "doc_id": doc_id,
                 "chunk_id": f"{doc_id}_chunk_{i}",
                 "content": chunk_text,
-                "embedding": embedding[0] if embedding else [],
+                "embeddings": embedding[0] if embedding else [],
                 "title": item.name,
                 
                 # Enhanced metadata
@@ -446,6 +450,8 @@ class KnowledgeService:
                 {"$set": chunk_doc},
                 upsert=True
             )
+            if self.qdrant:
+                await self.qdrant.upsert_chunk(chunk_doc, (brand_scope or {}).get("brand_slug") or brand_id)
             
             # Update progress (fire-and-forget increment)
             job = await self.job_store.get(job_id) or {}
@@ -486,7 +492,7 @@ class KnowledgeService:
                 "doc_id": doc_id,
                 "chunk_id": f"{doc_id}_chunk_{i}",
                 "content": chunk_text,
-                "embedding": embedding[0] if embedding else [],
+                "embeddings": embedding[0] if embedding else [],
                 "title": item.name,
                 
                 # Enhanced metadata
@@ -516,6 +522,8 @@ class KnowledgeService:
                 {"$set": chunk_doc},
                 upsert=True
             )
+            if self.qdrant:
+                await self.qdrant.upsert_chunk(chunk_doc, (brand_scope or {}).get("brand_slug") or brand_id)
             
             # Update progress (fire-and-forget increment)
             job = await self.job_store.get(job_id) or {}

@@ -16,6 +16,7 @@ from commons.types.responses import IngestionResponse, IngestionStatus
 from ..config import Settings
 from ..connections import connection_manager
 from .job_store import JobStore
+from .qdrant_vector_service import QdrantVectorService
 from .runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger()
@@ -28,6 +29,7 @@ class IngestionService:
         self.settings = settings
         self.job_store = JobStore()
         self.runtime_settings_service = RuntimeSettingsService(settings)
+        self.qdrant = QdrantVectorService(settings) if settings.VECTOR_BACKEND == "qdrant" else None
 
     async def _get_voyage_runtime_config(self) -> dict[str, str]:
         config = await self.runtime_settings_service.get_voyage_runtime_config()
@@ -494,6 +496,9 @@ class IngestionService:
             # Insert the chunk
             result = await chunks_collection.insert_one(chunk_doc)
             chunk_id = str(result.inserted_id)
+            if self.qdrant:
+                brand_slug = (chunk_doc.get("metadata") or {}).get("brand_slug")
+                await self.qdrant.upsert_chunk(chunk_doc, brand_slug)
             
             logger.debug("Stored chunk in MongoDB", chunk_id=chunk_id, agent_id=chunk_doc.get("agent_id"))
             return chunk_id

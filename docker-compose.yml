@@ -14,6 +14,7 @@ services:
     environment:
       # Only Docker-internal service URLs that differ from .env.docker defaults
       SHOPIFY_MCP_URL: "http://shopify:3005/mcp"
+      QDRANT_URL: "http://qdrant:6333"
       ENVIRONMENT: "${ENVIRONMENT:-production}"
       DEBUG: "${DEBUG:-false}"
       REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
@@ -28,6 +29,8 @@ services:
         condition: service_healthy
       shopify:
         condition: service_healthy
+      qdrant:
+        condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -138,6 +141,17 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── Local Vector DB ─────────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    container_name: agentbuilder-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
 volumes:
   mongo_data:
   redis_data:
+  qdrant_data:

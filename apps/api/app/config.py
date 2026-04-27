@@ -38,7 +38,12 @@ def fetch_akv_secrets(vault_name: str) -> dict:
             "QWEN-API-KEY",
             "STRAPI-API-TOKEN",
             "FIRECRAWL-API-KEY",
-            "GOOGLE-CLIENT-ID"
+            "GOOGLE-CLIENT-ID",
+            "ATLAS-PUBLIC-KEY",
+            "ATLAS-PRIVATE-KEY",
+            "ATLAS-PROJECT-ID",
+            "ATLAS-CLUSTER-NAME",
+            "ATLAS-AUTO-CREATE-VECTOR-INDEXES",
         ]
         
         for key in secret_keys:
@@ -136,6 +141,17 @@ class Settings(BaseSettings):
     MONGO_SYSTEM_DB: str = "system"  # System database for brands, users, etc.
     MONGODB_DATABASE: str = "agent-builder"  # Legacy - deprecated
     MONGODB_COLLECTION: str = "documents"    # Legacy - deprecated
+    VECTOR_BACKEND: str = "atlas"  # atlas | qdrant
+    VECTOR_INDEX_NAME: str = "vector_index"
+    VECTOR_DIMENSIONS: int = 1024
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_API_KEY: str = ""
+    QDRANT_COLLECTION_PREFIX: str = "nova"
+    ATLAS_PROJECT_ID: str = ""
+    ATLAS_CLUSTER_NAME: str = ""
+    ATLAS_PUBLIC_KEY: str = ""
+    ATLAS_PRIVATE_KEY: str = ""
+    ATLAS_AUTO_CREATE_VECTOR_INDEXES: bool = False
     
     # Voyage AI Configuration
     VOYAGE_API_KEY: str = ""
@@ -254,7 +270,7 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
     
-    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_HUMAN_TAKEOVER", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", "ALLOW_PUBLIC_SIGNUP", "RATE_LIMIT_FAIL_CLOSED", mode="before")
+    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_HUMAN_TAKEOVER", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", "ALLOW_PUBLIC_SIGNUP", "RATE_LIMIT_FAIL_CLOSED", "ATLAS_AUTO_CREATE_VECTOR_INDEXES", mode="before")
     @classmethod
     def parse_bool_fields(cls, v):
         """Parse boolean fields from string."""
@@ -262,7 +278,7 @@ class Settings(BaseSettings):
             return v.lower() in ("true", "1", "yes", "on")
         return v
     
-    @field_validator("API_WORKERS", "RATE_LIMIT_REQUESTS_PER_MINUTE", "RATE_LIMIT_BURST", "RATE_LIMIT_POLICY_WIDGET_CHAT", "RATE_LIMIT_POLICY_WIDGET_STREAM", "RATE_LIMIT_POLICY_WIDGET_WS_CONNECT", "RATE_LIMIT_POLICY_WIDGET_WS_MESSAGE", "RATE_LIMIT_POLICY_ADMIN_API", "RATE_LIMIT_POLICY_UPLOAD", "RATE_LIMIT_POLICY_STRAPI_SYNC", "MAX_FILE_SIZE_MB", "ACCESS_TOKEN_EXPIRE_MINUTES", "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "SHORT_TERM_TTL", "EPISODIC_TTL", "SUMMARY_CACHE_TTL", "AUTO_SUMMARY_TURNS", "MAX_MESSAGES_PER_CONVERSATION", "MAX_FACTS_PER_USER", "MAX_SUMMARIES_PER_CONVERSATION", "REDIS_CONNECTION_TIMEOUT", "SUMMARY_MAX_TOKENS", mode="before")
+    @field_validator("API_WORKERS", "RATE_LIMIT_REQUESTS_PER_MINUTE", "RATE_LIMIT_BURST", "RATE_LIMIT_POLICY_WIDGET_CHAT", "RATE_LIMIT_POLICY_WIDGET_STREAM", "RATE_LIMIT_POLICY_WIDGET_WS_CONNECT", "RATE_LIMIT_POLICY_WIDGET_WS_MESSAGE", "RATE_LIMIT_POLICY_ADMIN_API", "RATE_LIMIT_POLICY_UPLOAD", "RATE_LIMIT_POLICY_STRAPI_SYNC", "MAX_FILE_SIZE_MB", "ACCESS_TOKEN_EXPIRE_MINUTES", "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "SHORT_TERM_TTL", "EPISODIC_TTL", "SUMMARY_CACHE_TTL", "AUTO_SUMMARY_TURNS", "MAX_MESSAGES_PER_CONVERSATION", "MAX_FACTS_PER_USER", "MAX_SUMMARIES_PER_CONVERSATION", "REDIS_CONNECTION_TIMEOUT", "SUMMARY_MAX_TOKENS", "VECTOR_DIMENSIONS", mode="before")
     @classmethod
     def parse_int_fields(cls, v):
         """Parse integer fields from string."""
@@ -289,6 +305,13 @@ class Settings(BaseSettings):
     @field_validator("ENVIRONMENT", mode="before")
     @classmethod
     def parse_environment(cls, v):
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
+    @field_validator("VECTOR_BACKEND", mode="before")
+    @classmethod
+    def parse_vector_backend(cls, v):
         if isinstance(v, str):
             return v.lower()
         return v

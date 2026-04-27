@@ -14,7 +14,7 @@ from .api.v1 import api_router
 from .middleware import setup_middleware
 from .monitoring import setup_monitoring
 from .connections import connection_manager
-from .services.runtime_settings_service import RuntimeSettingsService
+from .bootstrap.database import ensure_existing_brand_indexes, ensure_system_indexes
 
 # Configure structured logging
 structlog.configure(
@@ -44,67 +44,8 @@ async def lifespan(app: FastAPI):
     if connection_manager.system_db is not None:
         try:
             logger.info("Setting up MongoDB indexes...")
-            system_db = connection_manager.system_db
-
-            try:
-                await system_db.brands.create_index("id", unique=True, name="brand_id_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-
-            try:
-                await system_db.brands.create_index("slug", unique=True, name="brand_slug_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-
-            try:
-                await system_db.agents.create_index("id", unique=True, name="agent_id_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-
-            try:
-                await system_db.agents.create_index("brand_id", name="agent_brand_id_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-
-            try:
-                await system_db.agents.create_index([("brand_id", 1), ("slug", 1)], unique=True, name="agent_brand_slug_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-
-            try:
-                await system_db.users.create_index("email", unique=True, name="users_email_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-
-            try:
-                await system_db.users.create_index("username", unique=True, name="users_username_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-
-            try:
-                await system_db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0, name="password_reset_expiry_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-
-            try:
-                await RuntimeSettingsService(settings).ensure_indexes()
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-
-            try:
-                await system_db.audit_logs.create_index("created_at", name="audit_logs_created_at_idx")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
+            await ensure_system_indexes(connection_manager.system_db, settings)
+            await ensure_existing_brand_indexes(settings)
 
             logger.info("MongoDB indexes setup complete")
         except Exception as e:

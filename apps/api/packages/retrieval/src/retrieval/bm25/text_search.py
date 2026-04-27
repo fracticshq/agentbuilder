@@ -37,6 +37,7 @@ class BM25Search:
         self.collection = self.db[collection_name]
         self.text_index_name = text_index_name
         self.brand_id = brand_id
+        self._text_index_ready = False
         
         logger.info(
             "BM25 Search initialized",
@@ -65,6 +66,9 @@ class BM25Search:
         try:
             import time
             start_time = time.time()
+            if not self._text_index_ready:
+                await self.create_text_index()
+                self._text_index_ready = True
             
             # Build search query
             search_query = {"$text": {"$search": query}}

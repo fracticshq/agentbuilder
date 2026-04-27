@@ -4,9 +4,11 @@ Retrieval Pipeline - Orchestrates hybrid search and context building
 
 from typing import Dict, Any, List, Optional
 import asyncio
+import os
 import structlog
 
 from .vector.atlas_search import AtlasVectorSearch
+from .vector.qdrant_search import QdrantVectorSearch
 from .vector.voyage_client import VoyageClient
 from .bm25.text_search import BM25Search
 from .fusion.rrf import RRFFusion
@@ -40,21 +42,21 @@ class RetrievalPipeline:
     ):
         self.config = config or RetrievalConfig()
         self.brand_id = brand_id
+        self.vector_backend = os.getenv("VECTOR_BACKEND", "atlas").lower()
         
         # Initialize search components with brand_id for database isolation
         try:
-            self.vector_search = (
-                AtlasVectorSearch(
-                    brand_id=brand_id,
-                    voyage_client=(
-                        VoyageClient(api_key=voyage_api_key, model=voyage_model)
-                        if voyage_api_key
-                        else None
-                    ),
-                )
-                if self.config.vector_enabled
+            voyage_client = (
+                VoyageClient(api_key=voyage_api_key, model=voyage_model)
+                if voyage_api_key
                 else None
             )
+            if not self.config.vector_enabled:
+                self.vector_search = None
+            elif self.vector_backend == "qdrant":
+                self.vector_search = QdrantVectorSearch(brand_id=brand_id, voyage_client=voyage_client)
+            else:
+                self.vector_search = AtlasVectorSearch(brand_id=brand_id, voyage_client=voyage_client)
         except Exception as e:
             logger.warning("Vector search initialization failed", error=str(e))
             self.vector_search = None
@@ -77,7 +79,11 @@ class RetrievalPipeline:
         self.brand_boost = BrandBoost(brand_id) if brand_id and self.config.brand_boost_enabled else None
         self.page_boost = PageBoost() if self.config.page_boost_enabled else None
         
-        logger.info("Retrieval pipeline initialized", config=self.config.dict() if hasattr(self.config, 'dict') else str(self.config))
+        logger.info(
+            "Retrieval pipeline initialized",
+            config=self.config.dict() if hasattr(self.config, 'dict') else str(self.config),
+            vector_backend=self.vector_backend,
+        )
 
     
     async def retrieve(

@@ -1,0 +1,26 @@
+{
+  "fields": [
+    {
+      "type": "vector",
+      "path": "embeddings",
+      "numDimensions": 1024,
+      "similarity": "cosine"
+    },
+    {
+      "type": "filter",
+      "path": "metadata.brand_id"
+    },
+    {
+      "type": "filter",
+      "path": "metadata.brand_slug"
+    },
+    {
+      "type": "filter",
+      "path": "agent_id"
+    },
+    {
+      "type": "filter",
+      "path": "content_type"
+    }
+  ]
+}

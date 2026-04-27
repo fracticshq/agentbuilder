@@ -31,7 +31,7 @@ NOVA is a context-aware conversational agent platform by Fractics. It helps team
 NOVA helps teams create reliable AI agents with:
 
 - **Multi-agent architecture** for brand-specific and task-specific agents
-- **Hybrid retrieval** using MongoDB Atlas Vector Search, BM25, RRF fusion, and reranking
+- **Hybrid retrieval** using MongoDB Atlas Vector Search or local Qdrant, BM25, RRF fusion, and reranking
 - **Session continuity and memory** across conversations
 - **Structured knowledge bases** for products, dealers, FAQs, guides, and documents
 - **Embeddable web widget** for deploying agents on external websites
@@ -49,7 +49,8 @@ Website visitor     -> apps/widget       -> apps/api
 Admin user          -> apps/admin        -> apps/api
 Shopify tools       -> apps/shopify-mcp  -> apps/api / Shopify
 
-apps/api -> MongoDB Atlas   # documents, agents, memory, vector search
+apps/api -> MongoDB         # documents, agents, memory, knowledge source of truth
+apps/api -> Qdrant          # local/self-hosted vector search when VECTOR_BACKEND=qdrant
 apps/api -> Redis           # cache, rate limits, jobs, pub/sub, live handoff
 apps/api -> LLM providers   # OpenAI, Azure OpenAI, Qwen
 apps/api -> Voyage AI       # embeddings
@@ -64,7 +65,8 @@ Core services:
 | Admin | `apps/admin` | http://localhost:3000 | NOVA dashboard for brands, agents, settings, KB, observability |
 | Widget | `apps/widget` | http://localhost:5174 | Embeddable chat widget |
 | Shopify MCP | `apps/shopify-mcp` | http://localhost:3005 | Shopify OAuth and MCP bridge |
-| MongoDB | Compose service | internal | Agent data, knowledge, memory, vector search |
+| MongoDB | Compose service | internal | Agent data, knowledge, memory, source of truth |
+| Qdrant | Compose service | http://localhost:6333 | Local/self-hosted vector search |
 | Redis | Compose service | internal | Rate limits, jobs, pub/sub, session state |
 
 Each app has its own Docker build context so API, admin, widget, and Shopify MCP can be built and deployed independently.
@@ -115,6 +117,8 @@ ADMIN_API_KEY=<openssl rand -hex 32>
 SESSION_SECRET=<openssl rand -hex 32>
 MONGODB_URI=mongodb://mongodb:27017
 REDIS_URL=redis://redis:6379
+VECTOR_BACKEND=qdrant
+QDRANT_URL=http://qdrant:6333
 CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost:5174
 ENVIRONMENT=production
 DEBUG=false
@@ -280,6 +284,7 @@ Recommended Azure layout:
 - Widget: Azure Static Web Apps, Storage Static Website + CDN, or containerized nginx
 - Shopify MCP: separate Azure Container App or App Service for Containers
 - MongoDB: MongoDB Atlas
+- Local/self-hosted vector search: Qdrant
 - Redis: Azure Cache for Redis
 - Secrets: Azure Key Vault
 - Edge/TLS: Azure Front Door or Application Gateway
@@ -295,6 +300,7 @@ Keep Strapi deployed separately from this repository. Strapi is expected to run 
 Current docs:
 
 - [Server Startup Guide](./SERVER_STARTUP_GUIDE.md)
+- [Database Setup](./docs/DATABASE_SETUP.md)
 - [Production Readiness Guide](./docs/guides/PRODUCTION_READY.md)
 - [Vector Database Architecture](./docs/VECTOR_DATABASE_ARCHITECTURE.md)
 - [Hybrid RAG Workflow](./docs/HYBRID_RAG_WORKFLOW.md)
