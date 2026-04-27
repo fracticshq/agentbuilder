@@ -1064,8 +1064,6 @@ Confidence: 0.95
 ## 📚 Related Documentation
 
 - [AGENTS.md](../AGENTS.md) - Agent configuration and management
-- [BRAND_DATABASE_IMPLEMENTATION.md](../BRAND_DATABASE_IMPLEMENTATION.md) - Brand isolation architecture
-- [PRODUCT_CARDS_IMPLEMENTATION.md](../PRODUCT_CARDS_IMPLEMENTATION.md) - Product display in widget
 - [packages/retrieval/](../packages/retrieval/) - Source code
 
 ---
