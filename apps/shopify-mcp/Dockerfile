@@ -1,5 +1,8 @@
 # ── Shopify MCP Server ────────────────────────────────────────────────────────
 # Maps Shopify admin/storefront APIs to the Model Context Protocol
+# Build context: apps/shopify-mcp
+# Usage:
+#   cd apps/shopify-mcp && docker build -t agentbuilder-shopify .
 # ─────────────────────────────────────────────────────────────────────────────
 
 FROM node:20-alpine

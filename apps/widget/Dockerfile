@@ -1,5 +1,7 @@
 # ── Agent Builder Chat Widget ─────────────────────────────────────────────────
-# Multi-stage: Node builds Vite app, nginx serves static files.
+# Build context: apps/widget
+# Usage:
+#   cd apps/widget && docker build -t agentbuilder-widget .
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
@@ -7,10 +9,10 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-COPY apps/widget/package.json apps/widget/package-lock.json* ./
+COPY package.json package-lock.json* ./
 RUN npm ci
 
-COPY apps/widget .
+COPY . .
 
 # API URL can still be provided for non-Docker builds, but runtime config is preferred
 ARG VITE_API_BASE_URL=http://localhost:8000
@@ -23,8 +25,8 @@ RUN npx vite build
 FROM nginx:1.27-alpine
 
 COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx/widget.conf /etc/nginx/conf.d/default.conf
-COPY apps/widget/docker-entrypoint.sh /docker-entrypoint.d/40-runtime-config.sh
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY docker-entrypoint.sh /docker-entrypoint.d/40-runtime-config.sh
 
 ENV API_BASE_URL=http://localhost:8000
 

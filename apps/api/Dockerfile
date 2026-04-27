@@ -1,7 +1,7 @@
 # ── Agent Builder API ─────────────────────────────────────────────────────────
-# Build context must be the repo root so packages/ is accessible.
-# Usage (from repo root):
-#   docker build -f apps/api/Dockerfile -t agentbuilder-api .
+# Build context: apps/api
+# Usage:
+#   cd apps/api && docker build -t agentbuilder-api .
 # ─────────────────────────────────────────────────────────────────────────────
 
 FROM python:3.12
@@ -25,11 +25,12 @@ RUN pip install --no-cache-dir \
     /app/packages/agent_runtime
 
 # ── Install API dependencies ───────────────────────────────────────────────────
-COPY apps/api/requirements.txt /app/requirements.txt
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # ── Copy API source ────────────────────────────────────────────────────────────
-COPY apps/api /app/api
+COPY app /app/api/app
+COPY run.py docker-entrypoint.sh /app/api/
 
 WORKDIR /app/api
 

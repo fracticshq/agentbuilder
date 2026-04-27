@@ -1,0 +1,509 @@
+"""
+Retrieval Pipeline - Orchestrates hybrid search and context building
+"""
+
+from typing import Dict, Any, List, Optional
+import asyncio
+import structlog
+
+from .vector.atlas_search import AtlasVectorSearch
+from .vector.voyage_client import VoyageClient
+from .bm25.text_search import BM25Search
+from .fusion.rrf import RRFFusion
+from .fusion.reranker import CrossEncoderReranker
+from .boosts.brand_boost import BrandBoost
+from .boosts.page_boost import PageBoost
+from .types import DocumentChunk, PageContext, RetrievalContext, RetrievalConfig
+
+logger = structlog.get_logger()
+
+
+class RetrievalPipeline:
+    """
+    Main retrieval pipeline that orchestrates:
+    - Vector search (embeddings)
+    - BM25 text search
+    - Reciprocal Rank Fusion (RRF)
+    - Cross-encoder reranking
+    - Brand/page boosts
+    - Deduplication
+    """
+    
+    def __init__(
+        self,
+        config: Optional[RetrievalConfig] = None,
+        brand_id: Optional[str] = None,
+        voyage_api_key: Optional[str] = None,
+        voyage_model: str = "voyage-large-2-instruct",
+        rerank_api_key: Optional[str] = None,
+        rerank_model: str = "rerank-1",
+    ):
+        self.config = config or RetrievalConfig()
+        self.brand_id = brand_id
+        
+        # Initialize search components with brand_id for database isolation
+        try:
+            self.vector_search = (
+                AtlasVectorSearch(
+                    brand_id=brand_id,
+                    voyage_client=(
+                        VoyageClient(api_key=voyage_api_key, model=voyage_model)
+                        if voyage_api_key
+                        else None
+                    ),
+                )
+                if self.config.vector_enabled
+                else None
+            )
+        except Exception as e:
+            logger.warning("Vector search initialization failed", error=str(e))
+            self.vector_search = None
+        
+        try:
+            self.bm25_search = BM25Search(brand_id=brand_id) if self.config.bm25_enabled else None
+        except Exception as e:
+            logger.warning("BM25 search initialization failed", error=str(e))
+            self.bm25_search = None
+        
+        # Initialize fusion and reranking
+        self.rrf = RRFFusion(k=self.config.rrf_k)
+        self.reranker = (
+            CrossEncoderReranker(api_key=rerank_api_key or voyage_api_key, model=rerank_model)
+            if self.config.rerank_enabled
+            else None
+        )
+        
+        # Initialize boosts
+        self.brand_boost = BrandBoost(brand_id) if brand_id and self.config.brand_boost_enabled else None
+        self.page_boost = PageBoost() if self.config.page_boost_enabled else None
+        
+        logger.info("Retrieval pipeline initialized", config=self.config.dict() if hasattr(self.config, 'dict') else str(self.config))
+
+    
+    async def retrieve(
+        self, 
+        query: str, 
+        page_context: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        max_chunks: int = 12,
+        content_types: Optional[List[str]] = None  # Phase 2: Content-type filtering
+    ) -> RetrievalContext:
+        """
+        Main retrieval method that returns relevant context chunks.
+        
+        Args:
+            query: Search query text
+            page_context: Optional page context for boosting
+            user_id: Optional user ID for personalization
+            filters: Optional metadata filters
+            max_chunks: Maximum number of chunks to return (default 12)
+            content_types: Optional list of content types to filter by (Phase 2)
+        
+        Returns:
+            RetrievalContext with matched chunks and metadata
+        """
+        try:
+            logger.info("Starting retrieval", query=query[:100], user_id=user_id)
+            import time
+            start_time = time.time()
+            
+            # Phase 2: Detect query intent
+            query_intent = self._detect_query_intent(query, page_context)
+            logger.debug("Query intent detected", intent=query_intent)
+            
+            # Phase 2: Auto-determine content types if not provided
+            if content_types is None and query_intent != "general":
+                content_types = self._intent_to_content_types(query_intent)
+                logger.debug("Auto-determined content types", content_types=content_types)
+            
+            # Phase 2: Add content_type filter if specified
+            if filters is None:
+                filters = {}
+            
+            if content_types:
+                filters["content_type"] = {"$in": content_types}
+                logger.debug("Content type filter applied", content_types=content_types)
+            
+            # Step 1: Perform parallel searches
+            search_results = []
+            
+            # Vector search
+            if self.vector_search and self.config.vector_enabled:
+                try:
+                    vector_result = await self.vector_search.search(
+                        query=query,
+                        top_k=self.config.vector_top_k,
+                        filters=filters,
+                        similarity_threshold=self.config.similarity_threshold
+                    )
+                    search_results.append(vector_result)
+                    
+                    # 🔍 DETAILED VECTOR SEARCH LOGGING
+                    print("\n" + "="*80)
+                    print("🔍 VECTOR SEARCH RESULTS")
+                    print("="*80)
+                    print(f"Query: {query}")
+                    print(f"Results Found: {len(vector_result.chunks)}")
+                    print(f"Top-K: {self.config.vector_top_k}")
+                    print(f"Similarity Threshold: {self.config.similarity_threshold}")
+                    
+                    if vector_result.chunks:
+                        print(f"\nTop {min(5, len(vector_result.chunks))} Results:")
+                        for i, chunk in enumerate(vector_result.chunks[:5], 1):
+                            print(f"\n{i}. Score: {chunk.score:.4f}")
+                            print(f"   Doc ID: {chunk.doc_id}")
+                            print(f"   Content Type: {chunk.content_type}")
+                            if hasattr(chunk, 'metadata') and chunk.metadata:
+                                sku = chunk.metadata.get('sku', 'N/A')
+                                print(f"   SKU: {sku}")
+                            text_preview = getattr(chunk, 'text', getattr(chunk, 'content', 'N/A'))
+                            if isinstance(text_preview, str):
+                                print(f"   Text: {text_preview[:150]}...")
+                    else:
+                        print("⚠️  No results found")
+                    print("="*80 + "\n")
+                    
+                    logger.debug("Vector search completed", chunks=len(vector_result.chunks))
+                except Exception as e:
+                    print(f"\n❌ Vector search failed: {e}\n")
+                    logger.warning("Vector search failed", error=str(e))
+            
+            # BM25 search
+            if self.bm25_search and self.config.bm25_enabled:
+                try:
+                    bm25_result = await self.bm25_search.search(
+                        query=query,
+                        top_k=self.config.bm25_top_k,
+                        filters=filters
+                    )
+                    search_results.append(bm25_result)
+                    
+                    # 🔍 DETAILED BM25 SEARCH LOGGING
+                    print("\n" + "="*80)
+                    print("📝 BM25 TEXT SEARCH RESULTS")
+                    print("="*80)
+                    print(f"Query: {query}")
+                    print(f"Results Found: {len(bm25_result.chunks)}")
+                    print(f"Top-K: {self.config.bm25_top_k}")
+                    
+                    if bm25_result.chunks:
+                        print(f"\nTop {min(5, len(bm25_result.chunks))} Results:")
+                        for i, chunk in enumerate(bm25_result.chunks[:5], 1):
+                            print(f"\n{i}. Score: {chunk.score:.4f}")
+                            print(f"   Doc ID: {chunk.doc_id}")
+                            print(f"   Content Type: {chunk.content_type}")
+                            if hasattr(chunk, 'metadata') and chunk.metadata:
+                                sku = chunk.metadata.get('sku', 'N/A')
+                                print(f"   SKU: {sku}")
+                            text_preview = getattr(chunk, 'text', getattr(chunk, 'content', 'N/A'))
+                            if isinstance(text_preview, str):
+                                print(f"   Text: {text_preview[:150]}...")
+                    else:
+                        print("⚠️  No results found")
+                    print("="*80 + "\n")
+                    
+                    logger.debug("BM25 search completed", chunks=len(bm25_result.chunks))
+                except Exception as e:
+                    print(f"\n❌ BM25 search failed: {e}\n")
+                    logger.warning("BM25 search failed", error=str(e))
+            
+            # If no searches succeeded, return empty result
+            if not search_results:
+                logger.warning("No search results available")
+                return RetrievalContext(
+                    chunks=[],
+                    confidence=0.0,
+                    sources=[],
+                    query=query,
+                    retrieval_metadata={"error": "No search backends available"}
+                )
+            
+            # Step 2: Apply RRF fusion
+            fused_chunks = self.rrf.fuse(search_results, top_k=self.config.vector_top_k)
+            logger.debug("RRF fusion completed", chunks=len(fused_chunks))
+            
+            # Step 3: Apply cross-encoder reranking
+            if self.reranker and self.config.rerank_enabled and len(fused_chunks) > max_chunks:
+                try:
+                    reranked_chunks = await self.reranker.rerank(
+                        query=query,
+                        chunks=fused_chunks,
+                        top_k=max_chunks
+                    )
+                    logger.debug("Reranking completed", chunks=len(reranked_chunks))
+                except Exception as e:
+                    logger.warning("Reranking failed, using fused results", error=str(e))
+                    reranked_chunks = fused_chunks[:max_chunks]
+            else:
+                reranked_chunks = fused_chunks[:max_chunks]
+            
+            # Step 4: Apply brand boost
+            if self.brand_boost and self.config.brand_boost_enabled:
+                reranked_chunks = self.brand_boost.apply_boost(reranked_chunks)
+                logger.debug("Brand boost applied")
+            
+            # Step 5: Apply page context boost
+            if self.page_boost and page_context and self.config.page_boost_enabled:
+                # Convert dict to PageContext if needed
+                page_ctx = PageContext(**page_context) if isinstance(page_context, dict) else page_context
+                reranked_chunks = self.page_boost.apply_boost(reranked_chunks, page_ctx)
+                logger.debug("Page boost applied")
+            
+            # Step 6: Deduplicate (simple version based on doc_id + section)
+            if self.config.dedup_enabled:
+                reranked_chunks = self._deduplicate(reranked_chunks)
+                logger.debug("Deduplication completed", chunks=len(reranked_chunks))
+            
+            # Phase 2: Enrich chunks with structured data
+            reranked_chunks = self._enrich_with_structured_data(reranked_chunks)
+            logger.debug("Structured data enrichment completed")
+            
+            # Calculate overall confidence
+            confidence = max([chunk.score for chunk in reranked_chunks], default=0.0)
+            
+            # Extract sources
+            sources = list(set(chunk.doc_id for chunk in reranked_chunks))
+            
+            # Phase 2: Extract content types found in results
+            content_types_found = list(set(
+                chunk.content_type for chunk in reranked_chunks 
+                if chunk.content_type
+            ))
+            
+            # Build retrieval context
+            execution_time = (time.time() - start_time) * 1000
+            
+            result = RetrievalContext(
+                chunks=reranked_chunks,
+                confidence=confidence,
+                sources=sources,
+                query=query,
+                filters_applied=filters,
+                query_intent=query_intent,  # Phase 2
+                content_types_found=content_types_found,  # Phase 2
+                boost_info={
+                    "page_context_applied": bool(page_context),
+                    "brand_boost_applied": bool(self.brand_boost),
+                    "filters_applied": bool(filters),
+                    "content_type_filtering": bool(content_types)  # Phase 2
+                },
+                retrieval_metadata={
+                    "search_methods": [r.search_type for r in search_results],
+                    "total_candidates": sum(r.total_found for r in search_results),
+                    "execution_time_ms": execution_time,
+                    "reranked": bool(self.reranker and self.config.rerank_enabled),
+                    "deduped": self.config.dedup_enabled,
+                    "intent_detected": query_intent,  # Phase 2
+                    "content_types_requested": content_types  # Phase 2
+                }
+            )
+            
+            logger.info("Retrieval completed", 
+                       chunks_count=len(reranked_chunks), 
+                       confidence=confidence,
+                       execution_time_ms=execution_time)
+            
+            return result
+            
+        except Exception as e:
+            logger.error("Error in retrieval pipeline", error=str(e), exc_info=True)
+            return RetrievalContext(
+                chunks=[],
+                confidence=0.0,
+                sources=[],
+                query=query,
+                retrieval_metadata={"error": str(e)}
+            )
+    
+    def _deduplicate(self, chunks: List[DocumentChunk]) -> List[DocumentChunk]:
+        """Simple deduplication based on doc_id + section."""
+        seen = set()
+        deduplicated = []
+        
+        for chunk in chunks:
+            key = (chunk.doc_id, chunk.section or "")
+            if key not in seen:
+                seen.add(key)
+                deduplicated.append(chunk)
+        
+        return deduplicated
+    
+    def _detect_query_intent(self, query: str, page_context: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Detect the intent of the user's query.
+        
+        Returns:
+            "product_search" | "dealer_search" | "faq" | "office" | "category" | "general"
+        """
+        query_lower = query.lower()
+        
+        # Product search indicators
+        product_keywords = [
+            # Core bathroom products
+            'faucet', 'shower', 'sink', 'tap', 'basin', 'toilet', 'bath',
+            'diverter', 'mixer', 'lever', 'spout', 'valve', 'cock',
+            'wash basin', 'bathtub', 'commode', 'urinal', 'bidet',
+            'flush', 'cistern', 'seat cover', 'accessories',
+            # Purchase/pricing intent
+            'price', 'cost', 'buy', 'purchase', 'product', 'model',
+            'under', 'budget', 'features', 'specifications', 'sku',
+            # Product attributes
+            'wall mounted', 'floor mounted', 'single bowl', 'double bowl',
+            'chrome', 'brass', 'stainless steel', 'ceramic'
+        ]
+        
+        # Dealer search indicators
+        dealer_keywords = [
+            'store', 'dealer', 'showroom', 'retailer', 'shop',
+            'near', 'location', 'city', 'address', 'contact',
+            'where to buy', 'nearest', 'close to', 'find dealer'
+        ]
+        
+        # FAQ indicators
+        faq_keywords = [
+            'how to', 'why', 'what is', 'can i', 'should i',
+            'install', 'installation', 'warranty', 'return',
+            'maintenance', 'clean', 'repair', 'troubleshoot'
+        ]
+        
+        # Office/contact indicators
+        office_keywords = [
+            'office', 'headquarters', 'corporate', 'head office',
+            'customer service', 'support', 'helpline', 'contact us'
+        ]
+        
+        # Category browsing indicators
+        category_keywords = [
+            'types of', 'categories', 'range', 'collection',
+            'all products', 'browse', 'catalog', 'catalogue'
+        ]
+        
+        # Check page context for SKU/product page
+        if page_context:
+            # Access Pydantic model attributes directly, not with .get()
+            if (hasattr(page_context, 'sku') and page_context.sku) or \
+               (hasattr(page_context, 'path') and page_context.path and 'product' in page_context.path.lower()):
+                return "product_search"
+        
+        # Count keyword matches
+        product_score = sum(1 for kw in product_keywords if kw in query_lower)
+        dealer_score = sum(1 for kw in dealer_keywords if kw in query_lower)
+        faq_score = sum(1 for kw in faq_keywords if kw in query_lower)
+        office_score = sum(1 for kw in office_keywords if kw in query_lower)
+        category_score = sum(1 for kw in category_keywords if kw in query_lower)
+        
+        # Return intent with highest score
+        scores = {
+            "product_search": product_score,
+            "dealer_search": dealer_score,
+            "faq": faq_score,
+            "office": office_score,
+            "category": category_score
+        }
+        
+        max_score = max(scores.values())
+        if max_score > 0:
+            # Find intent with highest score
+            for intent, score in scores.items():
+                if score == max_score:
+                    return intent
+        
+        return "general"
+    
+    def _intent_to_content_types(self, intent: str) -> Optional[List[str]]:
+        """
+        Map query intent to content types for filtering.
+        
+        Args:
+            intent: Detected query intent
+            
+        Returns:
+            List of content types to filter by, or None for no filtering
+        """
+        intent_mapping = {
+            "product_search": ["product", "category"],  # Include category for product browsing
+            "dealer_search": ["dealer", "office"],      # Dealers and office locations
+            "faq": ["faq", "guide"],                    # FAQs and how-to guides
+            "office": ["office"],                        # Office/headquarters info
+            "category": ["category", "product"],         # Category browsing
+            "general": None                              # No filtering for general queries
+        }
+        
+        return intent_mapping.get(intent)
+    
+    def _enrich_with_structured_data(self, chunks: List[DocumentChunk]) -> List[DocumentChunk]:
+        """
+        Enrich chunks with product_data and dealer_data from metadata.
+        
+        This extracts structured data fields that were stored during ingestion
+        and makes them directly accessible on the chunk object.
+        
+        Args:
+            chunks: List of document chunks
+            
+        Returns:
+            Enriched chunks with product_data and dealer_data populated
+        """
+        for chunk in chunks:
+            # Extract content_type from metadata if not already set
+            if not chunk.content_type and "content_type" in chunk.metadata:
+                chunk.content_type = chunk.metadata["content_type"]
+            
+            # Extract product_data if this is a product chunk
+            if chunk.content_type == "product" and "product_data" in chunk.metadata:
+                chunk.product_data = chunk.metadata["product_data"]
+            
+            # Extract dealer_data if this is a dealer chunk
+            elif chunk.content_type == "dealer" and "dealer_data" in chunk.metadata:
+                chunk.dealer_data = chunk.metadata["dealer_data"]
+        
+        return chunks
+
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """Check health of retrieval components."""
+        health = {
+            "vector_search": "disabled",
+            "bm25_search": "disabled",
+            "reranker": "disabled",
+            "overall": "healthy"
+        }
+        
+        # Check vector search
+        if self.vector_search:
+            try:
+                vs_health = await self.vector_search.health_check()
+                health["vector_search"] = vs_health.get("overall", "unknown")
+            except Exception as e:
+                health["vector_search"] = f"error: {str(e)}"
+                health["overall"] = "degraded"
+        
+        # Check BM25 search
+        if self.bm25_search:
+            try:
+                bm25_health = await self.bm25_search.health_check()
+                health["bm25_search"] = bm25_health.get("status", "unknown")
+            except Exception as e:
+                health["bm25_search"] = f"error: {str(e)}"
+                health["overall"] = "degraded"
+        
+        # Check reranker
+        if self.reranker:
+            try:
+                reranker_healthy = await self.reranker.health_check()
+                health["reranker"] = "healthy" if reranker_healthy else "unhealthy"
+            except Exception as e:
+                health["reranker"] = f"error: {str(e)}"
+                # Reranker failure is not critical (has fallback)
+        
+        return health
+    
+    async def close(self):
+        """Close all connections."""
+        if self.vector_search:
+            await self.vector_search.close()
+        if self.bm25_search:
+            await self.bm25_search.close()
+        if self.reranker:
+            await self.reranker.close()

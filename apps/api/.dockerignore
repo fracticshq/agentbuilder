@@ -17,3 +17,6 @@ uploads/
 htmlcov/
 dist/
 build/
+packages/**/.pytest_cache
+packages/**/__pycache__
+packages/**/tests

@@ -80,6 +80,22 @@ function sha256(buffer) {
 }
 
 // Main MCP Endpoint
+app.get('/mcp', (_req, res) => {
+  res.status(200).json({
+    service: 'agentbuilder-shopify-mcp',
+    endpoint: '/mcp',
+    method: 'POST',
+    protocol: 'json-rpc',
+    status: 'ready',
+    example: {
+      jsonrpc: '2.0',
+      id: 'tools-list',
+      method: 'tools/list',
+      params: {}
+    }
+  });
+});
+
 app.post('/mcp', async (req, res) => {
   try {
     const response = await handleMcpRequest(req.body, req.session, req.headers);
@@ -112,7 +128,18 @@ app.get('/auth/login', async (req, res) => {
   const shopUrl = req.query.shop || process.env.SHOPIFY_SHOP_URL;
   const forcedSessionId = req.query.session_id;
   
-  if (!shopUrl) return res.status(400).send('Missing shop parameter');
+  if (!shopUrl) {
+    return res.status(400).json({
+      service: 'agentbuilder-shopify-mcp',
+      endpoint: '/auth/login',
+      status: 'missing_shop',
+      message: 'Add a Shopify shop domain using the shop query parameter.',
+      requiredQuery: {
+        shop: 'your-store.myshopify.com'
+      },
+      example: '/auth/login?shop=your-store.myshopify.com'
+    });
+  }
 
   // If session_id is provided, we want to ensure we're using that session
   if (forcedSessionId) {
@@ -225,6 +252,18 @@ app.post('/webhooks', (req, res) => {
 });
 
 // Health check
+app.get('/', (_req, res) => {
+  res.status(200).json({
+    service: 'agentbuilder-shopify-mcp',
+    status: 'ok',
+    endpoints: {
+      health: '/health',
+      mcp: '/mcp',
+      authLogin: '/auth/login'
+    }
+  });
+});
+
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 app.listen(port, () => {

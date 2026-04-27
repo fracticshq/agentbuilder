@@ -1,0 +1,23 @@
+[project]
+name = "agent-memory"
+version = "0.1.0"
+description = "Memory system for Agent Builder Platform"
+requires-python = ">=3.10"
+dependencies = [
+    "motor>=3.7.0",           # MongoDB async driver
+    "redis>=5.0.0",           # Redis client
+    "cryptography>=41.0.0",   # AES encryption for PII
+    "pydantic>=2.12.0",       # Data validation
+    "structlog>=25.4.0",      # Structured logging
+    "python-dotenv>=1.1.0",   # Environment variables
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+memory = ["py.typed"]
