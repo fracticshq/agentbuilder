@@ -307,7 +307,8 @@ For commercial hosting, managed services, white-label use, resale, or brand perm
 
 ## Contributors
 
-- Anant Mendiratta
+- Anant Mendiratta - [LinkedIn](https://www.linkedin.com/in/anantmendiratta) · [GitHub](https://github.com/anantmendiratta)
+- Nishant Jain - [LinkedIn](https://www.linkedin.com/in/nishant--jain/) · [GitHub](https://github.com/nishu3210)
 - Claude Code
 - Codex
 
