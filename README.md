@@ -287,6 +287,18 @@ Current docs:
 
 ---
 
+## License And Ownership
+
+NOVA is built and owned by Fractics ([fractics.com](https://fractics.com)).
+
+The code is released under the [GNU Affero General Public License v3.0 or later](./LICENSE). You can self-deploy, use, study, modify, and share NOVA under the terms of the AGPL.
+
+The NOVA and Fractics names, logos, product identity, and brand assets remain owned by Fractics. The AGPL covers the code; it does not grant trademark rights or permission to present a hosted, managed, white-label, or commercial resale offering as the official NOVA product.
+
+For commercial hosting, managed services, white-label use, resale, or brand permissions, contact Fractics. See [TRADEMARKS.md](./TRADEMARKS.md).
+
+---
+
 ## Product Positioning
 
 Public product name:
