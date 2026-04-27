@@ -28,15 +28,15 @@ def sanitize_database_name(value: str) -> str:
 async def ensure_system_indexes(system_db: AsyncIOMotorDatabase, settings: Settings) -> list[BootstrapCheck]:
     checks: list[BootstrapCheck] = []
 
-    async def create(name: str, collection: str, *args, **kwargs) -> None:
+    async def create(check_name: str, collection: str, *args, **kwargs) -> None:
         try:
             await system_db[collection].create_index(*args, **kwargs)
-            checks.append(BootstrapCheck(name=name, status="ok", detail="index ready"))
+            checks.append(BootstrapCheck(name=check_name, status="ok", detail="index ready"))
         except Exception as exc:
             if "already exists" in str(exc):
-                checks.append(BootstrapCheck(name=name, status="ok", detail="index already exists"))
+                checks.append(BootstrapCheck(name=check_name, status="ok", detail="index already exists"))
                 return
-            checks.append(BootstrapCheck(name=name, status="error", detail=str(exc)))
+            checks.append(BootstrapCheck(name=check_name, status="error", detail=str(exc)))
             raise
 
     await create("system.brands.id", "brands", "id", unique=True, name="brand_id_idx")
@@ -65,15 +65,15 @@ async def ensure_brand_knowledge_indexes(db: AsyncIOMotorDatabase) -> list[Boots
     collection = db["knowledge_base"]
     db_name = db.name
 
-    async def create(name: str, *args, **kwargs) -> None:
+    async def create(check_name: str, *args, **kwargs) -> None:
         try:
             await collection.create_index(*args, **kwargs)
-            checks.append(BootstrapCheck(name=f"{db_name}.knowledge_base.{name}", status="ok", detail="index ready"))
+            checks.append(BootstrapCheck(name=f"{db_name}.knowledge_base.{check_name}", status="ok", detail="index ready"))
         except Exception as exc:
             if "already exists" in str(exc):
-                checks.append(BootstrapCheck(name=f"{db_name}.knowledge_base.{name}", status="ok", detail="index already exists"))
+                checks.append(BootstrapCheck(name=f"{db_name}.knowledge_base.{check_name}", status="ok", detail="index already exists"))
                 return
-            checks.append(BootstrapCheck(name=f"{db_name}.knowledge_base.{name}", status="error", detail=str(exc)))
+            checks.append(BootstrapCheck(name=f"{db_name}.knowledge_base.{check_name}", status="error", detail=str(exc)))
             raise
 
     await create(

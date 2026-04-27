@@ -5,6 +5,6 @@
 // the active config at container startup. For local dev, uncomment the block
 // below only when you need to override VITE_API_BASE_URL without rebuilding.
 //
-// window.__APP_CONFIG__ = {
-//   API_BASE_URL: 'http://localhost:8000'
-// };
+window.__APP_CONFIG__ = {
+  API_BASE_URL: 'http://localhost:8000'
+};
