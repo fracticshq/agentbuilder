@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 import structlog
+import httpx
 from cryptography.fernet import Fernet
 
 from llm.factory import create_provider_from_env
@@ -535,11 +536,29 @@ class RuntimeSettingsService:
         client = None
         try:
             client = VoyageClient(api_key=config["api_key"], model=config["model"])
-            healthy = await client.health_check()
+            await client.embed_query("test")
             return {
                 "section": "voyage",
-                "status": "healthy" if healthy else "unhealthy",
-                "detail": "Voyage embeddings connection is healthy." if healthy else "Voyage health check failed.",
+                "status": "healthy",
+                "detail": f"Voyage embeddings connection is healthy for model {config['model']}.",
+            }
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            response_text = (exc.response.text or "").strip()
+            response_detail = f" Response: {response_text[:300]}" if response_text else ""
+            logger.warning(
+                "runtime_settings_voyage_test_http_failed",
+                status_code=status_code,
+                model=config.get("model"),
+            )
+            return {
+                "section": "voyage",
+                "status": "unhealthy",
+                "detail": (
+                    f"Voyage embeddings returned HTTP {status_code} for model {config['model']}."
+                    " Check the Voyage API key, account/project entitlement, and selected embedding model."
+                    f"{response_detail}"
+                ),
             }
         except Exception as exc:
             logger.warning("runtime_settings_voyage_test_failed", error=str(exc))
