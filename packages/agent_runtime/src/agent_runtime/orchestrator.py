@@ -11,6 +11,7 @@ from tools.registry import ToolRegistry
 from tools.types import ToolResult
 from llm.providers.base import LLMProvider
 from llm.reasoning.planning import Plan, PROMPT_PLANNING
+from .domain_safety import sanitize_llm_prompt_text
 
 logger = structlog.get_logger()
 
@@ -73,6 +74,7 @@ class Orchestrator:
         Execute the agent loop for a query.
         """
         logger.info("orchestrator_start", query=query)
+        safe_query = sanitize_llm_prompt_text(query)
         scratchpad = []
         
         # Format history string
@@ -82,7 +84,7 @@ class Orchestrator:
             for msg in chat_history[-6:]:  # Last 6 messages for context
                 # Handle dictionary format from ShortTermMemory
                 role = msg.get("role", "unknown")
-                content = msg.get("content", "")
+                content = sanitize_llm_prompt_text(msg.get("content", ""))
                 formatted_msgs.append(f"{role}: {content}")
             if formatted_msgs:
                 history_text = "\n".join(formatted_msgs)
@@ -105,7 +107,7 @@ Conversation History:
 Runtime Context:
 {runtime_context_text}
 
-User Request: {query}
+User Request: {safe_query}
 
 Available Tools:
 {tool_schemas}
@@ -276,10 +278,10 @@ Output JSON Format:
     async def _synthesize_answer(self, query: str, history: List[Dict]) -> str:
         """Synthesize final answer from execution history."""
         prompt = f"""
-        User Query: {query}
+        User Query: {sanitize_llm_prompt_text(query)}
         
         Execution History:
-        {json.dumps(history, indent=2)}
+        {json.dumps(sanitize_llm_prompt_text(history), indent=2)}
         
         Based on the execution history above, provide a comprehensive answer to the user.
         If the tools didn't provide enough info, admit it.
@@ -295,7 +297,7 @@ Output JSON Format:
                 f"{self.system_prompt}\n\n"
                 "Answer the user directly and conservatively. If the knowledge base or tools are needed "
                 "but unavailable, say you do not have enough verified information.\n\n"
-                f"User Request: {query}"
+                f"User Request: {sanitize_llm_prompt_text(query)}"
             )
             return AgentResult(
                 answer=response.content,
@@ -323,10 +325,10 @@ Output JSON Format:
         """Re-synthesize answer with critic feedback."""
         feedback_text = "\n".join([f"- {issue}" for issue in issues])
         prompt = f"""
-        User Query: {query}
+        User Query: {sanitize_llm_prompt_text(query)}
         
         Execution History:
-        {json.dumps(history, indent=2)}
+        {json.dumps(sanitize_llm_prompt_text(history), indent=2)}
         
         Your previous answer had the following issues:
         {feedback_text}

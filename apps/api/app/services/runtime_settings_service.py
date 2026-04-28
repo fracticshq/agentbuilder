@@ -40,6 +40,7 @@ class RuntimeSettingsService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._fernet = Fernet(self._derive_encryption_key())
+        self._decrypt_warning_keys: set[str] = set()
 
     def _derive_encryption_key(self) -> bytes:
         seed = (
@@ -154,7 +155,13 @@ class RuntimeSettingsService:
                     effective[definition.key] = self._decrypt(encrypted_value)
                     continue
                 except Exception as exc:
-                    logger.error("runtime_setting_decrypt_failed", key=definition.key, error=str(exc))
+                    if definition.key not in self._decrypt_warning_keys:
+                        self._decrypt_warning_keys.add(definition.key)
+                        logger.warning(
+                            "runtime_setting_decrypt_failed_using_env",
+                            key=definition.key,
+                            error_type=type(exc).__name__,
+                        )
 
             effective[definition.key] = self._setting_env_value(definition)
 
@@ -372,7 +379,8 @@ class RuntimeSettingsService:
         values = await self.get_effective_values(overrides=overrides)
         return {
             "api_key": values.get("voyage.api_key") or "",
-            "model": values.get("voyage.model") or "voyage-large-2-instruct",
+            "model": values.get("voyage.model") or "voyage-3-large",
+            "rerank_model": values.get("voyage.rerank_model") or "rerank-2.5",
         }
 
     async def get_azure_arm_config(
@@ -513,6 +521,7 @@ class RuntimeSettingsService:
             for key, value in {
                 "voyage.api_key": config.get("api_key"),
                 "voyage.model": config.get("model"),
+                "voyage.rerank_model": config.get("rerank_model"),
             }.items()
             if not self._trimmed_or_none(value)
         ]

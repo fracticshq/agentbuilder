@@ -209,7 +209,7 @@ Guidelines:
                 },
                 "embedding": {
                     "provider": "voyage",
-                    "model": "voyage-large-2-instruct"
+                    "model": "voyage-3-large"
                 },
                 "rag": {
                     "enabled": True,

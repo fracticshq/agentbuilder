@@ -48,7 +48,7 @@ Stores agent configurations.
       enabled: true,
       embedding: {
         provider: "voyage",
-        model: "voyage-large-2-instruct"
+        model: "voyage-3-large"
       },
       retrieval: {
         top_k: 5,
@@ -74,7 +74,7 @@ Stores agent configurations.
 ### Voyage AI Configuration
 
 **Provider:** Voyage AI  
-**Model:** `voyage-large-2-instruct`  
+**Model:** `voyage-3-large`  
 **Dimensions:** 1024  
 **API Endpoint:** `https://api.voyageai.com/v1/embeddings`
 
@@ -85,7 +85,7 @@ Authorization: Bearer VOYAGE_API_KEY
 
 {
   "input": ["text to embed"],
-  "model": "voyage-large-2-instruct"
+  "model": "voyage-3-large"
 }
 ```
 
@@ -98,7 +98,7 @@ Authorization: Bearer VOYAGE_API_KEY
       "index": 0
     }
   ],
-  "model": "voyage-large-2-instruct",
+  "model": "voyage-3-large",
   "usage": { "total_tokens": 15 }
 }
 ```
@@ -159,7 +159,7 @@ For each chunk:
 ```python
 response = await voyage_ai.embed(
   text=chunk.content,
-  model="voyage-large-2-instruct"
+  model="voyage-3-large"
 )
 chunk.embeddings = response.data[0].embedding  # 1024 floats
 ```
@@ -243,7 +243,7 @@ await db.knowledge_base.insertOne({
 
 This comprehensive panel shows:
 - ✅ **Vector Database:** MongoDB Atlas, `knowledge_base` collection, `vector_index` index, agent filter query
-- ✅ **Embeddings Model:** Voyage AI provider, `voyage-large-2-instruct` model, 1024 dimensions, API endpoint
+- ✅ **Embeddings Model:** Voyage AI provider, `voyage-3-large` model, 1024 dimensions, API endpoint
 - ✅ **Document Processing:** Chunking strategy (fixed/semantic), chunk size (500 chars), overlap (50 chars), total documents
 - ✅ **RAG Configuration:** RAG enabled status, top-k (5), similarity threshold (0.7), context window, reranking settings
 - ✅ **Document IDs Table:** Lists all documents with filename, job_id, chunks_count, upload timestamp

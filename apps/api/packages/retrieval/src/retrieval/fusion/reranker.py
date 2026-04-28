@@ -21,7 +21,7 @@ class CrossEncoderReranker:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "rerank-1",
+        model: str = "rerank-2.5",
         use_api: bool = True
     ):
         self.api_key = api_key or os.getenv("VOYAGE_API_KEY")
@@ -120,6 +120,14 @@ class CrossEncoderReranker:
             
             return reranked_chunks
             
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            if status_code in {401, 403}:
+                self.use_api = False
+                logger.warning("reranker_api_auth_failed_disabling_api", status=status_code)
+            else:
+                logger.error("API reranking error", error=str(e))
+            raise
         except Exception as e:
             logger.error("API reranking error", error=str(e))
             raise

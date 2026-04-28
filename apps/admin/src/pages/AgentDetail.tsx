@@ -556,7 +556,7 @@ export default function AgentDetail() {
                   <span className="text-sm font-medium text-purple-900">Model:</span>
                   <p className="text-sm text-purple-700 mt-1">
                     <code className="bg-purple-100 px-2 py-0.5 rounded">
-                      {agent.configuration?.rag?.embedding?.model || 'voyage-large-2-instruct'}
+                      {agent.configuration?.rag?.embedding?.model || 'voyage-3-large'}
                     </code>
                   </p>
                 </div>

@@ -155,6 +155,13 @@ SETTINGS_REGISTRY: tuple[RuntimeSettingDefinition, ...] = (
         env_var="VOYAGE_MODEL",
     ),
     RuntimeSettingDefinition(
+        key="voyage.rerank_model",
+        section="voyage",
+        label="Voyage rerank model",
+        description="Reranker model used to reorder retrieved chunks before answer synthesis.",
+        env_var="VOYAGE_RERANK_MODEL",
+    ),
+    RuntimeSettingDefinition(
         key="openai.api_key",
         section="openai",
         label="OpenAI API key",

@@ -155,7 +155,8 @@ class Settings(BaseSettings):
     
     # Voyage AI Configuration
     VOYAGE_API_KEY: str = ""
-    VOYAGE_MODEL: str = "voyage-large-2-instruct"
+    VOYAGE_MODEL: str = "voyage-3-large"
+    VOYAGE_RERANK_MODEL: str = "rerank-2.5"
     
     # Redis Configuration
     REDIS_URL: str = "redis://localhost:6379"

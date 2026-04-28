@@ -285,7 +285,7 @@ async def search(query, top_k=50, filters, similarity_threshold=0.7):
 ```
 
 **Key Details**:
-- **Embedding Model**: Voyage AI (`voyage-large-2-instruct`)
+- **Embedding Model**: Voyage AI (`voyage-3-large`)
 - **Vector Dimensions**: 1024
 - **Index Type**: MongoDB Atlas Vector Search (HNSW algorithm)
 - **Similarity Metric**: Cosine similarity
@@ -444,7 +444,7 @@ async def rerank(query, chunks, top_k=12):
         json={
             "query": query,
             "documents": documents,
-            "model": "rerank-1",
+            "model": "rerank-2.5",
             "top_k": 12
         }
     )

@@ -126,7 +126,7 @@ export function generateConfigObject(data: AgentConfig): Record<string, any> {
       enabled: true,
       embedding: {
         provider: data.embedding_provider || 'voyage',
-        model: data.embedding_model || 'voyage-large-2-instruct',
+        model: data.embedding_model || 'voyage-3-large',
       },
       retrieval: {
         top_k: data.top_k || 5,

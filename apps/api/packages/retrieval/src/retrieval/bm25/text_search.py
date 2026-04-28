@@ -165,7 +165,11 @@ class BM25Search:
             )
             logger.info("Text index created", index_name=self.text_index_name)
         except Exception as e:
-            logger.warning("Text index creation failed", error=str(e))
+            error_text = str(e)
+            if "already exists" in error_text or "IndexOptionsConflict" in error_text:
+                logger.info("Text index already available", index_name=self.text_index_name)
+                return
+            logger.warning("Text index creation failed", error=error_text)
     
     async def health_check(self) -> Dict[str, Any]:
         """Check health of MongoDB connection."""

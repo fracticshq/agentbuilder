@@ -70,8 +70,9 @@ async def ensure_brand_knowledge_indexes(db: AsyncIOMotorDatabase) -> list[Boots
             await collection.create_index(*args, **kwargs)
             checks.append(BootstrapCheck(name=f"{db_name}.knowledge_base.{check_name}", status="ok", detail="index ready"))
         except Exception as exc:
-            if "already exists" in str(exc):
-                checks.append(BootstrapCheck(name=f"{db_name}.knowledge_base.{check_name}", status="ok", detail="index already exists"))
+            error_text = str(exc)
+            if "already exists" in error_text or "IndexOptionsConflict" in error_text:
+                checks.append(BootstrapCheck(name=f"{db_name}.knowledge_base.{check_name}", status="ok", detail="compatible existing index present"))
                 return
             checks.append(BootstrapCheck(name=f"{db_name}.knowledge_base.{check_name}", status="error", detail=str(exc)))
             raise

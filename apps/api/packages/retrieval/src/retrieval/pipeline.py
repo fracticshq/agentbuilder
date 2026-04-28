@@ -36,9 +36,9 @@ class RetrievalPipeline:
         config: Optional[RetrievalConfig] = None,
         brand_id: Optional[str] = None,
         voyage_api_key: Optional[str] = None,
-        voyage_model: str = "voyage-large-2-instruct",
+        voyage_model: str = "voyage-3-large",
         rerank_api_key: Optional[str] = None,
-        rerank_model: str = "rerank-1",
+        rerank_model: str = "rerank-2.5",
     ):
         self.config = config or RetrievalConfig()
         self.brand_id = brand_id
@@ -145,34 +145,9 @@ class RetrievalPipeline:
                     )
                     search_results.append(vector_result)
                     
-                    # 🔍 DETAILED VECTOR SEARCH LOGGING
-                    print("\n" + "="*80)
-                    print("🔍 VECTOR SEARCH RESULTS")
-                    print("="*80)
-                    print(f"Query: {query}")
-                    print(f"Results Found: {len(vector_result.chunks)}")
-                    print(f"Top-K: {self.config.vector_top_k}")
-                    print(f"Similarity Threshold: {self.config.similarity_threshold}")
-                    
-                    if vector_result.chunks:
-                        print(f"\nTop {min(5, len(vector_result.chunks))} Results:")
-                        for i, chunk in enumerate(vector_result.chunks[:5], 1):
-                            print(f"\n{i}. Score: {chunk.score:.4f}")
-                            print(f"   Doc ID: {chunk.doc_id}")
-                            print(f"   Content Type: {chunk.content_type}")
-                            if hasattr(chunk, 'metadata') and chunk.metadata:
-                                sku = chunk.metadata.get('sku', 'N/A')
-                                print(f"   SKU: {sku}")
-                            text_preview = getattr(chunk, 'text', getattr(chunk, 'content', 'N/A'))
-                            if isinstance(text_preview, str):
-                                print(f"   Text: {text_preview[:150]}...")
-                    else:
-                        print("⚠️  No results found")
-                    print("="*80 + "\n")
                     
                     logger.debug("Vector search completed", chunks=len(vector_result.chunks))
                 except Exception as e:
-                    print(f"\n❌ Vector search failed: {e}\n")
                     logger.warning("Vector search failed", error=str(e))
             
             # BM25 search
@@ -185,33 +160,9 @@ class RetrievalPipeline:
                     )
                     search_results.append(bm25_result)
                     
-                    # 🔍 DETAILED BM25 SEARCH LOGGING
-                    print("\n" + "="*80)
-                    print("📝 BM25 TEXT SEARCH RESULTS")
-                    print("="*80)
-                    print(f"Query: {query}")
-                    print(f"Results Found: {len(bm25_result.chunks)}")
-                    print(f"Top-K: {self.config.bm25_top_k}")
-                    
-                    if bm25_result.chunks:
-                        print(f"\nTop {min(5, len(bm25_result.chunks))} Results:")
-                        for i, chunk in enumerate(bm25_result.chunks[:5], 1):
-                            print(f"\n{i}. Score: {chunk.score:.4f}")
-                            print(f"   Doc ID: {chunk.doc_id}")
-                            print(f"   Content Type: {chunk.content_type}")
-                            if hasattr(chunk, 'metadata') and chunk.metadata:
-                                sku = chunk.metadata.get('sku', 'N/A')
-                                print(f"   SKU: {sku}")
-                            text_preview = getattr(chunk, 'text', getattr(chunk, 'content', 'N/A'))
-                            if isinstance(text_preview, str):
-                                print(f"   Text: {text_preview[:150]}...")
-                    else:
-                        print("⚠️  No results found")
-                    print("="*80 + "\n")
                     
                     logger.debug("BM25 search completed", chunks=len(bm25_result.chunks))
                 except Exception as e:
-                    print(f"\n❌ BM25 search failed: {e}\n")
                     logger.warning("BM25 search failed", error=str(e))
             
             # If no searches succeeded, return empty result

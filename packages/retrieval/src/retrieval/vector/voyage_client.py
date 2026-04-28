@@ -16,7 +16,7 @@ class VoyageClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "voyage-large-2-instruct",
+        model: str = "voyage-3-large",
         base_url: str = "https://api.voyageai.com/v1"
     ):
         self.api_key = api_key or os.getenv("VOYAGE_API_KEY")
@@ -25,6 +25,7 @@ class VoyageClient:
         
         self.model = model
         self.base_url = base_url
+        self.auth_failed = False
         self.client = httpx.AsyncClient(
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -36,11 +37,15 @@ class VoyageClient:
     
     async def embed_query(self, query: str) -> List[float]:
         """Generate embedding for a search query."""
+        if self.auth_failed:
+            raise RuntimeError("Voyage API disabled after authentication failure")
         embeddings = await self._embed([query], input_type="query")
         return embeddings[0]  # Get first (and only) embedding from the list
     
     async def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for multiple documents."""
+        if self.auth_failed:
+            raise RuntimeError("Voyage API disabled after authentication failure")
         embeddings = await self._embed(texts, input_type="document")
         return embeddings  # Already a list of embeddings
     
@@ -83,7 +88,12 @@ class VoyageClient:
             return embeddings
             
         except httpx.HTTPStatusError as e:
-            logger.error("Voyage API error", status=e.response.status_code, detail=e.response.text)
+            status_code = e.response.status_code
+            if status_code in {401, 403}:
+                self.auth_failed = True
+                logger.warning("voyage_api_auth_failed_disabling_client", status=status_code)
+            else:
+                logger.error("Voyage API error", status=status_code, detail=e.response.text)
             raise
         except Exception as e:
             logger.error("Error generating embeddings", error=str(e))

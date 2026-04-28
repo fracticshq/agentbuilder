@@ -70,6 +70,17 @@ class AtlasVectorSearch:
         Returns:
             SearchResult with matched chunks
         """
+        if getattr(self.voyage, "auth_failed", False):
+            logger.warning("vector_search_skipped_voyage_auth_failed", query_length=len(query))
+            return SearchResult(
+                chunks=[],
+                total_found=0,
+                query=query,
+                search_type="vector",
+                execution_time_ms=0.0,
+                metadata={"disabled_reason": "voyage_auth_failed"},
+            )
+
         try:
             import time
             start_time = time.time()
