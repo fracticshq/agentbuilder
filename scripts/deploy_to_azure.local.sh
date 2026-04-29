@@ -454,7 +454,7 @@ deploy_admin() {
 
   API_BASE_URL="${API_BASE_URL:-${API_URL:-$(url_for "$API_APP")}}"
   WIDGET_BASE_URL="${WIDGET_BASE_URL:-${WIDGET_URL:-$(url_for "$WIDGET_APP")}}"
-  set_plain_envs "$ADMIN_APP" API_BASE_URL WIDGET_BASE_URL
+  set_plain_envs "$ADMIN_APP" API_BASE_URL WIDGET_BASE_URL CONFIG_VERSION
   wait_for_latest_revision_running "$ADMIN_APP"
 }
 
@@ -465,7 +465,7 @@ deploy_widget() {
   update_image "$WIDGET_APP" "$image"
 
   API_BASE_URL="${API_BASE_URL:-${API_URL:-$(url_for "$API_APP")}}"
-  set_plain_envs "$WIDGET_APP" API_BASE_URL
+  set_plain_envs "$WIDGET_APP" API_BASE_URL CONFIG_VERSION
   wait_for_latest_revision_running "$WIDGET_APP"
 }
 
@@ -484,7 +484,7 @@ deploy_shopify() {
 
   ensure_secret_envs_available "$SHOPIFY_APP" SESSION_SECRET REDIS_URL
   set_secret_envs "$SHOPIFY_APP" SESSION_SECRET REDIS_URL
-  set_plain_envs "$SHOPIFY_APP" NODE_ENV PORT CORS_ALLOW_ORIGINS
+  set_plain_envs "$SHOPIFY_APP" NODE_ENV PORT CORS_ALLOW_ORIGINS CONFIG_VERSION
   wait_for_latest_revision_running "$SHOPIFY_APP"
 }
 

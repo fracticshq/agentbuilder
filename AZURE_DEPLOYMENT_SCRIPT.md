@@ -151,7 +151,7 @@ The script will:
 3. Create missing Container Apps when needed.
 4. Update each app image.
 5. Apply shared secrets and environment variables.
-6. Force fresh API/Strapi revisions with `CONFIG_VERSION`.
+6. Force fresh service revisions with `CONFIG_VERSION`.
 7. Wait for latest revisions to become `Running`.
 8. Print service URLs.
 9. Run quick health checks.
@@ -233,7 +233,7 @@ Strapi:
 ./scripts/deploy_to_azure.local.sh --service strapi
 ```
 
-For production updates where Azure secrets should be reused rather than overwritten from `.env.azure`, add `--use-existing-secrets`:
+For production updates where Azure secrets should be reused rather than overwritten from `.env.azure`, add `--use-existing-secrets`. The script also applies `CONFIG_VERSION` so secret-only updates create fresh revisions:
 
 ```bash
 ./scripts/deploy_to_azure.local.sh --service api --use-existing-secrets
