@@ -5,6 +5,7 @@ Retrieval Pipeline - Orchestrates hybrid search and context building
 from typing import Dict, Any, List, Optional
 import asyncio
 import os
+import re
 import structlog
 
 from .vector.atlas_search import AtlasVectorSearch
@@ -189,8 +190,13 @@ class RetrievalPipeline:
             # Step 2: Apply RRF fusion
             fused_chunks = self.rrf.fuse(search_results, top_k=self.config.vector_top_k)
             logger.debug("RRF fusion completed", chunks=len(fused_chunks))
+
+            # Step 3: Deduplicate before reranking so rerank slots are not wasted.
+            if self.config.dedup_enabled:
+                fused_chunks = self._deduplicate(fused_chunks)
+                logger.debug("Deduplication completed", chunks=len(fused_chunks))
             
-            # Step 3: Apply cross-encoder reranking
+            # Step 4: Apply cross-encoder reranking
             if self.reranker and self.config.rerank_enabled and len(fused_chunks) > max_chunks:
                 try:
                     reranked_chunks = await self.reranker.rerank(
@@ -205,23 +211,18 @@ class RetrievalPipeline:
             else:
                 reranked_chunks = fused_chunks[:max_chunks]
             
-            # Step 4: Apply brand boost
+            # Step 5: Apply brand boost
             if self.brand_boost and self.config.brand_boost_enabled:
                 reranked_chunks = self.brand_boost.apply_boost(reranked_chunks)
                 logger.debug("Brand boost applied")
             
-            # Step 5: Apply page context boost
+            # Step 6: Apply page context boost
             if self.page_boost and page_context and self.config.page_boost_enabled:
                 # Convert dict to PageContext if needed
                 page_ctx = PageContext(**page_context) if isinstance(page_context, dict) else page_context
                 reranked_chunks = self.page_boost.apply_boost(reranked_chunks, page_ctx)
                 logger.debug("Page boost applied")
-            
-            # Step 6: Deduplicate (simple version based on doc_id + section)
-            if self.config.dedup_enabled:
-                reranked_chunks = self._deduplicate(reranked_chunks)
-                logger.debug("Deduplication completed", chunks=len(reranked_chunks))
-            
+
             # Phase 2: Enrich chunks with structured data
             reranked_chunks = self._enrich_with_structured_data(reranked_chunks)
             logger.debug("Structured data enrichment completed")
@@ -284,17 +285,74 @@ class RetrievalPipeline:
             )
     
     def _deduplicate(self, chunks: List[DocumentChunk]) -> List[DocumentChunk]:
-        """Simple deduplication based on doc_id + section."""
+        """Deduplicate chunks using structured entity identity before content fallback."""
         seen = set()
         deduplicated = []
         
         for chunk in chunks:
-            key = (chunk.doc_id, chunk.section or "")
+            key = self._dedup_key(chunk)
             if key not in seen:
                 seen.add(key)
                 deduplicated.append(chunk)
         
         return deduplicated
+
+    def _dedup_key(self, chunk: DocumentChunk) -> tuple:
+        metadata = chunk.metadata or {}
+        product_data = chunk.product_data or metadata.get("product_data") or {}
+        dealer_data = chunk.dealer_data or metadata.get("dealer_data") or {}
+        content_type = chunk.content_type or metadata.get("content_type")
+
+        if content_type == "product":
+            product_id = self._first_value(
+                [product_data, metadata],
+                ["sku", "id", "product_id", "variant_id", "code"],
+            )
+            if product_id:
+                return ("product", self._normalize_identity(product_id))
+
+        if content_type == "dealer":
+            dealer_id = self._first_value(
+                [dealer_data, metadata],
+                ["id", "dealer_id", "code", "name"],
+            )
+            city = self._first_value([dealer_data, metadata], ["city", "state", "pincode"])
+            if dealer_id:
+                return ("dealer", self._normalize_identity(dealer_id), self._normalize_identity(city))
+
+        url = self._first_value([metadata, {"url": chunk.url}], ["url", "source_url"])
+        if url:
+            return ("url", self._normalize_identity(url), self._normalize_identity(chunk.section))
+
+        if chunk.doc_id:
+            return ("doc", self._normalize_identity(chunk.doc_id), self._normalize_identity(chunk.section))
+
+        title = self._first_value([metadata, {"title": chunk.title}], ["title", "name"])
+        if title:
+            return ("title", self._normalize_identity(title), self._normalize_identity(chunk.section))
+
+        return ("content", self._normalize_content(chunk.content))
+
+    @staticmethod
+    def _first_value(sources: List[Dict[str, Any]], keys: List[str]) -> Optional[Any]:
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            for key in keys:
+                value = source.get(key)
+                if value not in (None, ""):
+                    return value
+        return None
+
+    @staticmethod
+    def _normalize_identity(value: Any) -> str:
+        if value is None:
+            return ""
+        return re.sub(r"\s+", " ", str(value).strip().lower())
+
+    @classmethod
+    def _normalize_content(cls, value: str) -> str:
+        return cls._normalize_identity(value)[:600]
     
     def _detect_query_intent(self, query: str, page_context: Optional[Dict[str, Any]] = None) -> str:
         """

@@ -57,6 +57,12 @@ PROMPT_ATTACK_PATTERNS = [
     re.compile(r"show me (?:your )?(?:system|developer) prompt", re.IGNORECASE),
 ]
 
+OFF_DOMAIN_PATTERNS = [
+    re.compile(r"\b(?:bitcoin|btc|ethereum|crypto(?:currency)?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:stock|share|market)\s+price\b", re.IGNORECASE),
+    re.compile(r"\b(?:weather|latest news|election results)\b", re.IGNORECASE),
+]
+
 GUARDRAIL_SENSITIVE_MESSAGE = (
     "Please do not share sensitive personal data, passwords, tokens, or payment details here. "
     "I can still help with product, dealer, order, and general pre-sales questions."
@@ -68,6 +74,10 @@ GUARDRAIL_POLICY_MESSAGE = (
 GUARDRAIL_ESCALATION_MESSAGE = (
     "This looks like it may need human support. I’m flagging it for assistance and can still help "
     "with general product information in the meantime."
+)
+GUARDRAIL_OFF_DOMAIN_MESSAGE = (
+    "I can only help with questions related to this brand, its products, dealers, policies, "
+    "and support information."
 )
 LOW_CONFIDENCE_MESSAGE = (
     "I don’t have enough verified information in the knowledge base to answer that reliably. "
@@ -255,6 +265,14 @@ class MessageService:
                 "action": "block",
                 "reason": "prompt_attack",
                 "message": GUARDRAIL_POLICY_MESSAGE,
+            }
+
+        if any(pattern.search(message or "") for pattern in OFF_DOMAIN_PATTERNS):
+            GUARDRAIL_COUNT.labels(action="block", reason="off_domain").inc()
+            return {
+                "action": "block",
+                "reason": "off_domain",
+                "message": GUARDRAIL_OFF_DOMAIN_MESSAGE,
             }
 
         for escalation in escalations or []:

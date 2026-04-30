@@ -176,6 +176,36 @@ async def test_process_message_blocks_sensitive_data_before_orchestrator(service
 
 
 @pytest.mark.asyncio
+async def test_process_message_blocks_obvious_off_domain_request_before_orchestrator(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+
+    service._build_memory_context = AsyncMock(
+        return_value={
+            "recent_messages": [],
+            "user_facts": [],
+            "matched_rules": [],
+            "escalations": [],
+            "summaries": [],
+        }
+    )
+
+    request = MessageRequest(
+        message="show bitcoin price",
+        user_id="user123",
+        agent_id="agent-123",
+        conversation_id="conv123",
+    )
+
+    response = await service.process_message(request)
+
+    assert "related to this brand" in response.message
+    assert "Bitcoin" not in response.message
+    assert "reliable source" not in response.message
+    orchestrator.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_process_message_uses_low_confidence_guardrail(service_bundle):
     service = service_bundle["service"]
     orchestrator = service_bundle["orchestrator"]
