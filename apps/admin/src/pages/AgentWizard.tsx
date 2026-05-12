@@ -90,6 +90,7 @@ interface AgentData {
   shopify_shop_url: string;
   shopify_access_token: string;
   shopify_access_token_configured: boolean;
+  shopify_agent_profile_url: string;
 
   // Features
   websockets: boolean;
@@ -180,6 +181,7 @@ const initialData: AgentData = {
   shopify_shop_url: '',
   shopify_access_token: '',
   shopify_access_token_configured: false,
+  shopify_agent_profile_url: '',
 
   // Features
   websockets: true,
@@ -374,6 +376,7 @@ export default function AgentWizard() {
         shopify_shop_url: config.shopify?.shop_url || '',
         shopify_access_token: config.shopify?.access_token || '',
         shopify_access_token_configured: Boolean(config.shopify?.access_token_configured),
+        shopify_agent_profile_url: config.shopify?.agent_profile_url || '',
 
         // System Prompt
         system_prompt: typeof promptLayers.soul === 'string'
@@ -581,6 +584,7 @@ export default function AgentWizard() {
           shopify: agentData.data_source === 'shopify' ? {
             shop_url: agentData.shopify_shop_url,
             access_token: agentData.shopify_access_token,
+            agent_profile_url: agentData.shopify_agent_profile_url,
           } : undefined,
           features: {
             websockets: agentData.websockets,
