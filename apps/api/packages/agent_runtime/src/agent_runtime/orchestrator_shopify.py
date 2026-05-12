@@ -24,7 +24,8 @@ class ShopifyOrchestrator(Orchestrator):
         llm: Any, 
         tools: Any, 
         critic: Optional[Any] = None, 
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        agent_profile_url: Optional[str] = None
     ):
         super().__init__(llm, tools, critic, system_prompt)
         # Context to track found products/variants for natural language reference
@@ -35,6 +36,7 @@ class ShopifyOrchestrator(Orchestrator):
         self.cart_lines: List[Dict[str, Any]] = []
         self.conversation: List[Dict[str, Any]] = []
         self.prompt_runtime_context: Dict[str, Any] = {}
+        self.agent_profile_url: str = agent_profile_url or "https://shopify.dev/ucp/agent-profiles/examples/2026-04-08/valid-with-capabilities.json"
 
     async def run(
         self, 
@@ -80,6 +82,11 @@ class ShopifyOrchestrator(Orchestrator):
         self.captured_ids = session_state.get("captured_ids", {})
         self.last_searched = session_state.get("last_searched", {})
         self.prompt_runtime_context = (context or {}).get("prompt_runtime", {})
+        
+        # Load agent profile URL from context
+        custom_profile = (context or {}).get("session_state", {}).get("agent_profile_url") or (context or {}).get("agent_profile_url")
+        if custom_profile:
+            self.agent_profile_url = custom_profile
         
         self.conversation = []
         if chat_history:
@@ -305,7 +312,7 @@ class ShopifyOrchestrator(Orchestrator):
                     pvid = item.get("product_variant_id")
                     if not pvid or not str(pvid).startswith("gid://"):
                         product_name = item.get("title") or item.get("product_name") or "the product"
-                        raise ValueError(f"Missing variant ID for '{product_name}'. You MUST call 'search_shop_catalog' first to find the correct variant ID.")
+                        raise ValueError(f"Missing variant ID for '{product_name}'. You MUST call 'search_catalog' first to find the correct variant ID.")
 
         # 3. Strip any remaining None/null/empty strings to prevent tool failures
         # Specifically target 'cart_id' and 'cartId' if they are invalid
@@ -345,17 +352,17 @@ class ShopifyOrchestrator(Orchestrator):
         products = metadata.get("products", [])
         
         # Reset last_searched if this was a new search
-        if tool_name == "search_shop_catalog":
+        if tool_name == "search_catalog":
             self.last_searched = {}
 
         for p in products:
             if not isinstance(p, dict): continue
             name = str(p.get("name") or p.get("title") or "").lower()
-            v_id = p.get("variant_id") or p.get("id")
-            if name and v_id:
-                gid = str(v_id)
+            gid = str(p.get("variant_id") or p.get("id") or "")
+            
+            if name and gid:
                 self.captured_ids[name] = gid
-                if tool_name == "search_shop_catalog":
+                if tool_name == "search_catalog":
                     self.last_searched[name] = gid
 
     def _build_reasoning_prompt(self) -> str:
@@ -367,7 +374,7 @@ class ShopifyOrchestrator(Orchestrator):
         # Detect if we should chain an add
         last_msg = context_window[-1] if context_window else None
         is_tool_after_search = False
-        if last_msg and last_msg["role"] == "tool" and last_msg.get("name") == "search_shop_catalog":
+        if last_msg and last_msg["role"] == "tool" and last_msg.get("name") == "search_catalog":
             is_tool_after_search = True
             
         # Refine: Only chain if the user's intent was to ADD/BUY or CONFIRM
@@ -474,14 +481,14 @@ When you need to call a tool, you MUST return ONLY a JSON object with these EXAC
 }}
 
 Examples:
-- To search: {{"tool_name": "search_shop_catalog", "tool_input": {{"query": "socks", "context": "browsing"}}}}
+- To search: {{"tool_name": "search_catalog", "tool_input": {{"meta": {{"ucp-agent": {{"profile": "{self.agent_profile_url}"}}}}, "catalog": {{"query": "socks"}}}}}}
 - To add to cart: {{"tool_name": "update_cart", "tool_input": {{"add_items": [{{"product_variant_id": "gid://shopify/ProductVariant/123", "quantity": 1}}]}}}}
 - To remove/decrement from cart: {{"tool_name": "update_cart", "tool_input": {{"remove_items": ["gid://shopify/CartLine/123"], "update_items": [{{"id": "gid://shopify/CartLine/456", "quantity": 1}}]}}}}
 
 ### SEQUENCING EXAMPLES
 Example 1 (Direct Add Request):
 User: "Add white socks"
-Thought: {{"tool_name": "search_shop_catalog", "tool_input": {{"query": "white socks"}}}}
+Thought: {{"tool_name": "search_catalog", "tool_input": {{"meta": {{"ucp-agent": {{"profile": "{self.agent_profile_url}"}}}}, "catalog": {{"query": "white socks"}}}}}}
 Tool Result: [{{"title": "White Socks", "variant_id": "gid://..."}}]
 Thought: {{"tool_name": "update_cart", "tool_input": {{"add_items": [{{"product_variant_id": "gid://...", "quantity": 1}}]}}}}
 Tool Result: {{"success": true}}
@@ -510,6 +517,12 @@ Thought: "I've removed one pair of white socks. You now have 1 pair remaining."
    - If current quantity is 1: Use `update_cart` with `remove_items`: ["line_id"].
    - If current quantity > 1: Use `update_cart` with `update_items`: [{{"id": "line_id", "quantity": new_qty}}].
 5. **CHECKOUT LINK**: Whenever you update the cart or show cart information, you MUST provide the Checkout URL to the user in your final answer.
+
+### 🧠 KNOWLEDGE-FIRST REASONING
+Your primary source of truth is the **retrieved knowledge** (product details from the knowledge base) provided in your context. 
+1. **TRUST THE KNOWLEDGE**: If the user asks about a product and its details are in the retrieved context, answer the user immediately using that information. 
+2. **TOOL FALLBACK**: If the product is **NOT** in the retrieved context, or if you need to check real-time stock/pricing, use the `search_catalog` or `get_product` tools.
+3. **DO NOT** conclude that a product is missing until you have checked both the Knowledge Base and the live Catalog Tools.
 
 ### OUTPUT FORMAT
 - To call a tool: Return ONLY the JSON object. No chat.

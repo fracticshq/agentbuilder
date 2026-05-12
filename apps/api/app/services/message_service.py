@@ -30,7 +30,7 @@ from llm.factory import LLMFactory, create_provider_from_env
 from tools.registry import ToolRegistry
 from tools.builtin.retrieval_tool import RetrievalTool
 from agent_runtime.orchestrator import Orchestrator, AgentResult
-from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
+# ShopifyOrchestrator is imported dynamically where needed to avoid early initialization issues
 
 from ..config import Settings
 from ..connections import connection_manager
@@ -563,17 +563,21 @@ class MessageService:
                         config.get("shopify_admin_token")
                     )
 
-                    if not shopify_url or not shopify_token:
+                    shopify_agent_profile_url = (
+                        shopify_conf.get("agent_profile_url") or
+                        config.get("shopify_agent_profile_url")
+                    )
+
+                    if not shopify_url:
                         logger.warning(
-                            "shopify_credentials_missing",
-                            agent_id=agent_id,
-                            has_shop_url=bool(shopify_url),
-                            has_access_token=bool(shopify_token),
+                            "shopify_url_missing",
+                            agent_id=agent_id
                         )
                         
                     mcp_headers = {
                         "x-shopify-shop-url": str(shopify_url or ""),
-                        "x-shopify-admin-token": str(shopify_token or "")
+                        "x-shopify-admin-token": str(shopify_token or ""),
+                        "x-shopify-agent-profile-url": str(shopify_agent_profile_url or "")
                     }
                     
                     # Also try to get a customer access token from config or settings
@@ -582,26 +586,37 @@ class MessageService:
                         config.get("shopify_customer_access_token")
                     )
                     
-                    if customer_token:
-                        mcp_headers["x-customer-access-token"] = str(customer_token)
-                    
-                    mcp_client = McpClient(endpoint=mcp_endpoint, headers=mcp_headers)
-                    
-                    # Connect and discover remote tools using the conversation/user session
-                    remote_tools = await mcp_client.discover_tools()
-                    for tool in remote_tools:
-                        self.tool_registry.register(tool)
+                    # Initialize Shopify-specific dependencies if enabled
+                    # Discover remote MCP tools ONLY if enabled
+                    if self.settings.SHOPIFY_MCP_USE:
+                        mcp_endpoint = self.settings.SHOPIFY_MCP_URL
+                        mcp_headers = {
+                            "x-shopify-shop-domain": str(shopify_url)
+                        }
+                        if customer_token:
+                            mcp_headers["x-customer-access-token"] = str(customer_token)
                         
-                    logger.info("mcp_tools_registered", count=len(remote_tools), brand_id=self.brand_id)
+                        try:
+                            mcp_client = McpClient(endpoint=mcp_endpoint, headers=mcp_headers)
+                            remote_tools = await mcp_client.discover_tools()
+                            for tool in remote_tools:
+                                self.tool_registry.register(tool)
+                            logger.info("mcp_tools_registered", count=len(remote_tools), brand_id=self.brand_id)
+                        except Exception as e:
+                            logger.warning("mcp_discovery_failed", error=str(e))
+                    else:
+                        logger.info("shopify_mcp_disabled_by_config", agent_id=agent_id)
 
-                    # Swap to ShopifyOrchestrator for Shopify-integrated agents
+                    # ALWAYS swap to ShopifyOrchestrator for Shopify-integrated agents
                     self.orchestrator = ShopifyOrchestrator(
                         llm=self.llm_provider,
                         tools=self.tool_registry,
                         critic=self.response_validator,
-                        system_prompt=self.system_prompt
+                        system_prompt=self.system_prompt,
+                        agent_profile_url=agent.get("agent_profile_url") or "https://shopify.dev/ucp/agent-profiles/examples/2026-04-08/valid-with-capabilities.json"
                     )
-                    logger.info("switched_to_shopify_orchestrator", agent_id=agent_id)
+                    logger.info("switched_to_shopify_orchestrator", agent_id=agent_id, mcp_enabled=self.settings.SHOPIFY_MCP_USE)
+
             else:
                 logger.warning("agent_not_found", agent_id=agent_id)
                 self.agent_config = {}
@@ -727,6 +742,8 @@ class MessageService:
                         session_state["captured_ids"] = meta.get("captured_ids", {})
                     if "last_searched" in meta:
                         session_state["last_searched"] = meta.get("last_searched", {})
+                    if "agent_profile_url" in meta:
+                        session_state["agent_profile_url"] = meta.get("agent_profile_url")
 
             context_dict = {
                 "memory": memory_context,
@@ -792,6 +809,7 @@ class MessageService:
                     "cart_id": saved_cart_id,
                     "captured_ids": agent_metadata.get("captured_ids"),
                     "last_searched": agent_metadata.get("last_searched"),
+                    "agent_profile_url": agent_metadata.get("agent_profile_url"),
                 }
             )
 
