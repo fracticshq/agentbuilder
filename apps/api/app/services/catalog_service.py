@@ -210,6 +210,8 @@ async def fetch_shopify_products(
     store_url: str,
     access_token: Optional[str],
     job_id: str,
+    brand_id: Optional[str] = None,
+    knowledge_service: Optional[Any] = None,
 ) -> None:
     """Background task: paginate Shopify /products.json and store results in job."""
     if not await _job_store.get(job_id):
@@ -295,7 +297,33 @@ async def fetch_shopify_products(
                 else:
                     break
 
-        await _job_store.update(job_id, {"items": all_items, "status": "completed", "total": len(all_items)})
+        await _job_store.update(job_id, {"items": all_items, "status": "processing_embeddings", "total": len(all_items)})
+        
+        # If knowledge_service and brand_id are provided, automatically ingest the products
+        if knowledge_service and brand_id and all_items:
+            from types import SimpleNamespace
+            
+            logger.info("shopify_starting_ingestion", items=len(all_items), brand_id=brand_id)
+            
+            # Convert dicts to objects for KnowledgeService
+            items_to_ingest = [SimpleNamespace(**item) for item in all_items]
+            
+            try:
+                # We reuse the same job_id for tracking
+                await knowledge_service.process_bulk_upload(
+                    job_id=job_id,
+                    content_type="product",
+                    items=items_to_ingest,
+                    brand_id=brand_id
+                )
+                logger.info("shopify_ingestion_complete", job_id=job_id)
+            except Exception as ing_exc:
+                logger.error("shopify_ingestion_failed", error=str(ing_exc))
+                # We don't fail the whole job, but we mark it
+                await _job_store.update(job_id, {"status": "completed", "warning": f"Ingestion failed: {ing_exc}"})
+                return
+
+        await _job_store.update(job_id, {"status": "completed"})
         logger.info("shopify_fetch_complete", items=len(all_items))
 
     except Exception as exc:
