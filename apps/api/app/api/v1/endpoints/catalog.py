@@ -24,7 +24,11 @@ import structlog
 
 from app.auth.dependencies import require_dashboard_access
 from app.connections import connection_manager
-from app.dependencies import get_runtime_settings_service, get_knowledge_service
+from app.dependencies import (
+    get_knowledge_service,
+    get_runtime_settings_service,
+    get_settings,
+)
 from app.services import catalog_service
 from app.services.runtime_settings_service import RuntimeSettingsService
 
@@ -60,23 +64,34 @@ def _protect_sync_config_secrets(
 ) -> dict:
     protected = dict(patch or {})
     existing = dict(existing or {})
-    access_token = protected.pop("access_token", None)
+    
+    # Handle Client ID
+    client_id = protected.pop("client_id", None)
+    if isinstance(client_id, str) and client_id.strip():
+        protected["client_id_encrypted"] = _encrypt_sync_secret(runtime_settings_service, client_id)
+    elif existing.get("client_id_encrypted"):
+        protected["client_id_encrypted"] = existing["client_id_encrypted"]
 
-    if isinstance(access_token, str) and access_token.strip():
-        protected["access_token_encrypted"] = _encrypt_sync_secret(runtime_settings_service, access_token)
-    elif existing.get("access_token_encrypted"):
-        protected["access_token_encrypted"] = existing["access_token_encrypted"]
-    elif existing.get("access_token"):
-        protected["access_token_encrypted"] = _encrypt_sync_secret(runtime_settings_service, existing["access_token"])
+    # Handle Client Secret
+    client_secret = protected.pop("client_secret", None)
+    if isinstance(client_secret, str) and client_secret.strip():
+        protected["client_secret_encrypted"] = _encrypt_sync_secret(runtime_settings_service, client_secret)
+    elif existing.get("client_secret_encrypted"):
+        protected["client_secret_encrypted"] = existing["client_secret_encrypted"]
 
     return protected
 
 
 def _expose_sync_config_for_admin(config: dict) -> dict:
     safe = dict(config or {})
-    configured = bool(safe.get("access_token_encrypted") or safe.get("access_token"))
-    safe.pop("access_token", None)
-    safe.pop("access_token_encrypted", None)
+    configured = bool(
+        (safe.get("client_id_encrypted") or safe.get("client_id")) and 
+        (safe.get("client_secret_encrypted") or safe.get("client_secret"))
+    )
+    safe.pop("client_id", None)
+    safe.pop("client_id_encrypted", None)
+    safe.pop("client_secret", None)
+    safe.pop("client_secret_encrypted", None)
     safe["access_token_configured"] = configured
     return safe
 
@@ -86,10 +101,15 @@ def _decrypt_sync_config_for_runtime(
     runtime_settings_service: RuntimeSettingsService,
 ) -> dict:
     runtime_config = dict(config or {})
-    if runtime_config.get("access_token_encrypted") and not runtime_config.get("access_token"):
-        runtime_config["access_token"] = _decrypt_sync_secret(
+    if runtime_config.get("client_id_encrypted") and not runtime_config.get("client_id"):
+        runtime_config["client_id"] = _decrypt_sync_secret(
             runtime_settings_service,
-            runtime_config.get("access_token_encrypted"),
+            runtime_config.get("client_id_encrypted"),
+        )
+    if runtime_config.get("client_secret_encrypted") and not runtime_config.get("client_secret"):
+        runtime_config["client_secret"] = _decrypt_sync_secret(
+            runtime_settings_service,
+            runtime_config.get("client_secret_encrypted"),
         )
     return runtime_config
 
@@ -99,7 +119,8 @@ def _decrypt_sync_config_for_runtime(
 class ShopifyImportRequest(BaseModel):
     store_url: str
     brand_id: str
-    access_token: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
 
 
 class JsonFeedRequest(BaseModel):
@@ -115,7 +136,8 @@ class ScrapeRequest(BaseModel):
 class SyncConfigUpdate(BaseModel):
     source_type: str
     source_url: str
-    access_token: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
     auto_sync: bool = False
     sync_frequency: str = "manual"  # daily | weekly | manual
 
@@ -128,6 +150,7 @@ async def import_shopify(
     background_tasks: BackgroundTasks,
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
     knowledge_service: Any = Depends(get_knowledge_service),
+    settings: Any = Depends(get_settings),
 ):
     """Start async Shopify product fetch. Paginates /products.json. Returns job_id."""
     job_id = str(uuid.uuid4())
@@ -136,20 +159,27 @@ async def import_shopify(
     background_tasks.add_task(
         catalog_service.fetch_shopify_products,
         req.store_url,
-        req.access_token,
         job_id,
         brand_id=req.brand_id,
         knowledge_service=knowledge_service,
+        client_id=req.client_id,
+        client_secret=req.client_secret,
+        settings=settings,
     )
 
     # Persist sync config for this brand so resync works later
+    sync_patch = {
+        "source_type": "shopify",
+        "source_url": req.store_url,
+    }
+    if req.client_id:
+        sync_patch["client_id"] = req.client_id
+    if req.client_secret:
+        sync_patch["client_secret"] = req.client_secret
+
     await _upsert_sync_config(
         req.brand_id,
-        {
-            "source_type": "shopify",
-            "source_url": req.store_url,
-            **({"access_token": req.access_token} if req.access_token else {}),
-        },
+        sync_patch,
         runtime_settings_service=runtime_settings_service,
     )
 
@@ -200,8 +230,18 @@ async def import_csv(
 # ── Import: Firecrawl scrape ──────────────────────────────────────────────────
 
 @router.post("/import/scrape")
-async def import_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
+async def import_scrape(
+    req: ScrapeRequest,
+    background_tasks: BackgroundTasks,
+    settings: Any = Depends(get_settings),
+):
     """Start async Firecrawl-based product extraction. Returns job_id."""
+    if not settings.USE_FIRECRAWL:
+        raise HTTPException(
+            status_code=400,
+            detail="Firecrawl scraping is currently disabled in system settings.",
+        )
+
     api_key = _firecrawl_key()
     if not api_key:
         raise HTTPException(
@@ -271,9 +311,15 @@ async def update_sync_config(
         existing=existing,
         runtime_settings_service=runtime_settings_service,
     )
-    if update.access_token:
+    if update.client_id:
         patch = _protect_sync_config_secrets(
-            {**patch, "access_token": update.access_token},
+            {**patch, "client_id": update.client_id},
+            existing=existing,
+            runtime_settings_service=runtime_settings_service,
+        )
+    if update.client_secret:
+        patch = _protect_sync_config_secrets(
+            {**patch, "client_secret": update.client_secret},
             existing=existing,
             runtime_settings_service=runtime_settings_service,
         )
@@ -288,6 +334,7 @@ async def manual_sync(
     background_tasks: BackgroundTasks,
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
     knowledge_service: Any = Depends(get_knowledge_service),
+    settings: Any = Depends(get_settings),
 ):
     """Trigger an immediate resync from the brand's stored sync config."""
     db = connection_manager.get_system_db()
@@ -316,10 +363,12 @@ async def manual_sync(
         background_tasks.add_task(
             catalog_service.fetch_shopify_products,
             config["source_url"],
-            config.get("access_token"),
             job_id,
             brand_id=brand_id,
             knowledge_service=knowledge_service,
+            client_id=config.get("client_id"),
+            client_secret=config.get("client_secret"),
+            settings=settings,
         )
         return {"job_id": job_id, "status": "processing"}
 
@@ -351,8 +400,10 @@ async def _upsert_sync_config(
             existing = dict(brand.get("catalog_sync") or {})
             merged = {**existing, **patch}
             if merged.get("source_type") != "shopify":
-                merged.pop("access_token", None)
-                merged.pop("access_token_encrypted", None)
+                merged.pop("client_id", None)
+                merged.pop("client_id_encrypted", None)
+                merged.pop("client_secret", None)
+                merged.pop("client_secret_encrypted", None)
             if runtime_settings_service:
                 merged = _protect_sync_config_secrets(
                     merged,

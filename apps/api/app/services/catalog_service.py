@@ -206,14 +206,51 @@ def _normalize_schema_org(raw: Any) -> List[dict]:
 
 # ── Async fetch functions ─────────────────────────────────────────────────────
 
+
+# ── Token cache: {store_domain: (token, expires_at_unix)} ────────────────────
+# Avoids re-fetching a token on every paginated page-request.
+# Shopify client-credentials tokens are valid for 24 hours (expires_in seconds).
+_shopify_token_cache: Dict[str, tuple] = {}
+
+
+def _get_cached_token(store_domain: str) -> Optional[str]:
+    """Return a cached token if it is still valid (>60 s remaining)."""
+    import time
+    entry = _shopify_token_cache.get(store_domain)
+    if entry:
+        token, expires_at = entry
+        if time.time() < expires_at - 60:  # 60-second safety buffer
+            return token
+    return None
+
+
+def _set_cached_token(store_domain: str, token: str, expires_in: int) -> None:
+    import time
+    _shopify_token_cache[store_domain] = (token, time.time() + expires_in)
+
+
 async def fetch_shopify_products(
     store_url: str,
-    access_token: Optional[str],
     job_id: str,
     brand_id: Optional[str] = None,
     knowledge_service: Optional[Any] = None,
+    settings: Optional[Any] = None,
+    client_id: Optional[str] = None,
+    client_secret: Optional[str] = None,
 ) -> None:
-    """Background task: paginate Shopify /products.json and store results in job."""
+    """Background task: paginate Shopify /products.json and store results in job.
+
+    Auth flow (Shopify client credentials grant — RFC 6749 §4.4):
+      POST {base}/admin/oauth/access_token
+        grant_type=client_credentials&client_id=...&client_secret=...
+      → { access_token, scope, expires_in }
+    The returned token is cached per store-domain for its lifetime (24 h)
+    to avoid hammering the token endpoint on every paginated request.
+
+    API version is read from settings.SHOPIFY_API_VERSION (default: 2026-04).
+    All HTTP calls use HTTP/2 for improved multiplexing.
+    429 responses are handled with exponential back-off via Retry-After header.
+    """
     if not await _job_store.get(job_id):
         return
 
@@ -221,62 +258,161 @@ async def fetch_shopify_products(
     if not base.startswith("http"):
         base = f"https://{base}"
 
+    # Derive a stable cache key from the hostname only (strip protocol/path)
+    import time
+    from urllib.parse import urlparse
+    store_domain = urlparse(base).hostname or base
+
     headers: Dict[str, str] = {
         "User-Agent": "Mozilla/5.0 (compatible; AgentBuilder/1.0)",
         "Accept": "application/json",
     }
-    if access_token:
-        headers["X-Shopify-Access-Token"] = access_token.strip()
 
+    # ── Step 1: Acquire / refresh access token via client-credentials grant ──
+    token: Optional[str] = None
+    if client_id and client_secret:
+        # Check cache first
+        token = _get_cached_token(store_domain)
+
+        if not token:
+            token_url = f"{base}/admin/oauth/access_token"
+            token_data = {
+                "grant_type": "client_credentials",
+                "client_id": client_id.strip(),
+                "client_secret": client_secret.strip(),
+            }
+            try:
+                async with httpx.AsyncClient(timeout=10.0, http2=True) as token_client:
+                    logger.info("requesting_shopify_oauth_token", url=token_url)
+                    token_resp = await token_client.post(
+                        token_url,
+                        data=token_data,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    )
+                    if token_resp.status_code == 200:
+                        resp_json = token_resp.json()
+                        token = resp_json.get("access_token")
+                        expires_in = int(resp_json.get("expires_in", 86400))  # default 24 h
+                        if token:
+                            _set_cached_token(store_domain, token, expires_in)
+                            logger.info(
+                                "shopify_oauth_token_acquired",
+                                expires_in=expires_in,
+                                scope=resp_json.get("scope"),
+                            )
+                    else:
+                        logger.error(
+                            "shopify_oauth_token_failed",
+                            status=token_resp.status_code,
+                            body=token_resp.text[:500],
+                        )
+                        # Token fetch failed — we cannot safely continue for a
+                        # private store; fail the job immediately with a clear message.
+                        if client_id or client_secret:
+                            await _job_store.update(
+                                job_id,
+                                {
+                                    "status": "error",
+                                    "error": (
+                                        f"Shopify token request failed ({token_resp.status_code}). "
+                                        "Verify your Client ID and Client Secret in the Shopify "
+                                        "Partner / Dev Dashboard under Settings → API credentials."
+                                    ),
+                                },
+                            )
+                            return
+            except Exception as e:
+                logger.error("shopify_oauth_error", error=str(e))
+                await _job_store.update(job_id, {"status": "error", "error": f"OAuth error: {e}"})
+                return
+
+    # ── Step 2: Attach token to request headers ───────────────────────────────
+    if token:
+        headers["X-Shopify-Access-Token"] = token
+        logger.info("shopify_using_access_token", store=store_domain)
+
+    # ── Step 3: Determine API version from settings ───────────────────────────
+    api_version = "2026-04"
+    if settings and getattr(settings, "SHOPIFY_API_VERSION", None):
+        api_version = settings.SHOPIFY_API_VERSION
+    logger.info("shopify_api_version", version=api_version)
+
+    # ── Step 4: Paginate /products.json with HTTP/2 and 429 back-off ─────────
     all_items: List[dict] = []
     try:
-        # Use a client without default redirect following to manage it manually and safely
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=30.0, follow_redirects=False, http2=True
+        ) as client:
             page_info: Optional[str] = None
             page = 1
+
             while True:
-                # Use Admin API if token is provided; otherwise public products.json
-                # Admin API bypasses storefront password protection
-                has_token = bool(access_token and access_token.strip())
-                if has_token:
-                    url = f"{base}/admin/api/2024-01/products.json?limit=250"
+                # Admin API if authenticated; public storefront otherwise
+                has_auth = bool(token)
+                if has_auth:
+                    url = f"{base}/admin/api/{api_version}/products.json?limit=250"
                 else:
                     url = f"{base}/products.json?limit=250"
 
                 if page_info:
                     url += f"&page_info={page_info}"
 
-                logger.info("shopify_fetch_page", page=page, url=url, has_token=has_token)
-                
-                resp = await client.get(url, headers=headers)
-                
-                # Manual redirect handling
+                logger.info("shopify_fetch_page", page=page, url=url, has_auth=has_auth)
+
+                # ── 429 retry loop ────────────────────────────────────────────
+                for attempt in range(1, 4):
+                    resp = await client.get(url, headers=headers)
+
+                    # Log rate-limit header for observability
+                    call_limit = resp.headers.get("X-Shopify-Shop-Api-Call-Limit", "?/?")
+                    logger.debug("shopify_rate_limit", limit=call_limit, page=page)
+
+                    if resp.status_code == 429:
+                        retry_after = float(resp.headers.get("Retry-After", str(attempt * 2)))
+                        logger.warning(
+                            "shopify_rate_limited",
+                            retry_after=retry_after,
+                            attempt=attempt,
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue  # retry same page
+
+                    break  # success or non-429 error — exit retry loop
+
+                # ── Manual redirect handling ──────────────────────────────────
                 if resp.is_redirect:
                     location = str(resp.headers.get("Location", ""))
                     logger.info("shopify_fetch_redirect", location=location)
-                    
+
                     if "/password" in location:
                         raise ValueError(
-                            "The Shopify store is password-protected. Please go to 'Settings' in your Shopify Admin, "
-                            "create a Custom App, and enter the 'Admin API Access Token' (shpat_...) to allow access."
+                            "The Shopify store is password-protected. Please go to "
+                            "'Settings' in your Shopify Admin, create a Custom App, "
+                            "and enter your Client ID and Client Secret to allow access."
                         )
-                    
-                    # Follow other redirects (domain changes, etc) once
-                    # update url for the next check/fetch
+
                     url = str(resp.url.join(location))
                     resp = await client.get(url, headers=headers)
 
+                # ── HTTP error handling ───────────────────────────────────────
                 if resp.status_code == 401:
                     raise ValueError(
-                        "Store requires an access token (HTTP 401). "
-                        "Enable 'Store is private / password-protected?' and enter your Shopify Admin API token."
+                        "Shopify authentication failed (401 Unauthorized). "
+                        "Verify your Client ID and Client Secret are correct and "
+                        "that the app is installed on this store."
                     )
                 if resp.status_code == 403:
                     raise ValueError(
-                        "Access denied (HTTP 403). Ensure your token has the 'read_products' permission."
+                        "Access denied (403 Forbidden). Ensure your app has the "
+                        "'read_products' access scope configured in the Dev Dashboard."
                     )
                 if resp.status_code == 404:
                     raise ValueError(f"Store not found at {base}. Check the URL.")
+                if resp.status_code == 402:
+                    raise ValueError(
+                        "This store's plan does not support API access (402). "
+                        "The store owner may need to upgrade their Shopify plan."
+                    )
                 resp.raise_for_status()
 
                 data = resp.json()
@@ -286,49 +422,71 @@ async def fetch_shopify_products(
 
                 batch = _normalize_shopify(data, base_url=base)
                 all_items.extend(batch)
-                await _job_store.update(job_id, {"processed": len(all_items), "total": len(all_items)})
+                await _job_store.update(
+                    job_id, {"processed": len(all_items), "total": len(all_items)}
+                )
 
-                # Cursor-based pagination via Link header
+                # ── Cursor-based pagination via Link header ───────────────────
+                # Per Shopify docs: only `limit` may be combined with page_info.
                 link = resp.headers.get("Link", "")
                 m = re.search(r'<[^>]*page_info=([^&>]+)[^>]*>;\s*rel="next"', link)
                 if m:
                     page_info = m.group(1)
                     page += 1
                 else:
-                    break
+                    break  # no more pages
 
-        await _job_store.update(job_id, {"items": all_items, "status": "processing_embeddings", "total": len(all_items)})
-        
-        # If knowledge_service and brand_id are provided, automatically ingest the products
+        await _job_store.update(
+            job_id,
+            {"items": all_items, "status": "processing_embeddings", "total": len(all_items)},
+        )
+
+        # ── Step 5: Ingest into knowledge base ───────────────────────────────
         if knowledge_service and brand_id and all_items:
             from types import SimpleNamespace
-            
+
             logger.info("shopify_starting_ingestion", items=len(all_items), brand_id=brand_id)
-            
-            # Convert dicts to objects for KnowledgeService
             items_to_ingest = [SimpleNamespace(**item) for item in all_items]
-            
             try:
-                # We reuse the same job_id for tracking
                 await knowledge_service.process_bulk_upload(
                     job_id=job_id,
                     content_type="product",
                     items=items_to_ingest,
-                    brand_id=brand_id
+                    brand_id=brand_id,
                 )
                 logger.info("shopify_ingestion_complete", job_id=job_id)
             except Exception as ing_exc:
                 logger.error("shopify_ingestion_failed", error=str(ing_exc))
-                # We don't fail the whole job, but we mark it
-                await _job_store.update(job_id, {"status": "completed", "warning": f"Ingestion failed: {ing_exc}"})
+                await _job_store.update(
+                    job_id,
+                    {"status": "completed", "warning": f"Ingestion failed: {ing_exc}"},
+                )
                 return
 
         await _job_store.update(job_id, {"status": "completed"})
         logger.info("shopify_fetch_complete", items=len(all_items))
 
     except Exception as exc:
+        logger.error("shopify_fetch_failed", error=str(exc), store_url=store_url)
+
+        # ── Firecrawl fallback (only when explicitly enabled AND no auth creds) ──
+        # We intentionally do NOT fall back to Firecrawl when client_id/secret
+        # were provided — a failed auth should surface the error, not mask it.
+        if (
+            not client_id
+            and not client_secret
+            and settings
+            and settings.USE_FIRECRAWL
+            and settings.FIRECRAWL_API_KEY
+        ):
+            logger.info("triggering_firecrawl_fallback", store_url=store_url)
+            await _job_store.update(job_id, {"status": "processing", "fallback": "firecrawl"})
+            await run_firecrawl_scrape([base], job_id, settings.FIRECRAWL_API_KEY)
+            return
+
         await _job_store.update(job_id, {"status": "error", "error": str(exc)})
-        logger.error("shopify_fetch_failed", error=str(exc))
+
+
 
 
 async def fetch_json_feed(url: str) -> dict:
