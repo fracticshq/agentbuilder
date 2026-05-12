@@ -535,13 +535,14 @@ export interface ObservabilitySummaryResponse {
 
 // Catalog API
 export const catalogApi = {
-  syncShopify: (data: { brand_id: string; store_url: string; access_token?: string }) => 
+  syncShopify: (data: { brand_id: string; store_url: string; client_id?: string; client_secret?: string }) => 
     apiClient.post<{ job_id: string; status: string }>('/api/v1/catalog/import/shopify', data),
 };
 
 // Health check
 export const healthApi = {
   check: () => apiClient.get('/health'),
+  configCheck: () => apiClient.get('/api/v1/config-check'),
 };
 
 // Combined API object for easier importing
@@ -594,7 +595,7 @@ export const api = {
   },
   
   // Catalog
-  syncShopify: async (data: { brand_id: string; store_url: string; access_token?: string }) => {
+  syncShopify: async (data: { brand_id: string; store_url: string; client_id?: string; client_secret?: string }) => {
     const response = await catalogApi.syncShopify(data);
     return response.data;
   },

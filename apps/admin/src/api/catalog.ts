@@ -1,11 +1,12 @@
 import { apiClient } from './client';
 
 export const catalogApi = {
-  importShopify: async (storeUrl: string, brandId: string, accessToken?: string) => {
+  importShopify: async (storeUrl: string, brandId: string, clientId?: string, clientSecret?: string) => {
     const response = await apiClient.post('/api/v1/catalog/import/shopify', {
       store_url: storeUrl,
       brand_id: brandId,
-      access_token: accessToken || null,
+      client_id: clientId || null,
+      client_secret: clientSecret || null,
     });
     return response.data as { job_id: string; status: string };
   },
@@ -51,7 +52,8 @@ export const catalogApi = {
     config: {
       source_type: string;
       source_url: string;
-      access_token?: string;
+      client_id?: string;
+      client_secret?: string;
       auto_sync: boolean;
       sync_frequency: string;
     }

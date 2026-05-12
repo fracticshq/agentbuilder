@@ -5,8 +5,9 @@ interface StepRAGConfigProps {
   data: {
     data_source: 'rag' | 'shopify' | 'none';
     shopify_shop_url: string;
-    shopify_access_token: string;
-    shopify_access_token_configured?: boolean;
+    shopify_client_id: string;
+    shopify_client_secret: string;
+    shopify_credentials_configured?: boolean;
     shopify_agent_profile_url?: string;
     embedding_provider: string;
     embedding_model: string;
@@ -73,7 +74,8 @@ export default function StepRAGConfig({ data, brandId, onChange }: StepRAGConfig
       const resp = await api.syncShopify({
         brand_id: brandId,
         store_url: data.shopify_shop_url,
-        access_token: data.shopify_access_token || undefined,
+        client_id: data.shopify_client_id || undefined,
+        client_secret: data.shopify_client_secret || undefined,
       });
       setSyncStatus(`Sync initiated. Job ID: ${resp.job_id}`);
     } catch (e: any) {
@@ -147,21 +149,34 @@ export default function StepRAGConfig({ data, brandId, onChange }: StepRAGConfig
               />
             </div>
             <div>
-              <label htmlFor="shopify_access_token" className="block text-sm font-medium text-gray-700">
-                Access Token (Optional)
+              <label htmlFor="shopify_client_id" className="block text-sm font-medium text-gray-700">
+                Shopify Client ID
+              </label>
+              <input
+                type="text"
+                id="shopify_client_id"
+                placeholder="Client ID"
+                value={data.shopify_client_id}
+                onChange={(e) => onChange('shopify_client_id', e.target.value)}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
+              />
+            </div>
+            <div>
+              <label htmlFor="shopify_client_secret" className="block text-sm font-medium text-gray-700">
+                Shopify Client Secret
               </label>
               <input
                 type="password"
-                id="shopify_access_token"
-                placeholder="shpat_..."
-                value={data.shopify_access_token}
-                onChange={(e) => onChange('shopify_access_token', e.target.value)}
+                id="shopify_client_secret"
+                placeholder="Client Secret starts with shss_"
+                value={data.shopify_client_secret}
+                onChange={(e) => onChange('shopify_client_secret', e.target.value)}
                 className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
               />
               <p className="mt-1 text-xs text-gray-500">
-                {data.shopify_access_token_configured
-                  ? 'A token is already saved for this agent. Enter a new token only to replace it.'
-                  : 'Required for store-specific Shopify tools and private catalogs.'}
+                {data.shopify_credentials_configured
+                  ? 'Credentials are already saved. Enter new values only to replace them.'
+                  : 'Required for Admin API access and product catalog sync.'}
               </p>
             </div>
           </div>

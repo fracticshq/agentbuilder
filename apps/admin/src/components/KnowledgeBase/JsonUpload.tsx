@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { healthApi } from '../../api/client';
 import { DocumentArrowUpIcon, CheckCircleIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import ShopifyTab from './tabs/ShopifyTab';
 import JsonUrlTab from './tabs/JsonUrlTab';
@@ -28,6 +29,15 @@ export default function JsonUpload({ contentType, onUpload, onBack, brandId = ''
   const [jsonText, setJsonText] = useState('');
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
   const [uploadMethod, setUploadMethod] = useState<UploadMethod>('file');
+  const [useFirecrawl, setUseFirecrawl] = useState(true);
+
+  useEffect(() => {
+    healthApi.configCheck().then(resp => {
+      if (resp.data && resp.data.use_firecrawl !== undefined) {
+        setUseFirecrawl(resp.data.use_firecrawl);
+      }
+    }).catch(err => console.warn('[JsonUpload] Config check failed:', err));
+  }, []);
 
   const isProduct = contentType === 'product';
 
@@ -192,7 +202,7 @@ export default function JsonUpload({ contentType, onUpload, onBack, brandId = ''
     { key: 'json_url', label: '🔗 JSON URL' },
     { key: 'csv', label: '📊 CSV' },
     { key: 'shopify', label: '🛍️ Shopify' },
-    { key: 'scrape', label: '🕷️ Scrape' },
+    ...(useFirecrawl ? [{ key: 'scrape', label: '🕷️ Scrape' } as const] : []),
   ];
   const tabs = isProduct ? [...baseTabs, ...productTabs] : baseTabs;
 

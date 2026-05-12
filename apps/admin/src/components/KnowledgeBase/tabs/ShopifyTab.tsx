@@ -11,7 +11,8 @@ interface ShopifyTabProps {
 export default function ShopifyTab({ brandId, onUpload, onBack }: ShopifyTabProps) {
   const [storeUrl, setStoreUrl] = useState('');
   const [showTokenField, setShowTokenField] = useState(false);
-  const [accessToken, setAccessToken] = useState('');
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
   const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
   const [progress, setProgress] = useState(0);
   const [totalItems, setTotalItems] = useState(0);
@@ -33,7 +34,8 @@ export default function ShopifyTab({ brandId, onUpload, onBack }: ShopifyTabProp
       const { job_id } = await catalogApi.importShopify(
         storeUrl.trim(),
         brandId,
-        accessToken.trim() || undefined
+        clientId.trim() || undefined,
+        clientSecret.trim() || undefined
       );
       pollRef.current = setInterval(async () => {
         try {
@@ -106,19 +108,33 @@ export default function ShopifyTab({ brandId, onUpload, onBack }: ShopifyTabProp
           {showTokenField ? '▾' : '▸'} My store is private / password-protected
         </button>
         {showTokenField && (
-          <div className="mt-3 space-y-1">
-            <label className="block text-sm font-medium text-gray-700">
-              Shopify Admin API Access Token
-            </label>
-            <input
-              type="password"
-              value={accessToken}
-              onChange={e => setAccessToken(e.target.value)}
-              placeholder="shpat_xxxxxxxxxxxxxxxxxxxxxx"
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary-500"
-            />
+          <div className="mt-3 space-y-4">
+            <div className="space-y-1">
+              <label className="block text-sm font-medium text-gray-700">
+                Shopify Client ID
+              </label>
+              <input
+                type="password"
+                value={clientId}
+                onChange={e => setClientId(e.target.value)}
+                placeholder="Shopify API Key"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="block text-sm font-medium text-gray-700">
+                Shopify Client Secret
+              </label>
+              <input
+                type="password"
+                value={clientSecret}
+                onChange={e => setClientSecret(e.target.value)}
+                placeholder="Shopify Shared Secret"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+            </div>
             <p className="text-xs text-gray-500">
-              Create a token in Shopify Admin → Apps → Develop apps. Needs <code className="bg-gray-100 px-1 rounded">read_products</code> scope.
+              Find these in Shopify Partner Dashboard.
             </p>
           </div>
         )}
@@ -194,7 +210,8 @@ export default function ShopifyTab({ brandId, onUpload, onBack }: ShopifyTabProp
           brandId={brandId}
           sourceType="shopify"
           sourceUrl={storeUrl}
-          accessToken={accessToken || undefined}
+          clientId={clientId || undefined}
+          clientSecret={clientSecret || undefined}
           onClose={() => setShowSyncModal(false)}
         />
       )}
