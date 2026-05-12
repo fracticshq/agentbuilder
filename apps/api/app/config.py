@@ -248,6 +248,7 @@ class Settings(BaseSettings):
     # Shopify MCP service URL. Store identity and store tokens are per-agent
     # configuration values managed from the dashboard, not global env vars.
     SHOPIFY_MCP_URL: str = "http://localhost:3005/mcp"
+    SHOPIFY_MCP_USE: bool = True
 
     # Firecrawl (product catalog scraping)
     FIRECRAWL_API_KEY: str = ""
@@ -272,7 +273,7 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
     
-    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_HUMAN_TAKEOVER", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", "ALLOW_PUBLIC_SIGNUP", "RATE_LIMIT_FAIL_CLOSED", "ATLAS_AUTO_CREATE_VECTOR_INDEXES", mode="before")
+    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_HUMAN_TAKEOVER", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", "ALLOW_PUBLIC_SIGNUP", "RATE_LIMIT_FAIL_CLOSED", "ATLAS_AUTO_CREATE_VECTOR_INDEXES", "SHOPIFY_MCP_USE", mode="before")
     @classmethod
     def parse_bool_fields(cls, v):
         """Parse boolean fields from string."""
