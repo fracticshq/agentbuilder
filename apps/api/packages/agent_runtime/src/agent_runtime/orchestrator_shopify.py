@@ -28,15 +28,25 @@ class ShopifyOrchestrator(Orchestrator):
         agent_profile_url: Optional[str] = None
     ):
         super().__init__(llm, tools, critic, system_prompt)
-        # Context to track found products/variants for natural language reference
-        self.captured_ids: Dict[str, str] = {}
-        self.last_searched: Dict[str, str] = {}
-        self.cart_id: Optional[str] = None
-        self.checkout_url: Optional[str] = None
-        self.cart_lines: List[Dict[str, Any]] = []
+        # Unified Session State
+        self.state = {
+            "captured_ids": {},    # All seen IDs (name -> gid)
+            "last_searched": {},   # IDs from the last search only
+            "cart_id": None,
+            "checkout_url": None,
+            "cart_lines": [],
+            "agent_profile_url": agent_profile_url or "https://shopify.dev/ucp/agent-profiles/examples/2026-04-08/valid-with-capabilities.json"
+        }
         self.conversation: List[Dict[str, Any]] = []
         self.prompt_runtime_context: Dict[str, Any] = {}
-        self.agent_profile_url: str = agent_profile_url or "https://shopify.dev/ucp/agent-profiles/examples/2026-04-08/valid-with-capabilities.json"
+        
+        # Memory & Knowledge
+        self.memory = {
+            "user_facts": [],
+            "summaries": [],
+            "matched_rules": []
+        }
+        self.retrieval_context = None
 
     async def run(
         self, 
@@ -45,54 +55,64 @@ class ShopifyOrchestrator(Orchestrator):
         context: Optional[Dict] = None,
         on_status: Optional[Any] = None
     ) -> AgentResult:
-        """
-        Main entry point for the Shopify Orchestrator.
-        """
+        """Main entry point for the Shopify Orchestrator."""
         logger.info("shopify_orchestrator_run", query=query)
         
-        # 1. Reset/Initialize state for this turn
-        self._initialize_session_state(chat_history, context)
+        # 1. Reconstruct state from context and history
+        self._hydrate_session(chat_history, context)
         
         # 2. Add current query
         self.conversation.append({"role": "user", "content": query})
         
-        # 3. Execute the iterative agent loop
+        # 3. Iterative reasoning loop
         final_answer, tool_results = await self._agent_loop(on_status)
         
-        # 4. Return standard AgentResult with persisted state in metadata
+        # 4. Return result with persisted state
         return AgentResult(
             answer=final_answer,
             metadata={
                 "steps_executed": len(tool_results), 
                 "tool_results": tool_results,
-                "cart_id": self.cart_id,
-                "checkout_url": self.checkout_url,
-                "cart_lines": self.cart_lines,
-                "captured_ids": self.captured_ids,
-                "last_searched": self.last_searched
+                **self.state
             }
         )
 
-    def _initialize_session_state(self, chat_history: Optional[List[Dict]], context: Optional[Dict]):
+    def _hydrate_session(self, chat_history: Optional[List[Dict]], context: Optional[Dict]):
         """Load persistent state and reconstruct conversation history."""
-        session_state = (context or {}).get("session_state", {})
-        self.cart_id = session_state.get("cart_id")
-        self.checkout_url = session_state.get("checkout_url")
-        self.cart_lines = session_state.get("cart_lines", [])
-        self.captured_ids = session_state.get("captured_ids", {})
-        self.last_searched = session_state.get("last_searched", {})
-        self.prompt_runtime_context = (context or {}).get("prompt_runtime", {})
+        ctx = context or {}
+        session = ctx.get("session_state", {})
         
-        # Load agent profile URL from context
-        custom_profile = (context or {}).get("session_state", {}).get("agent_profile_url") or (context or {}).get("agent_profile_url")
-        if custom_profile:
-            self.agent_profile_url = custom_profile
+        # Update core state
+        self.state.update({
+            "cart_id": session.get("cart_id"),
+            "checkout_url": session.get("checkout_url"),
+            "cart_lines": session.get("cart_lines", []),
+            "captured_ids": session.get("captured_ids", {}),
+            "last_searched": session.get("last_searched", {}),
+        })
         
+        # Update runtime context
+        self.prompt_runtime_context = ctx.get("prompt_runtime", {})
+        
+        # Load agent profile URL priority: session > context > default
+        self.state["agent_profile_url"] = session.get("agent_profile_url") or ctx.get("agent_profile_url") or self.state["agent_profile_url"]
+        
+        # Load Matrix Memory
+        mem_ctx = ctx.get("memory", {})
+        self.memory.update({
+            "user_facts": mem_ctx.get("user_facts", []),
+            "summaries": mem_ctx.get("summaries", []),
+            "matched_rules": mem_ctx.get("matched_rules", [])
+        })
+
+        # Load Vector Retrieval Context
+        self.retrieval_context = ctx.get("retrieval")
+
+        # Reconstruct chat history
         self.conversation = []
         if chat_history:
             for msg in chat_history:
-                role = msg.get("role")
-                content = msg.get("content")
+                role, content = msg.get("role"), msg.get("content")
                 if role and content:
                     conv_msg = {"role": role, "content": content}
                     if role == "tool" and msg.get("name"):
@@ -202,15 +222,15 @@ class ShopifyOrchestrator(Orchestrator):
 
     def _preprocess_input(self, tool_name: str, tool_input: Dict[str, Any]):
         """Inject state and resolve natural language references to GIDs."""
-        if self.cart_id:
+        cart_id = self.state.get("cart_id")
+        if cart_id:
             for key in ["cart_id", "cartId"]:
                 if key in tool_input and not tool_input[key]:
-                    tool_input[key] = self.cart_id
+                    tool_input[key] = cart_id
             if tool_name in ["update_cart", "get_cart"] and "cart_id" not in tool_input:
-                tool_input["cart_id"] = self.cart_id
+                tool_input["cart_id"] = cart_id
         
         # If calling get_cart/update_cart without a cart_id, it might fail or create a new one.
-        # We handle this by letting the tool itself decide, but we log a warning.
         if tool_name in ["get_cart", "update_cart"] and not tool_input.get("cart_id"):
             logger.warning("shopify_executing_without_cart_id", tool=tool_name, current_input=tool_input)
         
@@ -268,7 +288,7 @@ class ShopifyOrchestrator(Orchestrator):
                                 assistant_last_msg = str(msg.get("content", "")).lower()
                                 break
 
-                        for title, gid in self.last_searched.items():
+                        for title, gid in self.state["last_searched"].items():
                             title_lower = title.lower()
                             is_affir = bool(item_str in ("yes", "ok", "it", "add it", "do it"))
                             is_ment = bool(str(title_lower) in str(assistant_last_msg))
@@ -278,15 +298,14 @@ class ShopifyOrchestrator(Orchestrator):
                                 break
                         
                         # 2. Case where user says "yes" but we didn't match the title in the assistant's text
-                        # (Maybe the assistant used a generic name). Fallback to the first item in last_searched.
                         if not existing_id and item_str in ["yes", "ok", "it", "add it", "do it"]:
-                             if self.last_searched:
-                                 existing_id = list(self.last_searched.values())[0]
+                             if self.state["last_searched"]:
+                                 existing_id = list(self.state["last_searched"].values())[0]
                                  logger.info("shopify_resolved_from_last_searched_fallback")
-
+ 
                         # 3. Check broad captured_ids if still no ID
                         if not existing_id:
-                            for title, gid in self.captured_ids.items():
+                            for title, gid in self.state["captured_ids"].items():
                                 if is_match(title):
                                     existing_id = gid
                                     logger.info("shopify_resolved_from_captured_ids", title=title, gid=gid)
@@ -338,22 +357,22 @@ class ShopifyOrchestrator(Orchestrator):
         if cart and isinstance(cart, dict):
             new_id = cart.get("cart_id") or cart.get("id")
             if new_id:
-                self.cart_id = str(new_id)
+                self.state["cart_id"] = str(new_id)
             
             # Capture checkout URL
             new_url = cart.get("checkout_url") or cart.get("checkoutUrl")
             if new_url:
-                self.checkout_url = str(new_url)
+                self.state["checkout_url"] = str(new_url)
             
             # Store full lines for prompt injection
-            self.cart_lines = cart.get("lines") or cart.get("line_items") or []
+            self.state["cart_lines"] = cart.get("lines") or cart.get("line_items") or []
 
         # Capture Product/Variant IDs for future reference
         products = metadata.get("products", [])
         
         # Reset last_searched if this was a new search
         if tool_name == "search_catalog":
-            self.last_searched = {}
+            self.state["last_searched"] = {}
 
         for p in products:
             if not isinstance(p, dict): continue
@@ -361,9 +380,9 @@ class ShopifyOrchestrator(Orchestrator):
             gid = str(p.get("variant_id") or p.get("id") or "")
             
             if name and gid:
-                self.captured_ids[name] = gid
+                self.state["captured_ids"][name] = gid
                 if tool_name == "search_catalog":
-                    self.last_searched[name] = gid
+                    self.state["last_searched"][name] = gid
 
     def _build_reasoning_prompt(self) -> str:
         """Construct the few-shot prompting context with mandatory next-step hints for adds."""
@@ -436,99 +455,105 @@ class ShopifyOrchestrator(Orchestrator):
         return ctx
 
     def _get_combined_system_prompt(self) -> str:
-        """Combine base system prompt with Shopify-specific rules."""
+        """Assembles the final system prompt from modular components."""
         base_prompt = self.system_prompt or "You are a helpful AI assistant."
         
-        # 1. Format the ACTIVE focus (most recent search)
-        active_focus_ctx = ""
-        if self.last_searched:
-            lines = ["\n### 🎯 ACTIVE PRODUCT FOCUS (MOST RECENT SEARCH):\n"]
-            for title, gid in self.last_searched.items():
-                lines.append(f"- {title} (ID: {gid})\n")
-            lines.append("--> If the user says 'yes', 'add it', or 'ok', they mean THIS product.\n")
-            active_focus_ctx = "".join(lines)
+        sections = [
+            base_prompt,
+            "## SHOPIFY CAPABILITIES",
+            f"Current Cart ID: {self.state['cart_id'] or 'None'}",
+            f"Checkout URL: {self.state['checkout_url'] or 'None'}",
+            self._get_knowledge_context(),
+            self._get_cart_context(),
+            self._get_memory_context(),
+            self._get_focus_context(),
+            self._get_execution_rules(),
+            "### JSON INTERACTION SCHEMA",
+            self._get_json_schema(),
+            "### KNOWLEDGE-FIRST REASONING",
+            "Trust retrieved knowledge as your primary source. Use tools only for real-time stock/price or when knowledge is missing."
+        ]
+        
+        return "\n\n".join(s for s in sections if s)
 
-        # 2. Format the broader session history
-        history_products_ctx = ""
-        if self.captured_ids:
-            lines = ["\n### 📚 SESSION PRODUCT HISTORY:\n"]
-            all_recent = list(self.captured_ids.items())
-            num_total = len(all_recent)
-            for i in range(max(0, num_total - 10), num_total):
-                name, gid = all_recent[i]
-                if name not in self.last_searched:
-                    lines.append(f"- {name} (ID: {gid})\n")
-            history_products_ctx = "".join(lines)
+    def _get_knowledge_context(self) -> str:
+        """Inject vector search results (KB Chunks)."""
+        if not self.retrieval_context or not hasattr(self.retrieval_context, "chunks"):
+            return ""
+        
+        chunks = self.retrieval_context.chunks
+        if not chunks:
+            return ""
+            
+        ctx = "### 📚 RETRIEVED KNOWLEDGE (Ground Truth)\n"
+        for i, chunk in enumerate(chunks[:8]): # Limit to top 8 chunks
+            content = chunk.get("content") if isinstance(chunk, dict) else getattr(chunk, "content", str(chunk))
+            source = chunk.get("metadata", {}).get("source", "Knowledge Base") if isinstance(chunk, dict) else "Knowledge Base"
+            ctx += f"[Source: {source}]\n{content}\n---\n"
+        return ctx
 
-        shopify_rules = f"""
-You are a Shopify assistant. You help users find products and manage their shopping cart.
-Current Cart ID: {self.cart_id or "None"}
-{f"Checkout URL: {self.checkout_url}" if self.checkout_url else ""}
-{self._get_cart_lines_context()}
+    def _get_cart_context(self) -> str:
+        if not self.state["cart_lines"]:
+            return "Cart is currently empty."
+        
+        ctx = "### 🛒 CURRENT CART ITEMS\n"
+        for line in self.state["cart_lines"]:
+            if not isinstance(line, dict): continue
+            merch = line.get("merchandise") or {}
+            title = merch.get("title") or merch.get("name") or "Product"
+            ctx += f"- {title} (Line ID: {line.get('id')}, Qty: {line.get('quantity', 0)})\n"
+        return ctx
 
-Runtime Context:
-{json.dumps(self.prompt_runtime_context, indent=2, sort_keys=True, default=str) if self.prompt_runtime_context else "None"}
+    def _get_focus_context(self) -> str:
+        ctx = ""
+        if self.state["last_searched"]:
+            ctx += "### 🎯 ACTIVE PRODUCT FOCUS\n"
+            for title, gid in self.state["last_searched"].items():
+                ctx += f"- {title} (ID: {gid})\n"
+            ctx += "--> If user says 'yes' or 'add it', they refer to these.\n"
+        
+        if self.state["captured_ids"]:
+            ctx += "### 📚 SESSION HISTORY\n"
+            history = list(self.state["captured_ids"].items())[-5:]
+            for name, gid in history:
+                if name not in self.state["last_searched"]:
+                    ctx += f"- {name} (ID: {gid})\n"
+        return ctx
 
-### STRICT TOOL-FIRST RULE
-**NEVER** return conversational text like "I will add that now" or "One moment please" if you haven't invoked the JSON tool call yet.
-If you are adding an item, the VERY FIRST THING YOU DO is return the JSON. Talk only AFTER the tool has succeeded.
+    def _get_memory_context(self) -> str:
+        """Matrix Memory Layer Integration."""
+        facts = self.memory.get("user_facts", [])
+        summaries = self.memory.get("summaries", [])
+        if not facts and not summaries:
+            return ""
 
-### JSON INTERACTION SCHEMA
-When you need to call a tool, you MUST return ONLY a JSON object with these EXACT keys:
+        ctx = "### 🧠 USER MEMORY & PREFERENCES\n"
+        if facts:
+            ctx += "KNOWN FACTS:\n"
+            for f in facts:
+                text = f.get("fact_text") or f.get("content")
+                if text: ctx += f"- {text}\n"
+        
+        if summaries:
+            ctx += "\nSTORY SO FAR:\n"
+            text = summaries[0].get("summary_text") or summaries[0].get("content")
+            if text: ctx += f"{text}\n"
+        return ctx
+
+    def _get_execution_rules(self) -> str:
+        return """### ⛔ MANDATORY EXECUTION RULES
+1. **TOOL-FIRST**: Return JSON tool calls IMMEDIATELY before any chat response.
+2. **YES/OK HANDLING**: After a search, 'yes' implies adding the active focus product.
+3. **CART VERIFICATION**: Call 'get_cart' before removing or updating items if line_id is unknown.
+4. **CHECKOUT**: Always provide the checkout_url in final answers if items are in the cart."""
+
+    def _get_json_schema(self) -> str:
+        return f"""You MUST return a JSON object to call tools:
 {{
-  "tool_name": "name_of_the_tool",
-  "tool_input": {{ "key": "value" }}
+  "tool_name": "name",
+  "tool_input": {{ "arg": "val" }}
 }}
-
-Examples:
-- To search: {{"tool_name": "search_catalog", "tool_input": {{"meta": {{"ucp-agent": {{"profile": "{self.agent_profile_url}"}}}}, "catalog": {{"query": "socks"}}}}}}
-- To add to cart: {{"tool_name": "update_cart", "tool_input": {{"add_items": [{{"product_variant_id": "gid://shopify/ProductVariant/123", "quantity": 1}}]}}}}
-- To remove/decrement from cart: {{"tool_name": "update_cart", "tool_input": {{"remove_items": ["gid://shopify/CartLine/123"], "update_items": [{{"id": "gid://shopify/CartLine/456", "quantity": 1}}]}}}}
-
-### SEQUENCING EXAMPLES
-Example 1 (Direct Add Request):
-User: "Add white socks"
-Thought: {{"tool_name": "search_catalog", "tool_input": {{"meta": {{"ucp-agent": {{"profile": "{self.agent_profile_url}"}}}}, "catalog": {{"query": "white socks"}}}}}}
-Tool Result: [{{"title": "White Socks", "variant_id": "gid://..."}}]
-Thought: {{"tool_name": "update_cart", "tool_input": {{"add_items": [{{"product_variant_id": "gid://...", "quantity": 1}}]}}}}
-Tool Result: {{"success": true}}
-Thought: "I've added the white socks to your cart!"
-
-Example 2 (Removal Request):
-User: "Remove one white sock"
-Thought: {{"tool_name": "get_cart", "tool_input": {{}}}}
-Tool Result: {{"success": true, "metadata": {{"cart": {{"lines": [{{"id": "line_123", "quantity": 2, "merchandise": {{"title": "White Socks"}}}}]}}}}}}
-Thought: {{"tool_name": "update_cart", "tool_input": {{"update_items": [{{"id": "line_123", "quantity": 1}}]}}}}
-Tool Result: {{"success": true}}
-Thought: "I've removed one pair of white socks. You now have 1 pair remaining."
-
-## CONTEXT & FOCUS
-{active_focus_ctx}{history_products_ctx}
-
-### MANDATORY EXECUTION RULES
-1. **YES / CONFIRMATION HANDLING**: If the user says "yes" or "ok" after a search, use the ID from 🎯 ACTIVE PRODUCT FOCUS. Return the `update_cart` JSON immediately.
-2. **IMMEDIATE CHAINING**: If user says "add [product]" or "buy [product]":
-   - Search if needed, then IMMEDIATELY call `update_cart` in the next iteration. 
-   - NEVER ask "Would you like me to add it?" if they already ordered you to add.
-   - **CRITICAL**: If the user only said "[product]" (e.g. "socks") without "add" or "buy", ONLY search. DO NOT add it yet.
-3. **CART VERIFICATION**: Always `get_cart` before questions about your current cart items.
-4. **REMOVAL / DECREMENT LOGIC**: If the user wants to "remove" or "delete" an item:
-   - You MUST first call `get_cart` to see the current lines and their quantities.
-   - If current quantity is 1: Use `update_cart` with `remove_items`: ["line_id"].
-   - If current quantity > 1: Use `update_cart` with `update_items`: [{{"id": "line_id", "quantity": new_qty}}].
-5. **CHECKOUT LINK**: Whenever you update the cart or show cart information, you MUST provide the Checkout URL to the user in your final answer.
-
-### 🧠 KNOWLEDGE-FIRST REASONING
-Your primary source of truth is the **retrieved knowledge** (product details from the knowledge base) provided in your context. 
-1. **TRUST THE KNOWLEDGE**: If the user asks about a product and its details are in the retrieved context, answer the user immediately using that information. 
-2. **TOOL FALLBACK**: If the product is **NOT** in the retrieved context, or if you need to check real-time stock/pricing, use the `search_catalog` or `get_product` tools.
-3. **DO NOT** conclude that a product is missing until you have checked both the Knowledge Base and the live Catalog Tools.
-
-### OUTPUT FORMAT
-- To call a tool: Return ONLY the JSON object. No chat.
-- Final Answer: Return ONLY natural language. No JSON.
-"""
-        return f"{base_prompt}\n\n{shopify_rules}"
+Example Search: {{"tool_name": "search_catalog", "tool_input": {{"meta": {{"ucp-agent": {{"profile": "{self.state['agent_profile_url']}"}}}}, "catalog": {{"query": "socks"}}}}}}"""
 
     def _get_status_message(self, tool_name: str) -> str:
         """Map tool names to user-friendly status updates."""

@@ -745,8 +745,12 @@ class MessageService:
                     if "agent_profile_url" in meta:
                         session_state["agent_profile_url"] = meta.get("agent_profile_url")
 
+            # 3. Retrieve context from KB (Vector Search)
+            retrieval_context = await self._retrieve_context(request)
+
             context_dict = {
                 "memory": memory_context,
+                "retrieval": retrieval_context,
                 "session_state": session_state,
                 "prompt_runtime": self._build_prompt_runtime_context(request),
                 "prompt_metadata": self.prompt_metadata,
