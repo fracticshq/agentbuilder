@@ -361,22 +361,114 @@ class KnowledgeService:
         items: List[Any],
         brand_id: str
     ):
-        """Process bulk JSON upload in background."""
+        """Process bulk JSON upload in background using batch processing for efficiency."""
+        BATCH_SIZE = 20
         try:
             await self._ensure_connection(brand_id)  # Use brand-specific database
             brand_scope = await self._resolve_brand_scope(brand_id)
             await self.job_store.update(job_id, {"status": "processing"})
 
-            for i, item in enumerate(items):
-                if content_type == "product":
-                    await self._process_product_item(item, brand_id, job_id, brand_scope)
-                elif content_type == "dealer":
-                    await self._process_dealer_item(item, brand_id, job_id, brand_scope)
+            # Process items in batches
+            for i in range(0, len(items), BATCH_SIZE):
+                batch_items = items[i : i + BATCH_SIZE]
+                batch_texts = []
+                batch_docs_metadata = []
+
+                # Phase 1: Prepare texts for the entire batch
+                for item in batch_items:
+                    text_parts = []
+                    if content_type == "product":
+                        text_parts = [
+                            f"Product: {item.name}",
+                            f"SKU: {item.sku}",
+                            f"Category: {item.category}",
+                            f"Price: {item.price} {item.currency}"
+                        ]
+                        if getattr(item, 'features', None):
+                            text_parts.append(f"Features: {', '.join(item.features)}")
+                        doc_id = f"{brand_id}_product_{item.sku}"
+                    elif content_type == "dealer":
+                        text_parts = [
+                            f"Dealer: {item.name}",
+                            f"Location: {item.city}",
+                            f"Phone: {item.phone}"
+                        ]
+                        doc_id = f"{brand_id}_dealer_{item.dealer_id}"
+                    
+                    full_text = "\n".join(text_parts)
+                    # We assume single chunk for batching efficiency, or we could chunk here
+                    batch_texts.append(full_text)
+                    batch_docs_metadata.append({"item": item, "doc_id": doc_id, "text": full_text})
+
+                # Phase 2: Generate embeddings for the whole batch in ONE call
+                logger.info("generating_batch_embeddings", batch_size=len(batch_texts), start_index=i)
+                batch_embeddings = await self._generate_embeddings(batch_texts)
+
+                # Phase 3: Save results to MongoDB
+                for idx, embedding in enumerate(batch_embeddings):
+                    metadata = batch_docs_metadata[idx]
+                    item = metadata["item"]
+                    doc_id = metadata["doc_id"]
+                    
+                    chunk_doc = {
+                        "doc_id": doc_id,
+                        "chunk_id": f"{doc_id}_chunk_0",
+                        "content": metadata["text"],
+                        "embeddings": embedding,
+                        "title": item.name,
+                        "content_type": content_type,
+                        "metadata": {
+                            "brand_id": (brand_scope or {}).get("brand_id") or brand_id,
+                            "brand_slug": (brand_scope or {}).get("brand_slug"),
+                            "job_id": job_id,
+                            "chunk_index": 0,
+                            "total_chunks": 1,
+                            "created_at": datetime.utcnow().isoformat()
+                        }
+                    }
+
+                    if content_type == "product":
+                        chunk_doc["product_data"] = {
+                            "sku": item.sku,
+                            "name": item.name,
+                            "price": item.price,
+                            "currency": item.currency,
+                            "category": item.category,
+                            "image_url": getattr(item, 'image_url', None),
+                            "product_url": getattr(item, 'product_url', None),
+                            "in_stock": getattr(item, 'in_stock', True),
+                            "features": getattr(item, 'features', [])
+                        }
+                    elif content_type == "dealer":
+                        chunk_doc["dealer_data"] = {
+                            "dealer_id": item.dealer_id,
+                            "name": item.name,
+                            "city": item.city,
+                            "phone": item.phone,
+                            "state": getattr(item, 'state', None),
+                            "email": getattr(item, 'email', None),
+                            "address": getattr(item, 'address', None)
+                        }
+
+                    # Upsert to MongoDB
+                    await self.collection.update_one(
+                        {"doc_id": doc_id, "chunk_id": chunk_doc["chunk_id"]},
+                        {"$set": chunk_doc},
+                        upsert=True
+                    )
+                    if self.qdrant:
+                        await self.qdrant.upsert_chunk(chunk_doc, (brand_scope or {}).get("brand_slug") or brand_id)
 
                 # Update progress
-                await self.job_store.update(job_id, {"processed_items": i + 1})
-
-            await self.job_store.update(job_id, {"status": "completed"})
+                processed_so_far = min(i + BATCH_SIZE, len(items))
+                await self.job_store.update(job_id, {
+                    "processed_items": processed_so_far,
+                    "processed_chunks": processed_so_far # Each item is 1 chunk in batch mode
+                })
+                
+                # BREATHE: Even with batching, wait between batches to be safe
+                if processed_so_far < len(items):
+                    await asyncio.sleep(2.0)
             logger.info(
                 "Bulk upload completed",
                 job_id=job_id,
@@ -829,37 +921,60 @@ class KnowledgeService:
         return chunks
     
     async def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using Voyage AI."""
+        """Generate embeddings using Voyage AI with exponential backoff for 429 errors."""
         voyage_config = await self._get_voyage_runtime_config()
         api_key = voyage_config["api_key"]
         base_url = voyage_config["base_url"].rstrip("/")
         model = voyage_config["model"]
+        
         if not api_key:
             logger.warning("voyage_api_key_not_configured", texts_count=len(texts))
             return [[] for _ in texts]
 
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{base_url}/embeddings",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "input": texts,
-                        "model": model
-                    }
-                )
-                
-                response.raise_for_status()
-                data = response.json()
-                
-                # Extract embeddings
-                embeddings = [item["embedding"] for item in data["data"]]
-                return embeddings
-                
-        except Exception as e:
-            logger.error("Embedding generation failed", error=str(e))
-            # Return empty embeddings on failure (for development)
-            return [[] for _ in texts]
+        max_retries = 10
+        base_delay = 10.0  # seconds
+        logger.info("starting_embedding_generation", texts_count=len(texts), base_delay=base_delay, max_retries=max_retries)
+        
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=45.0) as client:
+                    response = await client.post(
+                        f"{base_url}/embeddings",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "input": texts,
+                            "model": model
+                        }
+                    )
+                    
+                    if response.status_code == 429:
+                        if attempt < max_retries - 1:
+                            wait_time = base_delay * (2 ** attempt)
+                            logger.warning("embedding_rate_limited_retrying", attempt=attempt+1, wait_time=wait_time)
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            logger.error("embedding_rate_limit_exhausted", max_retries=max_retries)
+                            raise RuntimeError(f"Voyage AI rate limit exhausted after {max_retries} retries")
+                        
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    # Extract embeddings
+                    embeddings = [item["embedding"] for item in data["data"]]
+                    return embeddings
+                    
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = base_delay * (2 ** attempt)
+                    logger.warning("embedding_generation_retry", attempt=attempt+1, error=str(e), wait_time=wait_time)
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    logger.error("Embedding generation failed after retries", error=str(e))
+                    raise
+        
+        raise RuntimeError("Embedding generation failed due to unknown loop termination")
