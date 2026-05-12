@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -24,7 +24,7 @@ import structlog
 
 from app.auth.dependencies import require_dashboard_access
 from app.connections import connection_manager
-from app.dependencies import get_runtime_settings_service
+from app.dependencies import get_runtime_settings_service, get_knowledge_service
 from app.services import catalog_service
 from app.services.runtime_settings_service import RuntimeSettingsService
 
@@ -127,6 +127,7 @@ async def import_shopify(
     req: ShopifyImportRequest,
     background_tasks: BackgroundTasks,
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+    knowledge_service: Any = Depends(get_knowledge_service),
 ):
     """Start async Shopify product fetch. Paginates /products.json. Returns job_id."""
     job_id = str(uuid.uuid4())
@@ -137,6 +138,8 @@ async def import_shopify(
         req.store_url,
         req.access_token,
         job_id,
+        brand_id=req.brand_id,
+        knowledge_service=knowledge_service,
     )
 
     # Persist sync config for this brand so resync works later
@@ -284,6 +287,7 @@ async def manual_sync(
     brand_id: str,
     background_tasks: BackgroundTasks,
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+    knowledge_service: Any = Depends(get_knowledge_service),
 ):
     """Trigger an immediate resync from the brand's stored sync config."""
     db = connection_manager.get_system_db()
@@ -314,6 +318,8 @@ async def manual_sync(
             config["source_url"],
             config.get("access_token"),
             job_id,
+            brand_id=brand_id,
+            knowledge_service=knowledge_service,
         )
         return {"job_id": job_id, "status": "processing"}
 
