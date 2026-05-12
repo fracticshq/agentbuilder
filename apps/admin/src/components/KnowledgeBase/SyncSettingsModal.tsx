@@ -6,7 +6,8 @@ interface SyncSettingsModalProps {
   brandId: string;
   sourceType: string;
   sourceUrl: string;
-  accessToken?: string;
+  clientId?: string;
+  clientSecret?: string;
   onClose: () => void;
 }
 
@@ -14,7 +15,8 @@ export default function SyncSettingsModal({
   brandId,
   sourceType,
   sourceUrl,
-  accessToken,
+  clientId,
+  clientSecret,
   onClose,
 }: SyncSettingsModalProps) {
   const [autoSync, setAutoSync] = useState(false);
@@ -43,7 +45,8 @@ export default function SyncSettingsModal({
       await catalogApi.updateSyncConfig(brandId, {
         source_type: sourceType,
         source_url: sourceUrl,
-        ...(accessToken ? { access_token: accessToken } : {}),
+        client_id: clientId,
+        client_secret: clientSecret,
         auto_sync: autoSync,
         sync_frequency: frequency,
       });

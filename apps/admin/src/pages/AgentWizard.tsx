@@ -88,8 +88,9 @@ interface AgentData {
   // Data Source
   data_source: 'rag' | 'shopify' | 'none';
   shopify_shop_url: string;
-  shopify_access_token: string;
-  shopify_access_token_configured: boolean;
+  shopify_client_id: string;
+  shopify_client_secret: string;
+  shopify_credentials_configured: boolean;
   shopify_agent_profile_url: string;
 
   // Features
@@ -179,8 +180,9 @@ const initialData: AgentData = {
   // Data Source
   data_source: 'none',
   shopify_shop_url: '',
-  shopify_access_token: '',
-  shopify_access_token_configured: false,
+  shopify_client_id: '',
+  shopify_client_secret: '',
+  shopify_credentials_configured: false,
   shopify_agent_profile_url: '',
 
   // Features
@@ -374,8 +376,9 @@ export default function AgentWizard() {
         // Data Source
         data_source: config.data_source || (rag.enabled ? 'rag' : (config.shopify ? 'shopify' : 'none')),
         shopify_shop_url: config.shopify?.shop_url || '',
-        shopify_access_token: config.shopify?.access_token || '',
-        shopify_access_token_configured: Boolean(config.shopify?.access_token_configured),
+        shopify_client_id: config.shopify?.client_id || '',
+        shopify_client_secret: config.shopify?.client_secret || '',
+        shopify_credentials_configured: Boolean(config.shopify?.client_id && config.shopify?.client_secret),
         shopify_agent_profile_url: config.shopify?.agent_profile_url || '',
 
         // System Prompt
@@ -583,7 +586,8 @@ export default function AgentWizard() {
           data_source: agentData.data_source,
           shopify: agentData.data_source === 'shopify' ? {
             shop_url: agentData.shopify_shop_url,
-            access_token: agentData.shopify_access_token,
+            client_id: agentData.shopify_client_id,
+            client_secret: agentData.shopify_client_secret,
             agent_profile_url: agentData.shopify_agent_profile_url,
           } : undefined,
           features: {
