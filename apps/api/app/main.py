@@ -163,6 +163,7 @@ def create_app() -> FastAPI:
             "websockets_enabled": settings.ENABLE_WEBSOCKETS,
             "mongodb_required": settings.REQUIRE_MONGODB,
             "redis_required": settings.REQUIRE_REDIS,
+            "use_firecrawl": settings.USE_FIRECRAWL,
             "admin_key_configured": bool(settings.ADMIN_API_KEY),
             "admin_key_bypass_allowed": settings.ALLOW_ADMIN_KEY_BYPASS,
             "cors_origins": settings.CORS_ALLOW_ORIGINS,

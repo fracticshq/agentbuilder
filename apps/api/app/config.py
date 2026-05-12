@@ -252,6 +252,7 @@ class Settings(BaseSettings):
 
     # Firecrawl (product catalog scraping)
     FIRECRAWL_API_KEY: str = ""
+    USE_FIRECRAWL: bool = True
 
     # Azure Key Vault Configuration
     AZURE_KEYVAULT_NAME: Optional[str] = None
