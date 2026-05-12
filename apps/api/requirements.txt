@@ -37,7 +37,7 @@ google-auth>=2.38.0
 aiofiles>=23.2.1
 
 # Catalog service (product import + scraping)
-httpx>=0.27.0
+httpx[http2]>=0.27.0
 firecrawl-py>=1.0.0
 
 # Test tooling
