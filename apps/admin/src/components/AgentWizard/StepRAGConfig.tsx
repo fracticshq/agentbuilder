@@ -7,6 +7,7 @@ interface StepRAGConfigProps {
     shopify_shop_url: string;
     shopify_access_token: string;
     shopify_access_token_configured?: boolean;
+    shopify_agent_profile_url?: string;
     embedding_provider: string;
     embedding_model: string;
     top_k: number;
@@ -161,6 +162,25 @@ export default function StepRAGConfig({ data, brandId, onChange }: StepRAGConfig
                 {data.shopify_access_token_configured
                   ? 'A token is already saved for this agent. Enter a new token only to replace it.'
                   : 'Required for store-specific Shopify tools and private catalogs.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              <label htmlFor="shopify_agent_profile_url" className="block text-sm font-medium text-gray-700">
+                Agent Profile URL (Optional)
+              </label>
+              <input
+                type="url"
+                id="shopify_agent_profile_url"
+                placeholder="https://your-site.com/agent-profile.json"
+                value={data.shopify_agent_profile_url || ''}
+                onChange={(e) => onChange('shopify_agent_profile_url', e.target.value)}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
+              />
+              <p className="mt-1 text-xs text-gray-500">
+                The UCP Agent Profile URL required by the Storefront Catalog MCP. Defaults to a standard Shopify profile if left empty.
               </p>
             </div>
           </div>
