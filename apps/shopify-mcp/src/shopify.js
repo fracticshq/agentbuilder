@@ -9,8 +9,11 @@ const discoveryCache = new Map();
  * Uses the /.well-known/customer-account-api discovery endpoint.
  */
 export async function discoverMcpEndpoints(shopUrl) {
-  const cleanUrl = shopUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
-  
+  // Ensure we have just the domain (e.g. store.myshopify.com)
+  const cleanUrl = shopUrl
+    .replace(/^https?:\/\//, '')
+    .split('/')[0];
+
   if (discoveryCache.has(cleanUrl)) {
     return discoveryCache.get(cleanUrl);
   }
@@ -19,10 +22,11 @@ export async function discoverMcpEndpoints(shopUrl) {
   try {
     const response = await fetch(discoveryUrl);
     if (!response.ok) throw new Error(`Discovery failed: ${response.statusText}`);
-    
+
     const config = await response.json();
     const endpoints = {
       storefrontMcp: `https://${cleanUrl}/api/mcp`,
+      storefrontCatalogMcp: `https://${cleanUrl}/api/ucp/mcp`,
       customerAccountMcp: config.mcp_api || `https://${cleanUrl}/customer/api/mcp`,
       auth: {
         authorization_endpoint: config.authorization_endpoint,
@@ -30,7 +34,7 @@ export async function discoverMcpEndpoints(shopUrl) {
         userinfo_endpoint: config.userinfo_endpoint
       }
     };
-    
+
     discoveryCache.set(cleanUrl, endpoints);
     return endpoints;
   } catch (err) {
@@ -38,6 +42,7 @@ export async function discoverMcpEndpoints(shopUrl) {
     // Fallback to standard patterns if discovery fails
     return {
       storefrontMcp: `https://${cleanUrl}/api/mcp`,
+      storefrontCatalogMcp: `https://${cleanUrl}/api/ucp/mcp`,
       customerAccountMcp: `https://${cleanUrl}/customer/api/mcp`,
       auth: null
     };

@@ -32,6 +32,7 @@ export async function handleMcpRequest(payload, session, reqHeaders) {
 
   const shopUrl = reqHeaders['x-shopify-shop-url'];
   const customerToken = reqHeaders['x-customer-access-token'] || session?.customer_access_token;
+  const agentProfileUrl = reqHeaders['x-shopify-agent-profile-url'];
   
   if (!shopUrl) {
     if (payload.method === 'tools/list') {
@@ -50,43 +51,72 @@ export async function handleMcpRequest(payload, session, reqHeaders) {
   const endpoints = await discoverMcpEndpoints(shopUrl);
   
   if (payload.method === 'tools/list') {
-    // 1. Fetch Storefront Tools (No Auth)
-    const storefrontTools = await fetchTools(endpoints.storefrontMcp);
-    storefrontTools.forEach(t => toolServerMap.set(toolCacheKey(shopUrl, t.name), endpoints.storefrontMcp));
+    // 1. Fetch Storefront Catalog Tools (New UCP Catalog) - HIGHEST PRIORITY
+    const storefrontCatalogTools = await fetchTools(endpoints.storefrontCatalogMcp);
+    storefrontCatalogTools.forEach(t => toolServerMap.set(toolCacheKey(shopUrl, t.name), endpoints.storefrontCatalogMcp));
 
-    // 2. Fetch Customer Account Tools (Auth Required)
+    // 2. Fetch Storefront Tools (Legacy/Original)
+    const storefrontTools = await fetchTools(endpoints.storefrontMcp);
+    storefrontTools.forEach(t => {
+      const key = toolCacheKey(shopUrl, t.name);
+      // Only set if not already set by Catalog MCP (prefer Catalog version for tools like get_product)
+      if (!toolServerMap.has(key)) {
+        toolServerMap.set(key, endpoints.storefrontMcp);
+      }
+    });
+
+    // 3. Fetch Customer Account Tools (Auth Required)
     let customerTools = [];
     if (customerToken) {
       customerTools = await fetchTools(endpoints.customerAccountMcp, {
         'Authorization': `Bearer ${customerToken}`
       });
-      customerTools.forEach(t => toolServerMap.set(toolCacheKey(shopUrl, t.name), endpoints.customerAccountMcp));
+      customerTools.forEach(t => {
+        const key = toolCacheKey(shopUrl, t.name);
+        if (!toolServerMap.has(key)) {
+          toolServerMap.set(key, endpoints.customerAccountMcp);
+        }
+      });
     }
+
+    // Deduplicate the list returned to the client, preferring Catalog tools
+    const catalogToolNames = new Set(storefrontCatalogTools.map(t => t.name));
+    const filteredStorefrontTools = storefrontTools.filter(t => !catalogToolNames.has(t.name));
+    
+    const allTools = [...storefrontCatalogTools, ...filteredStorefrontTools, ...customerTools];
 
     return {
       jsonrpc: '2.0',
       id: payload.id,
       result: {
-        tools: [...storefrontTools, ...customerTools]
+        tools: allTools
       }
     };
   }
 
   if (payload.method === 'tools/call') {
     const { name, arguments: args } = payload.params;
-    
+
     // Find which server handles this tool
     let targetUrl = toolServerMap.get(toolCacheKey(shopUrl, name));
     
-    // Fallback: If not in cache, try both (Storefront first)
+    // Fallback: If not in cache, try identifying by prefix or name
     if (!targetUrl) {
-      const storefrontTools = await fetchTools(endpoints.storefrontMcp);
-      if (storefrontTools.some(t => t.name === name)) {
-        targetUrl = endpoints.storefrontMcp;
-        toolServerMap.set(toolCacheKey(shopUrl, name), targetUrl);
+      if (name.includes('catalog') || name === 'get_product') {
+        targetUrl = endpoints.storefrontCatalogMcp;
       } else {
-        targetUrl = endpoints.customerAccountMcp;
-        toolServerMap.set(toolCacheKey(shopUrl, name), targetUrl);
+        // Default to storefront if unknown
+        targetUrl = endpoints.storefrontMcp;
+      }
+    }
+
+    // Inject Agent Profile Metadata if missing for Catalog tools
+    if (targetUrl === endpoints.storefrontCatalogMcp) {
+      if (!args.meta) args.meta = {};
+      if (!args.meta['ucp-agent']) args.meta['ucp-agent'] = {};
+      if (!args.meta['ucp-agent'].profile) {
+        // Priority: Explicit arg > Header from message_service > Default
+        args.meta['ucp-agent'].profile = agentProfileUrl || 'https://shopify.dev/ucp/agent-profiles/examples/2026-04-08/valid-with-capabilities.json';
       }
     }
 
