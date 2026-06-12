@@ -108,7 +108,7 @@ def create_app() -> FastAPI:
         allow_origins=settings.CORS_ALLOW_ORIGINS,
         allow_credentials=not _has_wildcard_origin(),
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Authorization", "X-API-Key", "X-Admin-Key", "X-Request-ID"],
+        allow_headers=["Content-Type", "Authorization", "X-API-Key", "X-Agent-API-Key", "X-Admin-Key", "X-Widget-Session", "X-Request-ID"],
     )
     
     # Custom middleware

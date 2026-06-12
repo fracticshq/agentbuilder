@@ -32,12 +32,14 @@ class RetrievalTool(BaseTool):
     
     def __init__(self, retrieval_pipeline: RetrievalPipeline):
         self.pipeline = retrieval_pipeline
+        self.page_context: Optional[Dict[str, Any]] = None
         
     async def run(self, query: str, filters: Optional[Dict[str, Any]] = None, **kwargs) -> ToolResult:
         """Run the retrieval pipeline."""
         try:
             context: RetrievalContext = await self.pipeline.retrieve(
                 query=query,
+                page_context=kwargs.get("page_context") or self.page_context,
                 filters=filters or {},
                 max_chunks=5  # Tool usage usually needs concise top results
             )

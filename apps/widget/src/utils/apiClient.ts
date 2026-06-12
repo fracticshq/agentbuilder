@@ -12,11 +12,46 @@ declare global {
 
 export const DEFAULT_API_BASE_URL = window.__APP_CONFIG__?.API_BASE_URL || import.meta.env.VITE_API_BASE_URL || window.location.origin;
 
+export interface WidgetSession {
+  conversationId: string;
+  userId: string;
+  sessionToken: string;
+}
+
 export class APIClient {
   private baseUrl: string;
+  private sessionToken?: string;
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl;
+  }
+
+  /** Hold the signed session token used to authorize message calls. */
+  setSessionToken(token: string | undefined): void {
+    this.sessionToken = token;
+  }
+
+  /**
+   * Start or resume a server-issued widget session. The server mints (or
+   * resumes, when a valid prior token is supplied) a conversation_id + user_id
+   * bound to a signed token, which must accompany every subsequent message.
+   */
+  async startSession(agentId: string, priorToken?: string): Promise<WidgetSession> {
+    const response = await fetch(`${this.baseUrl}/api/v1/messages/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: agentId, session_token: priorToken }),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to start session: HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    this.sessionToken = data.session_token;
+    return {
+      conversationId: data.conversation_id,
+      userId: data.user_id,
+      sessionToken: data.session_token,
+    };
   }
 
   async sendMessage(
@@ -52,6 +87,7 @@ export class APIClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...(this.sessionToken ? { 'X-Widget-Session': this.sessionToken } : {}),
       },
       body: JSON.stringify(requestBody),
     });
@@ -78,6 +114,7 @@ export class APIClient {
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream',
+          ...(this.sessionToken ? { 'X-Widget-Session': this.sessionToken } : {}),
         },
         body: JSON.stringify(requestBody),
       }).then(async (response) => {

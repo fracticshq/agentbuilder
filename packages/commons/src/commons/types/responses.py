@@ -37,6 +37,7 @@ class StreamingMessageResponse(BaseModel):
     confidence_score: Optional[float] = Field(None, ge=0.0, le=1.0)
     products: Optional[List[Dict[str, Any]]] = None  # Phase 5: Product cards
     dealers: Optional[List[Dict[str, Any]]] = None   # Phase 5: Dealer cards
+    metadata: Optional[Dict[str, Any]] = None
     timestamp: datetime = Field(default_factory=datetime.now)
 
 

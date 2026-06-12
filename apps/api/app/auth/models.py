@@ -11,7 +11,11 @@ from bson import ObjectId
 
 class UserRole(str, Enum):
     """User roles for RBAC."""
+    SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
+    ORG_ADMIN = "org_admin"
+    BRAND_ADMIN = "brand_admin"
+    OPERATOR = "operator"
     USER = "user"
     VIEWER = "viewer"
 
@@ -52,16 +56,41 @@ class Permission(str, Enum):
 
 
 # Role to permissions mapping
+ADMIN_PERMISSIONS = [
+    Permission.BRAND_READ, Permission.BRAND_WRITE, Permission.BRAND_DELETE,
+    Permission.AGENT_READ, Permission.AGENT_WRITE, Permission.AGENT_DELETE,
+    Permission.DOCUMENT_READ, Permission.DOCUMENT_WRITE, Permission.DOCUMENT_DELETE,
+    Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
+    Permission.API_KEY_READ, Permission.API_KEY_WRITE, Permission.API_KEY_DELETE,
+    Permission.USER_READ, Permission.USER_WRITE, Permission.USER_DELETE,
+    Permission.SYSTEM_ADMIN,
+]
+
+BRAND_ADMIN_PERMISSIONS = [
+    Permission.BRAND_READ, Permission.BRAND_WRITE,
+    Permission.AGENT_READ, Permission.AGENT_WRITE, Permission.AGENT_DELETE,
+    Permission.DOCUMENT_READ, Permission.DOCUMENT_WRITE, Permission.DOCUMENT_DELETE,
+    Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
+    Permission.API_KEY_READ, Permission.API_KEY_WRITE, Permission.API_KEY_DELETE,
+]
+
+OPERATOR_PERMISSIONS = [
+    Permission.BRAND_READ,
+    Permission.AGENT_READ,
+    Permission.DOCUMENT_READ,
+    Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
+]
+
+
+GLOBAL_ADMIN_ROLES = {UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.ORG_ADMIN}
+
+
 ROLE_PERMISSIONS = {
-    UserRole.ADMIN: [
-        Permission.BRAND_READ, Permission.BRAND_WRITE, Permission.BRAND_DELETE,
-        Permission.AGENT_READ, Permission.AGENT_WRITE, Permission.AGENT_DELETE,
-        Permission.DOCUMENT_READ, Permission.DOCUMENT_WRITE, Permission.DOCUMENT_DELETE,
-        Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
-        Permission.API_KEY_READ, Permission.API_KEY_WRITE, Permission.API_KEY_DELETE,
-        Permission.USER_READ, Permission.USER_WRITE, Permission.USER_DELETE,
-        Permission.SYSTEM_ADMIN,
-    ],
+    UserRole.SUPER_ADMIN: ADMIN_PERMISSIONS,
+    UserRole.ADMIN: ADMIN_PERMISSIONS,
+    UserRole.ORG_ADMIN: ADMIN_PERMISSIONS,
+    UserRole.BRAND_ADMIN: BRAND_ADMIN_PERMISSIONS,
+    UserRole.OPERATOR: OPERATOR_PERMISSIONS,
     UserRole.USER: [
         Permission.BRAND_READ,
         Permission.AGENT_READ, Permission.AGENT_WRITE,
@@ -131,7 +160,7 @@ class User(BaseModel):
     
     def has_brand_access(self, brand_id: str) -> bool:
         """Check if user has access to a specific brand."""
-        if self.role == UserRole.ADMIN:
+        if self.role in GLOBAL_ADMIN_ROLES:
             return True
         return brand_id in self.brands
     

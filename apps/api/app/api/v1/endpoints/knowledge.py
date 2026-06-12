@@ -4,11 +4,11 @@ Supports both document uploads and bulk JSON imports with product/dealer data
 """
 
 from typing import List, Optional, Literal
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, BackgroundTasks, Body
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, BackgroundTasks, Body
 from pydantic import BaseModel, Field
 import structlog
 
-from ....dependencies import get_knowledge_service
+from ....dependencies import get_settings, get_knowledge_service
 from ....auth.dependencies import require_dashboard_access
 from ....services.knowledge_service import KnowledgeService
 
@@ -98,6 +98,38 @@ class JobStatusResponse(BaseModel):
     error: Optional[str] = None
 
 
+class FolderCreateRequest(BaseModel):
+    brand_id: str
+    path: Optional[str] = None
+    name: Optional[str] = None
+    parent_path: Optional[str] = None
+    agent_id: Optional[str] = None
+
+
+class KnowledgeMoveRequest(BaseModel):
+    brand_id: str
+    target_folder: Optional[str] = None
+    folder_path: Optional[str] = None
+    agent_id: Optional[str] = None
+
+
+class KnowledgeRenameRequest(BaseModel):
+    brand_id: str
+    name: str
+    agent_id: Optional[str] = None
+
+
+class KnowledgeRetrieveRequest(BaseModel):
+    brand_id: str
+    query: str = Field(..., min_length=1)
+    folder: Optional[str] = None
+    folder_path: Optional[str] = None
+    agent_id: Optional[str] = None
+    limit: int = Field(10, ge=1, le=50)
+    top_k: Optional[int] = Field(None, ge=1, le=50)
+    score_threshold: float = Field(0.0, ge=0.0, le=1.0)
+
+
 # ============================================================================
 # Endpoints
 # ============================================================================
@@ -106,17 +138,19 @@ class JobStatusResponse(BaseModel):
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    content_type: str = "guide",
-    brand_id: str = "default",
-    product_data: Optional[str] = None,  # JSON string
-    dealer_data: Optional[str] = None,   # JSON string
+    content_type: str = Form("guide"),
+    brand_id: str = Form("default"),
+    agent_id: Optional[str] = Form(None),
+    folder_path: Optional[str] = Form(None),
+    product_data: Optional[str] = Form(None),  # JSON string
+    dealer_data: Optional[str] = Form(None),   # JSON string
     knowledge_service: KnowledgeService = Depends(get_knowledge_service)
 ):
     """
     Upload a single document with structured metadata.
     
     Supports:
-    - PDF, DOCX, TXT, MD, HTML files
+    - PDF, DOCX, TXT, MD, HTML, JSON, CSV files
     - Content types: product, dealer, faq, office, category, guide
     - Structured metadata for products and dealers
     
@@ -126,17 +160,15 @@ async def upload_document(
     3. Stored in MongoDB with structured metadata
     """
     try:
-        # Validate file type
-        allowed_types = {
-            "text/plain", "text/markdown", "application/pdf",
-            "text/html", "application/json",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        }
-        
-        if file.content_type not in allowed_types:
+        source_type = knowledge_service.detect_source_type(file.content_type, file.filename or "")
+
+        if not source_type:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported file type: {file.content_type}. Allowed: PDF, DOCX, TXT, MD, HTML"
+                detail=(
+                    f"Unsupported file type: {file.content_type or 'unknown'}. "
+                    "Allowed: PDF, DOCX, TXT, MD, HTML, JSON, CSV"
+                )
             )
         
         # Parse structured metadata if provided
@@ -158,7 +190,14 @@ async def upload_document(
         
         # Read file content
         content = await file.read()
-        
+
+        max_file_bytes = get_settings().MAX_FILE_SIZE_MB * 1024 * 1024
+        if len(content) > max_file_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File {file.filename} exceeds the {get_settings().MAX_FILE_SIZE_MB}MB upload limit"
+            )
+
         # Start ingestion job
         job_id = await knowledge_service.start_document_upload(
             content=content,
@@ -166,8 +205,10 @@ async def upload_document(
             content_type_header=file.content_type,
             kb_content_type=content_type,
             brand_id=brand_id,
+            agent_id=agent_id,
             product_data=parsed_product_data,
-            dealer_data=parsed_dealer_data
+            dealer_data=parsed_dealer_data,
+            folder_path=folder_path,
         )
         
         # Process in background
@@ -179,8 +220,10 @@ async def upload_document(
             content_type_header=file.content_type,
             kb_content_type=content_type,
             brand_id=brand_id,
+            agent_id=agent_id,
             product_data=parsed_product_data,
-            dealer_data=parsed_dealer_data
+            dealer_data=parsed_dealer_data,
+            folder_path=folder_path,
         )
         
         logger.info(
@@ -189,6 +232,9 @@ async def upload_document(
             filename=file.filename,
             content_type=content_type,
             brand_id=brand_id,
+            agent_id=agent_id,
+            folder_path=folder_path,
+            source_type=source_type,
             has_product_data=parsed_product_data is not None,
             has_dealer_data=parsed_dealer_data is not None
         )
@@ -329,6 +375,139 @@ async def bulk_upload_json(
     except Exception as e:
         logger.error("Bulk upload failed", error=str(e))
         raise HTTPException(status_code=500, detail=f"Bulk upload failed: {str(e)}")
+
+
+@router.get("/tree")
+async def get_knowledge_tree(
+    brand_id: str,
+    agent_id: Optional[str] = None,
+    folder: Optional[str] = None,
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+):
+    """Return a filesystem-style folder/file tree for the knowledge base."""
+    try:
+        tree = await knowledge_service.list_knowledge_tree(
+            brand_id=brand_id,
+            agent_id=agent_id,
+            folder=folder,
+        )
+        return {"success": True, **tree}
+    except Exception as e:
+        logger.error("Failed to get knowledge tree", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to get knowledge tree: {str(e)}")
+
+
+@router.post("/folders")
+async def create_folder(
+    request: FolderCreateRequest,
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+):
+    """Create or ensure a knowledge folder."""
+    try:
+        folder = await knowledge_service.create_folder(
+            brand_id=request.brand_id,
+            path=request.path or knowledge_service.folder_path_from_name(
+                name=request.name,
+                parent_path=request.parent_path,
+            ),
+            agent_id=request.agent_id,
+        )
+        return {"success": True, "folder": folder}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to create knowledge folder", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to create folder: {str(e)}")
+
+
+@router.patch("/items/{item_id}/move")
+async def move_knowledge_item(
+    item_id: str,
+    request: KnowledgeMoveRequest,
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+):
+    """Move a knowledge item to another folder."""
+    try:
+        item = await knowledge_service.move_item(
+            brand_id=request.brand_id,
+            item_id=item_id,
+            target_folder=request.target_folder or request.folder_path or "/",
+            agent_id=request.agent_id,
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Knowledge item not found: {item_id}")
+        return {"success": True, "item": item}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to move knowledge item", item_id=item_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to move item: {str(e)}")
+
+
+@router.patch("/items/{item_id}/rename")
+async def rename_knowledge_item(
+    item_id: str,
+    request: KnowledgeRenameRequest,
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+):
+    """Rename a knowledge file or folder."""
+    try:
+        item = await knowledge_service.rename_item(
+            brand_id=request.brand_id,
+            item_id=item_id,
+            name=request.name,
+            agent_id=request.agent_id,
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Knowledge item not found: {item_id}")
+        return {"success": True, "item": item}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to rename knowledge item", item_id=item_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to rename item: {str(e)}")
+
+
+@router.delete("/items/{item_id}")
+async def delete_knowledge_item(
+    item_id: str,
+    brand_id: str,
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+):
+    """Delete a knowledge file item and its chunks."""
+    try:
+        deleted = await knowledge_service.delete_document(item_id, brand_id=brand_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Knowledge item not found: {item_id}")
+        return {"success": True, "message": f"Deleted knowledge item {item_id}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to delete knowledge item", item_id=item_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete item: {str(e)}")
+
+
+@router.post("/retrieve")
+async def retrieve_knowledge(
+    request: KnowledgeRetrieveRequest,
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+):
+    """Run an admin retrieval preview across all knowledge or a selected folder."""
+    try:
+        chunks = await knowledge_service.retrieve(
+            brand_id=request.brand_id,
+            query=request.query,
+            folder=request.folder or request.folder_path,
+            agent_id=request.agent_id,
+            limit=request.top_k or request.limit,
+            score_threshold=request.score_threshold,
+        )
+        return {"success": True, "query": request.query, "chunks": chunks, "results": chunks, "count": len(chunks)}
+    except Exception as e:
+        logger.error("Failed to retrieve knowledge", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve knowledge: {str(e)}")
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)

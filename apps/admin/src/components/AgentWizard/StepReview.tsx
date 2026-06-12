@@ -106,7 +106,19 @@ export default function StepReview({
       "tools/": {
         data_source: data.data_source,
         knowledge_search: data.rag_enabled,
-        shopify: data.data_source === 'shopify'
+        shopify: data.data_source === 'shopify',
+        selected_tools: data.selected_tool_ids || []
+      },
+      "skills/": {
+        selected_skills: data.selected_skill_ids || []
+      },
+      "agent-api.yaml": {
+        enabled: data.agent_api_enabled,
+        key_ids: data.agent_api_key_ids || [],
+        allowed_origins: typeof data.agent_api_allowed_origins === 'string'
+          ? data.agent_api_allowed_origins.split(/[\n,]/).map((origin: string) => origin.trim()).filter(Boolean)
+          : [],
+        require_key: data.agent_api_require_key
       },
       "knowledge/index.yaml": {
         data_source_policy: parseStructuredPreview(data.data_source_policy, {}),
@@ -349,6 +361,9 @@ export default function StepReview({
             <div className="mt-1 text-sm text-gray-600">
               <p><strong>RAG:</strong> {data.rag_enabled ? 'Enabled' : 'Disabled'}</p>
               <p><strong>Data Source:</strong> {data.data_source || 'none'}</p>
+              <p><strong>Skills:</strong> {data.selected_skill_ids?.length || 0}</p>
+              <p><strong>Tools:</strong> {data.selected_tool_ids?.length || 0}</p>
+              <p><strong>Agent API:</strong> {data.agent_api_enabled ? 'Enabled' : 'Disabled'}</p>
               <p><strong>File Upload:</strong> {data.file_upload ? 'Enabled' : 'Disabled'}</p>
               <p><strong>Documents:</strong> {data.documents?.length || 0}</p>
             </div>

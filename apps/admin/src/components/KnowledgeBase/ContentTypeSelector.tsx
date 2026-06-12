@@ -74,11 +74,11 @@ export default function ContentTypeSelector({
   return (
     <div>
       <h3 className="text-lg font-medium text-gray-900 mb-2">
-        🏷️ What type of content are you uploading?
+        What structured content are you uploading?
       </h3>
       
       <p className="text-sm text-gray-600 mb-6">
-        Selecting the right content type enables structured search and prevents AI hallucinations.
+        Product and dealer imports use field mapping so search can return exact catalog and location facts.
       </p>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -161,8 +161,7 @@ export default function ContentTypeSelector({
           </div>
           <div className="ml-3 flex-1">
             <p className="text-sm text-blue-700">
-              <strong>💡 Tip:</strong> Choosing the right content type is crucial! For <strong>Products</strong> and <strong>Dealers</strong>, 
-              you'll be asked to provide structured data in the next step, which ensures accurate information and prevents AI from making things up.
+              <strong>Tip:</strong> Use structured JSON for <strong>Products</strong> and <strong>Dealers</strong> when exact fields matter. Use the Documents tab for PDFs, DOCX, TXT, Markdown, HTML, and CSV files.
             </p>
           </div>
         </div>

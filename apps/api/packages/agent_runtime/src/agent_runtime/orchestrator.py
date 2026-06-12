@@ -69,7 +69,13 @@ class Orchestrator:
         }
         return json.dumps(safe_context, indent=2, sort_keys=True, default=str)
         
-    async def run(self, query: str, chat_history: Optional[List[Dict[str, Any]]] = None, context: Optional[Dict] = None) -> AgentResult:
+    async def run(
+        self,
+        query: str,
+        chat_history: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict] = None,
+        on_event: Optional[Any] = None,
+    ) -> AgentResult:
         """
         Execute the agent loop for a query.
         """
@@ -167,8 +173,28 @@ Output JSON Format:
             
             # Execute
             try:
+                if on_event:
+                    event_type = "skill_start" if step.tool_name.startswith("skill_") else "tool_start"
+                    await on_event({
+                        "type": event_type,
+                        "content": f"Running {step.tool_name}",
+                        "step_id": step.id,
+                        "tool_name": step.tool_name,
+                        "thought": step.thought,
+                    })
                 result = await tool.run(**step.tool_input)
                 results[step.id] = result
+                if on_event:
+                    event_type = "skill_result" if step.tool_name.startswith("skill_") else "tool_result"
+                    await on_event({
+                        "type": event_type,
+                        "content": f"Finished {step.tool_name}",
+                        "step_id": step.id,
+                        "tool_name": step.tool_name,
+                        "success": result.success,
+                        "metadata": result.metadata,
+                        "error": result.error,
+                    })
                 scratchpad.append({
                     "step": step.id,
                     "thought": step.thought,
@@ -179,6 +205,13 @@ Output JSON Format:
             except Exception as e:
                 logger.error("step_execution_failed", step_id=step.id, error=str(e))
                 results[step.id] = ToolResult(success=False, data=None, error=str(e))
+                if on_event:
+                    await on_event({
+                        "type": "tool_error",
+                        "content": str(e),
+                        "step_id": step.id,
+                        "tool_name": step.tool_name,
+                    })
 
         # 3. SYNTHESIS / REVIEW PHASE
         # Aggregate results into a final answer

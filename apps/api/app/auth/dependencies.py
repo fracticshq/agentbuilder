@@ -279,6 +279,50 @@ async def require_dashboard_access(
     )
 
 
+CONSOLE_ACCESS_ROLES = {
+    UserRole.SUPER_ADMIN,
+    UserRole.ADMIN,
+    UserRole.ORG_ADMIN,
+    UserRole.BRAND_ADMIN,
+    UserRole.OPERATOR,
+}
+
+
+async def require_console_access(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    x_admin_key: Optional[str] = Header(None),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> Optional[User]:
+    """
+    Require an authenticated dashboard user with Agent Console privileges.
+
+    The X-Admin-Key fallback is intentionally limited to local/non-production
+    operator workflows where ADMIN_API_KEY bypass is explicitly allowed.
+    """
+    if credentials is not None:
+        user = await get_current_active_user(await get_current_user(credentials, db))
+        if user.role not in CONSOLE_ACCESS_ROLES:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Agent Console access is restricted",
+            )
+        return user
+
+    if (
+        x_admin_key
+        and not settings.is_production
+        and settings.ALLOW_ADMIN_KEY_BYPASS
+        and is_admin_key_authorized(x_admin_key, settings)
+    ):
+        return None
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Agent Console authentication required",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 def require_role(*allowed_roles: UserRole):
     """
     Dependency factory to require specific roles.

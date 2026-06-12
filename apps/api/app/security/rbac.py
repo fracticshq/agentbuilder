@@ -3,7 +3,7 @@ Role-Based Access Control (RBAC) utilities.
 """
 
 import structlog
-from ..auth.models import User, Permission, UserRole, ROLE_PERMISSIONS
+from ..auth.models import User, Permission, UserRole, ROLE_PERMISSIONS, GLOBAL_ADMIN_ROLES
 
 logger = structlog.get_logger()
 
@@ -78,7 +78,7 @@ def check_brand_access(user: User, brand_id: str) -> bool:
         True if user has access to the brand
     """
     # Admins have access to all brands
-    if user.role == UserRole.ADMIN:
+    if user.role in GLOBAL_ADMIN_ROLES:
         return True
     
     # Check if brand_id is in user's accessible brands
@@ -125,7 +125,7 @@ def can_manage_user(actor: User, target_user: User) -> bool:
         True if actor can manage target user
     """
     # Admins can manage all users
-    if actor.role == UserRole.ADMIN:
+    if actor.role in GLOBAL_ADMIN_ROLES:
         return True
     
     # Regular users cannot manage other users
@@ -187,7 +187,7 @@ def get_accessible_brands(user: User, all_brand_ids: list[str]) -> list[str]:
         List of accessible brand IDs
     """
     # Admins can access all brands
-    if user.role == UserRole.ADMIN:
+    if user.role in GLOBAL_ADMIN_ROLES:
         return all_brand_ids
     
     # Filter to only user's accessible brands

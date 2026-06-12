@@ -8,7 +8,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from datetime import datetime
 
-from ....auth.models import User, UserRole
+from ....auth.models import GLOBAL_ADMIN_ROLES, User, UserRole
 from ....auth.password import hash_password, validate_password_strength
 from ....auth.dependencies import get_current_active_user, require_role
 from ....auth.dependencies import get_db
@@ -130,7 +130,7 @@ async def update_current_user(
 
 @router.get("/users", response_model=List[UserResponse])
 async def list_users(
-    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    current_user: User = Depends(require_role(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.ORG_ADMIN)),
     db = Depends(get_db)
 ):
     """
@@ -147,7 +147,7 @@ async def list_users(
 @router.get("/users/{user_id}", response_model=UserResponse)
 async def get_user(
     user_id: str,
-    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    current_user: User = Depends(require_role(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.ORG_ADMIN)),
     db = Depends(get_db)
 ):
     """
@@ -168,7 +168,7 @@ async def get_user(
 async def update_user_role(
     user_id: str,
     request: UpdateUserRoleRequest,
-    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    current_user: User = Depends(require_role(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.ORG_ADMIN)),
     db = Depends(get_db)
 ):
     """
@@ -179,7 +179,7 @@ async def update_user_role(
     - **role**: New role (admin, user, viewer)
     """
     # Prevent self-demotion
-    if str(current_user.id) == user_id and request.role != UserRole.ADMIN:
+    if str(current_user.id) == user_id and request.role not in GLOBAL_ADMIN_ROLES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot demote yourself from admin role"
@@ -210,7 +210,7 @@ async def update_user_role(
 @router.patch("/users/{user_id}/disable", response_model=UserResponse)
 async def disable_user(
     user_id: str,
-    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    current_user: User = Depends(require_role(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.ORG_ADMIN)),
     db = Depends(get_db)
 ):
     """
@@ -250,7 +250,7 @@ async def disable_user(
 @router.patch("/users/{user_id}/enable", response_model=UserResponse)
 async def enable_user(
     user_id: str,
-    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    current_user: User = Depends(require_role(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.ORG_ADMIN)),
     db = Depends(get_db)
 ):
     """

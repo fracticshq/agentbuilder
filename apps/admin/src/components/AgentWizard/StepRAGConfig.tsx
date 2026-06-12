@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
-import { api } from '../../api/client';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api, AgentApiKey, SkillDefinition, ToolDefinition } from '../../api/client';
 
 interface StepRAGConfigProps {
   data: {
+    agent_template?: string;
     data_source: 'rag' | 'shopify' | 'none';
     shopify_shop_url: string;
     shopify_access_token: string;
@@ -16,9 +18,15 @@ interface StepRAGConfigProps {
     context_window: number;
     data_source_policy: string;
     runtime_variables_schema: string;
+    selected_skill_ids: string[];
+    selected_tool_ids: string[];
+    agent_api_enabled: boolean;
+    agent_api_key_ids: string[];
+    agent_api_allowed_origins: string;
+    agent_api_require_key: boolean;
   };
   brandId?: string;
-  onChange: (field: string, value: string | number | boolean) => void;
+  onChange: (field: string, value: string | number | boolean | string[]) => void;
 }
 
 const embeddingProviders = [
@@ -50,12 +58,83 @@ const embeddingProviders = [
   }
 ];
 
+function capabilityId(item: Record<string, any>): string {
+  return String(item.id || item.key || item.slug || item.name || '');
+}
+
 export default function StepRAGConfig({ data, brandId, onChange }: StepRAGConfigProps) {
+  const queryClient = useQueryClient();
   const selectedProvider = embeddingProviders.find(p => p.id === data.embedding_provider);
   const availableModels = selectedProvider?.models || [];
+  const isEcommerceTemplate = data.agent_template === 'ecommerce';
   
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
+  const [newApiKeyName, setNewApiKeyName] = useState('Default integration key');
+  const [createdApiKey, setCreatedApiKey] = useState<string | null>(null);
+  const [agentApiError, setAgentApiError] = useState<string | null>(null);
+
+  const { data: skills = [], isLoading: skillsLoading } = useQuery<SkillDefinition[]>({
+    queryKey: ['admin', 'skills'],
+    queryFn: api.getSkills,
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  const { data: tools = [], isLoading: toolsLoading } = useQuery<ToolDefinition[]>({
+    queryKey: ['admin', 'tools'],
+    queryFn: api.getTools,
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  const { data: apiKeys = [], isLoading: apiKeysLoading } = useQuery<AgentApiKey[]>({
+    queryKey: ['admin', 'agent-api-keys', brandId || 'all'],
+    queryFn: () => api.getAgentApiKeys({ brandId }),
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  const createApiKeyMutation = useMutation({
+    mutationFn: () => api.createAgentApiKey({
+      name: newApiKeyName.trim() || 'Default integration key',
+      brand_id: brandId || null,
+    }),
+    onSuccess: async (key) => {
+      setAgentApiError(null);
+      setCreatedApiKey(key.api_key || null);
+      await queryClient.invalidateQueries({ queryKey: ['admin', 'agent-api-keys'] });
+      const keyId = key.key_id || key.id;
+      if (keyId && !data.agent_api_key_ids.includes(keyId)) {
+        onChange('agent_api_key_ids', [...data.agent_api_key_ids, keyId]);
+      }
+    },
+    onError: (error: any) => {
+      setAgentApiError(error?.message || 'Failed to create Agent API key.');
+    },
+  });
+
+  const revokeApiKeyMutation = useMutation({
+    mutationFn: (keyId: string) => api.revokeAgentApiKey(keyId),
+    onSuccess: async (_key, keyId) => {
+      setAgentApiError(null);
+      onChange('agent_api_key_ids', data.agent_api_key_ids.filter(id => id !== keyId));
+      await queryClient.invalidateQueries({ queryKey: ['admin', 'agent-api-keys'] });
+    },
+    onError: (error: any) => {
+      setAgentApiError(error?.message || 'Failed to revoke Agent API key.');
+    },
+  });
+
+  const toggleValue = (field: 'selected_skill_ids' | 'selected_tool_ids' | 'agent_api_key_ids', value: string) => {
+    const current = data[field] || [];
+    onChange(
+      field,
+      current.includes(value)
+        ? current.filter(item => item !== value)
+        : [...current, value]
+    );
+  };
 
   const handleShopifySync = async () => {
     if (!brandId) {
@@ -86,10 +165,19 @@ export default function StepRAGConfig({ data, brandId, onChange }: StepRAGConfig
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-lg font-medium text-gray-900">Tools & Sources</h3>
-        <p className="mt-1 text-sm text-gray-600">
-          Configure source connections and retrieval tools that map to tools/ and agent.yaml.
-        </p>
+        <div className="flex items-start justify-between gap-4 border-b border-gray-200 pb-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-primary-700">Agent runtime</p>
+            <h3 className="mt-1 text-xl font-semibold text-gray-950">Tools & Sources</h3>
+            <p className="mt-1 text-sm text-gray-600">
+              Configure retrieval, skills, registry tools, and external API access from one compact control surface.
+            </p>
+          </div>
+          <div className="hidden rounded-md border border-gray-200 bg-white px-3 py-2 text-right text-xs text-gray-500 sm:block">
+            <p className="font-semibold text-gray-900">{data.selected_skill_ids.length + data.selected_tool_ids.length}</p>
+            <p>capabilities enabled</p>
+          </div>
+        </div>
       </div>
 
       {/* Data Source Selection */}
@@ -115,16 +203,224 @@ export default function StepRAGConfig({ data, brandId, onChange }: StepRAGConfig
               id="source_shopify"
               name="data_source"
               type="radio"
+              disabled={!isEcommerceTemplate}
               checked={data.data_source === 'shopify'}
               onChange={() => onChange('data_source', 'shopify')}
-              className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300"
+              className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 disabled:opacity-40"
             />
-            <label htmlFor="source_shopify" className="ml-3 block text-sm font-medium text-gray-700">
-              Shopify Store Integration
+            <label htmlFor="source_shopify" className={`ml-3 block text-sm font-medium ${isEcommerceTemplate ? 'text-gray-700' : 'text-gray-400'}`}>
+              Shopify Store Integration {isEcommerceTemplate ? '' : '(Ecommerce template only)'}
             </label>
           </div>
         </div>
       </fieldset>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_1fr]">
+        <div className="rounded-md border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="mb-3">
+            <h4 className="text-sm font-medium text-gray-900">Skills</h4>
+            <p className="mt-1 text-xs text-gray-500">
+              Select packaged behavior modules for this agent.
+            </p>
+          </div>
+          {skillsLoading ? (
+            <p className="text-sm text-gray-500">Loading skills...</p>
+          ) : skills.length === 0 ? (
+            <p className="text-sm text-gray-500">No skills endpoint data available yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {skills.map((skill) => {
+                const id = capabilityId(skill);
+                if (!id) return null;
+                return (
+                  <label key={id} className="flex items-start gap-3 rounded-md border border-gray-200 bg-gray-50 p-3 transition-colors hover:border-primary-200 hover:bg-white">
+                    <input
+                      type="checkbox"
+                      checked={data.selected_skill_ids.includes(id)}
+                      onChange={() => toggleValue('selected_skill_ids', id)}
+                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-gray-900">{skill.name || id}</span>
+                      {skill.description && <span className="block text-xs text-gray-500">{skill.description}</span>}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-md border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="mb-3">
+            <h4 className="text-sm font-medium text-gray-900">Tools</h4>
+            <p className="mt-1 text-xs text-gray-500">
+              Enable callable tools exposed to the runtime planner.
+            </p>
+          </div>
+          {toolsLoading ? (
+            <p className="text-sm text-gray-500">Loading tools...</p>
+          ) : tools.length === 0 ? (
+            <p className="text-sm text-gray-500">No tools endpoint data available yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {tools.map((tool) => {
+                const id = capabilityId(tool);
+                if (!id) return null;
+                return (
+                  <label key={id} className="flex items-start gap-3 rounded-md border border-gray-200 bg-gray-50 p-3 transition-colors hover:border-primary-200 hover:bg-white">
+                    <input
+                      type="checkbox"
+                      checked={data.selected_tool_ids.includes(id)}
+                      onChange={() => toggleValue('selected_tool_ids', id)}
+                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-gray-900">{tool.name || id}</span>
+                      {tool.description && <span className="block text-xs text-gray-500">{tool.description}</span>}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="rounded-md border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h4 className="text-sm font-medium text-gray-900">Agent API</h4>
+            <p className="mt-1 text-xs text-gray-500">
+              Create scoped keys for server-to-server sessions, messages, and streaming.
+            </p>
+          </div>
+          <input
+            id="agent_api_enabled"
+            type="checkbox"
+            checked={data.agent_api_enabled}
+            onChange={(event) => onChange('agent_api_enabled', event.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </div>
+
+        {data.agent_api_enabled && (
+          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-[1.1fr_0.9fr]">
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Allowed keys</p>
+                <span className="text-xs text-gray-400">{data.agent_api_key_ids.length} selected</span>
+              </div>
+              {apiKeysLoading ? (
+                <p className="text-sm text-gray-500">Loading API keys...</p>
+              ) : apiKeys.length === 0 ? (
+                <p className="rounded-md bg-gray-50 p-3 text-sm text-gray-500">
+                  No agent API keys endpoint data available yet.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {apiKeys.map((key) => {
+                    const id = String(key.key_id || key.id || key.name || '');
+                    if (!id) return null;
+                    return (
+                      <div key={id} className="flex items-start justify-between gap-3 rounded-md border border-gray-200 bg-gray-50 p-3">
+                        <label className="flex min-w-0 flex-1 items-start gap-3">
+                          <input
+                            type="checkbox"
+                            checked={data.agent_api_key_ids.includes(id)}
+                            onChange={() => toggleValue('agent_api_key_ids', id)}
+                            className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                          />
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm font-medium text-gray-900">{key.name || id}</span>
+                            <span className="block truncate font-mono text-xs text-gray-500">
+                              {key.masked_key || key.key_id || id}
+                            </span>
+                            {key.is_active === false && (
+                              <span className="mt-1 inline-flex rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700">
+                                Revoked
+                              </span>
+                            )}
+                          </span>
+                        </label>
+                        {key.key_id && key.is_active !== false && (
+                          <button
+                            type="button"
+                            onClick={() => revokeApiKeyMutation.mutate(key.key_id!)}
+                            disabled={revokeApiKeyMutation.isPending}
+                            className="rounded border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-600 hover:border-red-200 hover:text-red-700 disabled:opacity-50"
+                          >
+                            Revoke
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {createdApiKey && (
+                <div className="mt-3 rounded-md border border-green-200 bg-green-50 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-green-800">Copy now</p>
+                  <p className="mt-1 break-all font-mono text-xs text-green-900">{createdApiKey}</p>
+                </div>
+              )}
+              {agentApiError && (
+                <p className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-700">{agentApiError}</p>
+              )}
+            </div>
+            <div className="space-y-4">
+              <div className="rounded-md border border-gray-200 bg-gray-50 p-3">
+                <label htmlFor="agent_api_key_name" className="block text-sm font-medium text-gray-700">
+                  New key name
+                </label>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    id="agent_api_key_name"
+                    type="text"
+                    value={newApiKeyName}
+                    onChange={(event) => setNewApiKeyName(event.target.value)}
+                    className="block min-w-0 flex-1 rounded-md border-gray-300 text-sm shadow-sm focus:border-primary-500 focus:ring-primary-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => createApiKeyMutation.mutate()}
+                    disabled={createApiKeyMutation.isPending}
+                    className="rounded-md bg-gray-950 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:opacity-50"
+                  >
+                    {createApiKeyMutation.isPending ? 'Creating' : 'Create'}
+                  </button>
+                </div>
+                <p className="mt-2 text-xs text-gray-500">
+                  The full key is shown once after creation.
+                </p>
+              </div>
+              <div>
+                <label htmlFor="agent_api_allowed_origins" className="block text-sm font-medium text-gray-700">
+                  Allowed origins
+                </label>
+                <textarea
+                  id="agent_api_allowed_origins"
+                  rows={4}
+                  value={data.agent_api_allowed_origins}
+                  onChange={(event) => onChange('agent_api_allowed_origins', event.target.value)}
+                  placeholder="https://example.com"
+                  className="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-sm focus:border-primary-500 focus:ring-primary-500"
+                />
+                <p className="mt-1 text-xs text-gray-500">Separate origins with commas or new lines.</p>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={data.agent_api_require_key}
+                  onChange={(event) => onChange('agent_api_require_key', event.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                Require API key for direct calls
+              </label>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Shopify Configuration */}
       {data.data_source === 'shopify' && (

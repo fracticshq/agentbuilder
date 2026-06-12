@@ -11,7 +11,7 @@ declare global {
 }
 
 const runtimeConfig = window.__APP_CONFIG__ || {};
-const API_BASE_URL = runtimeConfig.API_BASE_URL || process.env.REACT_APP_API_URL || window.location.origin;
+export const API_BASE_URL = runtimeConfig.API_BASE_URL || process.env.REACT_APP_API_URL || window.location.origin;
 const AUTH_STORAGE_KEY = 'agentbuilder.auth_session';
 export const AUTH_SESSION_CHANGED_EVENT = 'agentbuilder.auth_session_changed';
 
@@ -22,6 +22,7 @@ export interface AuthUser {
   full_name?: string | null;
   role: string;
   brand_id?: string | null;
+  brands?: string[];
   disabled: boolean;
   created_at: string;
   updated_at?: string;
@@ -341,6 +342,54 @@ export interface AzureOpenAIDeploymentsResponse {
   deployments: AzureOpenAIDeployment[];
 }
 
+export interface SkillDefinition {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  enabled?: boolean;
+  tags?: string[];
+  [key: string]: any;
+}
+
+export interface ToolDefinition {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  enabled?: boolean;
+  input_schema?: Record<string, any>;
+  auth_required?: boolean;
+  [key: string]: any;
+}
+
+export interface AgentApiKey {
+  id: string;
+  key_id?: string;
+  name: string;
+  masked_key?: string;
+  api_key?: string;
+  scopes?: string[];
+  agent_id?: string | null;
+  brand_id?: string | null;
+  created_at?: string;
+  last_used_at?: string | null;
+  is_active?: boolean;
+  [key: string]: any;
+}
+
+export interface CreateAgentApiKeyRequest {
+  name: string;
+  scopes?: string[];
+  agent_id?: string | null;
+  brand_id?: string | null;
+}
+
+export interface AgentApiKeyListParams {
+  agentId?: string;
+  brandId?: string;
+}
+
 export interface RuntimeSettingOption {
   value: string;
   label: string;
@@ -396,6 +445,31 @@ export interface RuntimeSettingsTestResponse {
   }>;
 }
 
+export interface AgentTestMessageResponse {
+  message?: string;
+  answer?: string;
+  content?: string;
+  citations?: any[];
+  products?: any[];
+  dealers?: any[];
+  tool_calls?: any[];
+  metadata?: Record<string, any>;
+  [key: string]: any;
+}
+
+export interface ConsoleAgentResponse {
+  agent: Agent;
+  console?: {
+    knowledge_enabled?: boolean;
+    skills?: string[];
+    tools?: string[];
+    api_data_source?: {
+      enabled?: boolean;
+      name?: string | null;
+    };
+  };
+}
+
 export interface AuthRequest {
   email: string;
   password: string;
@@ -449,11 +523,75 @@ export const agentApi = {
   update: (id: string, data: Partial<UpdateAgentRequest>) => 
     apiClient.put<Agent>(`/api/v1/admin/agents/${id}`, data),
   delete: (id: string) => apiClient.delete(`/api/v1/admin/agents/${id}`),
+  exportManifest: (id: string) =>
+    apiClient.get<Blob>(`/api/v1/admin/agents/${id}/export`, { responseType: 'blob' }),
+  testMessage: (id: string, message: string) =>
+    apiClient.post<AgentTestMessageResponse>('/api/v1/messages/', {
+      agent_id: id,
+      message,
+      conversation_id: `admin-test-${id}`,
+      user_id: 'admin-preview',
+    }),
 };
 
 export const llmApi = {
   getAzureDeployments: () =>
     apiClient.get<AzureOpenAIDeploymentsResponse>('/api/v1/admin/llm/azure/deployments'),
+};
+
+function normalizeAdminList<T>(data: any, keys: string[]): T[] {
+  if (Array.isArray(data)) {
+    return data as T[];
+  }
+  for (const key of keys) {
+    if (Array.isArray(data?.[key])) {
+      return data[key] as T[];
+    }
+  }
+  return [];
+}
+
+async function optionalAdminList<T>(request: Promise<{ data: any }>, keys: string[]): Promise<T[]> {
+  try {
+    const response = await request;
+    return normalizeAdminList<T>(response.data, keys);
+  } catch (error: any) {
+    if (error?.statusCode === 404 || error?.statusCode === 405 || error?.statusCode === 501) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+export const adminCapabilitiesApi = {
+  getSkills: () =>
+    optionalAdminList<SkillDefinition>(
+      apiClient.get('/api/v1/admin/skills'),
+      ['skills', 'items', 'data']
+    ),
+  getTools: () =>
+    optionalAdminList<ToolDefinition>(
+      apiClient.get('/api/v1/admin/tools'),
+      ['tools', 'items', 'data']
+    ),
+  getAgentApiKeys: (params?: AgentApiKeyListParams) =>
+    optionalAdminList<AgentApiKey>(
+      apiClient.get('/api/v1/admin/agent-api/keys', {
+        params: {
+          ...(params?.agentId ? { agent_id: params.agentId } : {}),
+          ...(params?.brandId ? { brand_id: params.brandId } : {}),
+        },
+      }),
+      ['keys', 'api_keys', 'items', 'data']
+    ),
+  createAgentApiKey: async (data: CreateAgentApiKeyRequest): Promise<AgentApiKey> => {
+    const response = await apiClient.post('/api/v1/admin/agent-api/keys', data);
+    return response.data?.key || response.data;
+  },
+  revokeAgentApiKey: async (keyId: string): Promise<AgentApiKey> => {
+    const response = await apiClient.post(`/api/v1/admin/agent-api/keys/${keyId}/revoke`);
+    return response.data?.key || response.data;
+  },
 };
 
 export const runtimeSettingsApi = {
@@ -468,6 +606,21 @@ export const observabilityApi = {
   getMetrics: () => apiClient.get<string>('/metrics', { responseType: 'text' }),
   getSummary: (params?: { brand_slug?: string; agent_id?: string; range_hours?: number }) =>
     apiClient.get<ObservabilitySummaryResponse>('/api/v1/admin/observability/summary', { params }),
+};
+
+export const consoleApi = {
+  listAgents: async (): Promise<Agent[]> => {
+    const response = await apiClient.get('/api/v1/admin/console/agents');
+    return normalizeAdminList<Agent>(response.data, ['agents', 'items', 'data']);
+  },
+  getAgent: async (id: string): Promise<ConsoleAgentResponse> => {
+    const response = await apiClient.get<ConsoleAgentResponse>(`/api/v1/admin/console/agents/${id}`);
+    return response.data;
+  },
+  listRuns: async (id: string) => {
+    const response = await apiClient.get(`/api/v1/admin/console/agents/${id}/runs`);
+    return response.data;
+  },
 };
 
 export interface ObservabilityBrand {
@@ -587,11 +740,28 @@ export const api = {
   deleteAgent: async (id: string) => {
     await agentApi.delete(id);
   },
+  exportAgentManifest: async (id: string) => {
+    const response = await agentApi.exportManifest(id);
+    return response.data;
+  },
+  testAgentMessage: async (id: string, message: string) => {
+    const response = await agentApi.testMessage(id, message);
+    return response.data;
+  },
 
   getAzureDeployments: async () => {
     const response = await llmApi.getAzureDeployments();
     return response.data;
   },
+
+  getSkills: adminCapabilitiesApi.getSkills,
+  getTools: adminCapabilitiesApi.getTools,
+  getAgentApiKeys: adminCapabilitiesApi.getAgentApiKeys,
+  createAgentApiKey: adminCapabilitiesApi.createAgentApiKey,
+  revokeAgentApiKey: adminCapabilitiesApi.revokeAgentApiKey,
+  getConsoleAgents: consoleApi.listAgents,
+  getConsoleAgent: consoleApi.getAgent,
+  getConsoleRuns: consoleApi.listRuns,
   
   // Catalog
   syncShopify: async (data: { brand_id: string; store_url: string; access_token?: string }) => {

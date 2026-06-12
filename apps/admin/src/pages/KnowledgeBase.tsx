@@ -1,23 +1,54 @@
 import React, { useState } from 'react';
-import { PlusIcon } from '@heroicons/react/24/outline';
+import { useQuery } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
+import { api, Agent, Brand } from '../api/client';
 import DocumentUploadWizard from '../components/KnowledgeBase/DocumentUploadWizard';
+import KnowledgeExplorer from '../components/KnowledgeBase/KnowledgeExplorer';
+import type { KnowledgeFolderSelection, UploadDocumentResponse } from '../types/knowledge';
 
 export default function KnowledgeBase() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showWizard, setShowWizard] = useState(false);
-  
-  // TODO: Get brand from context/URL params
-  const brandId = 'essco-bathware';
+  const [selectedUploadFolder, setSelectedUploadFolder] = useState<KnowledgeFolderSelection>({
+    id: null,
+    path: '/',
+    name: 'Knowledge Base',
+  });
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const handleUploadComplete = () => {
+  const requestedAgentId = searchParams.get('agent_id') || undefined;
+  const requestedBrandId = searchParams.get('brand_id') || undefined;
+
+  const { data: brands = [], isLoading: brandsLoading } = useQuery<Brand[]>({
+    queryKey: ['brands'],
+    queryFn: api.getBrands,
+  });
+  const { data: agent } = useQuery<Agent>({
+    queryKey: ['agent', requestedAgentId],
+    queryFn: () => api.getAgent(requestedAgentId!),
+    enabled: Boolean(requestedAgentId),
+  });
+
+  const brandId = agent?.brand_id || requestedBrandId || brands[0]?.id || '';
+  const brand = brands.find(item => item.id === brandId);
+
+  const handleUpload = (folder: KnowledgeFolderSelection) => {
+    setSelectedUploadFolder(folder);
+    setShowWizard(true);
+  };
+
+  const handleUploadComplete = (_response: UploadDocumentResponse) => {
     setShowWizard(false);
-    // TODO: Refresh document list
+    setRefreshKey(prev => prev + 1);
   };
 
   if (showWizard) {
     return (
-      <div>
+      <div className="max-w-6xl">
         <DocumentUploadWizard
           brandId={brandId}
+          agentId={requestedAgentId}
+          selectedFolder={selectedUploadFolder}
           onComplete={handleUploadComplete}
           onCancel={() => setShowWizard(false)}
         />
@@ -26,201 +57,55 @@ export default function KnowledgeBase() {
   }
 
   return (
-    <div>
-      <div className="sm:flex sm:items-center sm:justify-between">
+    <div className="space-y-3">
+      <div className="flex flex-col gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Knowledge Base</h1>
-          <p className="mt-2 text-sm text-gray-600">
-            Manage documents and structured knowledge for your AI agents
+          <p className="text-sm font-semibold text-gray-950">Knowledge Scope</p>
+          <p className="mt-1 text-xs leading-5 text-gray-500">
+            Knowledge is stored at workspace/brand level and can be filtered or attached to a specific agent.
           </p>
         </div>
-        <div className="mt-4 sm:mt-0">
-          <button
-            onClick={() => setShowWizard(true)}
-            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={brandId}
+            disabled={brandsLoading || Boolean(requestedAgentId)}
+            onChange={(event) => {
+              const next = new URLSearchParams(searchParams);
+              next.set('brand_id', event.target.value);
+              next.delete('agent_id');
+              setSearchParams(next);
+            }}
+            className="h-9 rounded-md border border-gray-300 bg-white px-3 text-sm outline-none focus:border-gray-500 focus:ring-1 focus:ring-gray-500 disabled:bg-gray-50 disabled:text-gray-500"
           >
-            <PlusIcon className="h-5 w-5 mr-2" />
-            Upload Document
-          </button>
+            {brands.length === 0 ? (
+              <option value="">No brand selected</option>
+            ) : brands.map(item => (
+              <option key={item.id} value={item.id}>{item.name}</option>
+            ))}
+          </select>
+          {requestedAgentId && (
+            <span className="rounded bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700">
+              Agent: {agent?.name || requestedAgentId}
+            </span>
+          )}
         </div>
       </div>
 
-      {/* Statistics Cards */}
-      <div className="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-3">
-        <div className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="p-5">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <svg
-                  className="h-6 w-6 text-gray-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                  />
-                </svg>
-              </div>
-              <div className="ml-5 w-0 flex-1">
-                <dl>
-                  <dt className="text-sm font-medium text-gray-500 truncate">
-                    Total Documents
-                  </dt>
-                  <dd className="text-3xl font-semibold text-gray-900">
-                    24
-                  </dd>
-                </dl>
-              </div>
-            </div>
-          </div>
+      {brandId ? (
+        <KnowledgeExplorer
+          key={`${brandId}-${requestedAgentId || 'workspace'}-${refreshKey}`}
+          brandId={brandId}
+          brandName={brand?.name}
+          agentId={requestedAgentId}
+          agentName={agent?.name}
+          mode={requestedAgentId ? 'agent' : 'workspace'}
+          onUpload={handleUpload}
+        />
+      ) : (
+        <div className="rounded-lg border border-dashed border-gray-300 bg-white p-8 text-center text-sm text-gray-500">
+          Create or select a brand before managing knowledge.
         </div>
-
-        <div className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="p-5">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <svg
-                  className="h-6 w-6 text-gray-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"
-                  />
-                </svg>
-              </div>
-              <div className="ml-5 w-0 flex-1">
-                <dl>
-                  <dt className="text-sm font-medium text-gray-500 truncate">
-                    Products
-                  </dt>
-                  <dd className="text-3xl font-semibold text-gray-900">
-                    12
-                  </dd>
-                </dl>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="p-5">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <svg
-                  className="h-6 w-6 text-gray-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"
-                  />
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"
-                  />
-                </svg>
-              </div>
-              <div className="ml-5 w-0 flex-1">
-                <dl>
-                  <dt className="text-sm font-medium text-gray-500 truncate">
-                    Dealers
-                  </dt>
-                  <dd className="text-3xl font-semibold text-gray-900">
-                    8
-                  </dd>
-                </dl>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Empty State / Document List */}
-      <div className="mt-8 bg-white shadow rounded-lg">
-        <div className="px-4 py-5 sm:p-6">
-          <div className="text-center py-12">
-            <svg
-              className="mx-auto h-12 w-12 text-gray-400"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-              />
-            </svg>
-            <h3 className="mt-2 text-sm font-medium text-gray-900">
-              No documents yet
-            </h3>
-            <p className="mt-1 text-sm text-gray-500">
-              Get started by uploading your first knowledge base document.
-            </p>
-            <div className="mt-6">
-              <button
-                onClick={() => setShowWizard(true)}
-                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
-              >
-                <PlusIcon className="h-5 w-5 mr-2" />
-                Upload Your First Document
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Information Panel */}
-      <div className="mt-6 rounded-md bg-blue-50 p-6">
-        <div className="flex">
-          <div className="flex-shrink-0">
-            <svg
-              className="h-6 w-6 text-blue-400"
-              fill="currentColor"
-              viewBox="0 0 20 20"
-            >
-              <path
-                fillRule="evenodd"
-                d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
-                clipRule="evenodd"
-              />
-            </svg>
-          </div>
-          <div className="ml-3 flex-1">
-            <h3 className="text-sm font-medium text-blue-800">
-              Why structured metadata matters
-            </h3>
-            <div className="mt-2 text-sm text-blue-700">
-              <p>
-                Adding structured metadata (like product SKUs, prices, and dealer contacts) 
-                ensures your AI agent provides <strong>accurate, hallucination-free responses</strong>. 
-                Without it, the AI might invent product details or incorrect contact information.
-              </p>
-              <ul className="mt-2 list-disc pl-5 space-y-1">
-                <li><strong>Products:</strong> Exact SKUs, prices, and features prevent the AI from making up product details</li>
-                <li><strong>Dealers:</strong> Verified contact information ensures users get real phone numbers and addresses</li>
-                <li><strong>FAQs & Guides:</strong> General content doesn't need structured data and will be processed automatically</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   );
 }

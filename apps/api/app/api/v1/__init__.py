@@ -3,6 +3,7 @@ API v1 Router
 """
 
 from fastapi import APIRouter, Depends
+from . import agent_api
 from .endpoints import messages, ingestion, status, knowledge, activity, catalog, public
 from .admin import router as admin_router
 from .auth import auth_router
@@ -21,6 +22,7 @@ api_router.include_router(status.router, prefix="/status", tags=["status"])
 api_router.include_router(activity.router, prefix="/activity", tags=["activity"])
 api_router.include_router(catalog.router, prefix="/catalog", tags=["catalog"])
 api_router.include_router(public.router, prefix="/public", tags=["public"])
+api_router.include_router(agent_api.router, prefix="/agent-api", tags=["agent-api"])
 
 # Include admin routers
 api_router.include_router(admin_router, prefix="/admin", tags=["admin"])

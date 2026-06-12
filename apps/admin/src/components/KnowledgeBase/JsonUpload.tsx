@@ -4,9 +4,12 @@ import ShopifyTab from './tabs/ShopifyTab';
 import JsonUrlTab from './tabs/JsonUrlTab';
 import CsvUploadTab from './tabs/CsvUploadTab';
 import ScrapeTab from './tabs/ScrapeTab';
+import type { ContentType } from '../../types/knowledge';
+
+type StructuredContentType = Exclude<ContentType, 'document'>;
 
 interface JsonUploadProps {
-  contentType: 'product' | 'dealer' | 'faq' | 'office' | 'category' | 'guide';
+  contentType: StructuredContentType;
   onUpload: (data: any[]) => void;
   onBack: () => void;
   brandId?: string;

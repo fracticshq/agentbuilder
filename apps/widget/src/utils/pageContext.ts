@@ -1,9 +1,11 @@
 import type { PageContext } from '../types';
 
 export function extractPageContext(): PageContext {
+  const pageUrl = new URL(window.location.href);
   const context: PageContext = {
     url: window.location.href,
     title: document.title,
+    path: pageUrl.pathname,
   };
 
   // Extract meta description
@@ -14,6 +16,24 @@ export function extractPageContext(): PageContext {
     };
   }
 
+  const sku = findMetaContent([
+    'meta[property="product:retailer_item_id"]',
+    'meta[name="sku"]',
+    'meta[itemprop="sku"]',
+  ]) || document.querySelector('[data-sku]')?.getAttribute('data-sku') || undefined;
+  if (sku) {
+    context.sku = sku;
+  }
+
+  const category = findMetaContent([
+    'meta[property="product:category"]',
+    'meta[name="category"]',
+    'meta[itemprop="category"]',
+  ]) || document.querySelector('[data-category]')?.getAttribute('data-category') || undefined;
+  if (category) {
+    context.category = category;
+  }
+
   // Extract main content (simplified version)
   const mainContent = extractMainContent();
   if (mainContent) {
@@ -21,6 +41,17 @@ export function extractPageContext(): PageContext {
   }
 
   return context;
+}
+
+function findMetaContent(selectors: string[]): string | undefined {
+  for (const selector of selectors) {
+    const element = document.querySelector(selector);
+    const content = element?.getAttribute('content');
+    if (content?.trim()) {
+      return content.trim();
+    }
+  }
+  return undefined;
 }
 
 function extractMainContent(): string {

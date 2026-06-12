@@ -5,6 +5,7 @@ interface StepBasicInfoProps {
     name: string;
     description: string;
     brand_id: string;
+    agent_template: string;
     purpose: string;
     role: string;
   };
@@ -13,6 +14,17 @@ interface StepBasicInfoProps {
 }
 
 export default function StepBasicInfo({ data, onChange, brands }: StepBasicInfoProps) {
+  const templates = [
+    { id: 'generic', name: 'Generic Agent', description: 'A blank portable agent for any workflow.' },
+    { id: 'customer_support', name: 'Customer Support', description: 'Answer policy, product, account, or service questions.' },
+    { id: 'research', name: 'Research Assistant', description: 'Synthesize knowledge, documents, and live context.' },
+    { id: 'sales', name: 'Sales Assistant', description: 'Qualify leads, explain offers, and guide next steps.' },
+    { id: 'hr', name: 'HR Assistant', description: 'Support internal policy, onboarding, and employee questions.' },
+    { id: 'legal', name: 'Legal Assistant', description: 'Help review governed documents and compliance context.' },
+    { id: 'coding', name: 'Coding Assistant', description: 'Work with code, technical docs, and engineering workflows.' },
+    { id: 'ecommerce', name: 'Ecommerce Assistant', description: 'Use catalog, dealer, Shopify, and product recommendation modules.' },
+  ];
+
   return (
     <div className="space-y-6">
       <div>
@@ -60,6 +72,29 @@ export default function StepBasicInfo({ data, onChange, brands }: StepBasicInfoP
       </div>
 
       <div>
+        <label className="block text-sm font-medium text-gray-700">
+          Agent Template
+        </label>
+        <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {templates.map(template => (
+            <button
+              key={template.id}
+              type="button"
+              onClick={() => onChange('agent_template', template.id)}
+              className={`rounded-md border p-3 text-left transition-colors ${
+                data.agent_template === template.id
+                  ? 'border-primary-500 bg-primary-50 text-primary-900'
+                  : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              <span className="block text-sm font-medium">{template.name}</span>
+              <span className="mt-1 block text-xs text-gray-500">{template.description}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div>
         <label htmlFor="description" className="block text-sm font-medium text-gray-700">
           Description *
         </label>
@@ -86,12 +121,15 @@ export default function StepBasicInfo({ data, onChange, brands }: StepBasicInfoP
             className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
           >
             <option value="">Select purpose</option>
+            <option value="general_assistant">General Assistant</option>
             <option value="customer_support">Customer Support</option>
             <option value="sales_assistant">Sales Assistant</option>
             <option value="technical_support">Technical Support</option>
+            <option value="research_assistant">Research Assistant</option>
+            <option value="operations_assistant">Operations Assistant</option>
+            <option value="knowledge_manager">Knowledge Manager</option>
             <option value="product_expert">Product Expert</option>
             <option value="booking_assistant">Booking Assistant</option>
-            <option value="general_assistant">General Assistant</option>
           </select>
         </div>
 

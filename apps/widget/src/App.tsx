@@ -38,6 +38,10 @@ function createSecureClientId(prefix: string): string {
   return `${prefix}_${value}`;
 }
 
+function getSessionStorageKey(agentId: string): string {
+  return `agent_widget_session_${agentId}`;
+}
+
 function getControlSecretStorageKey(conversationId: string): string {
   return `agent_widget_control_secret_${conversationId}`;
 }
@@ -88,8 +92,9 @@ function App({ config }: AppProps) {
     setExpanded(isFullscreen);
   }, [isFullscreen, setExpanded]);
 
-  // Persistent user_id
-  const [userId] = React.useState(() => {
+  // user_id is now issued by the server via the signed widget session below.
+  // Keep a local fallback only for the brief window before the session resolves.
+  const [userId, setUserId] = React.useState(() => {
     const stored = localStorage.getItem('agent_widget_user_id');
     if (stored) return stored;
     const newId = createSecureClientId('user');
@@ -262,21 +267,39 @@ function App({ config }: AppProps) {
     };
   }, [conversationId, agentId, humanTakeoverEnabled, setHumanInControl]);
 
-  // ── Initialize conversation ID ────────────────────────────────
+  // ── Establish a server-issued, signed session ─────────────────
+  // The server mints conversation_id + user_id bound to a signed token. We can
+  // no longer fabricate ids client-side; doing so is exactly the hijacking
+  // vector this closes. A stored token (valid 7d) resumes the same conversation.
   React.useEffect(() => {
-    if (isOpen && !conversationId && agentId) {
-      const storageKey = getConversationStorageKey(agentId);
-      const stored = sessionStorage.getItem(storageKey);
-      if (stored) {
-        setConversationId(stored);
-        setConvStartEvent('conversation_resumed');
-      } else {
-        const newConvId = createSecureClientId('conv');
-        setConversationId(newConvId);
-        sessionStorage.setItem(storageKey, newConvId);
-        setConvStartEvent('conversation_started');
+    if (!isOpen || conversationId || !agentId) return;
+
+    let cancelled = false;
+    const storageKey = getSessionStorageKey(agentId);
+    const priorToken = localStorage.getItem(storageKey) || undefined;
+    const resuming = Boolean(priorToken);
+
+    (async () => {
+      try {
+        const session = await apiClient.startSession(agentId, priorToken);
+        if (cancelled) return;
+        localStorage.setItem(storageKey, session.sessionToken);
+        apiClient.setSessionToken(session.sessionToken);
+        wsClient.setSessionToken(session.sessionToken);
+        setUserId(session.userId);
+        setConversationId(session.conversationId);
+        sessionStorage.setItem(getConversationStorageKey(agentId), session.conversationId);
+        setConvStartEvent(resuming ? 'conversation_resumed' : 'conversation_started');
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Failed to establish widget session:', err);
+        }
       }
-    }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, conversationId, agentId, setConversationId]);
 
   // ── Fire conversation lifecycle event once both IDs are ready ─
@@ -318,31 +341,43 @@ function App({ config }: AppProps) {
       return;
     }
     setIsTyping(true);
-    trackEvent({
-      event_type: 'message_sent',
-      actor_type: 'user',
-      actor_id: userId,
-      agent_id: agentId,
-      conversation_id: conversationId || `conv_${Date.now()}`,
-      page_context: extractPageContext(),
-    });
 
     const assistantMessageId = (Date.now() + 1).toString();
     let streamedContent = '';
 
     try {
       const context = extractPageContext();
-      const currentConvId = conversationId || createSecureClientId('conv');
-      if (!conversationId) {
-        setConversationId(currentConvId);
-        sessionStorage.setItem(getConversationStorageKey(agentId), currentConvId);
+
+      // Ensure a signed session exists. Conversation/user ids come from the
+      // server; the client can't mint them anymore.
+      let currentConvId = conversationId;
+      let currentUserId = userId;
+      if (!currentConvId) {
+        const storageKey = getSessionStorageKey(agentId);
+        const session = await apiClient.startSession(agentId, localStorage.getItem(storageKey) || undefined);
+        localStorage.setItem(storageKey, session.sessionToken);
+        wsClient.setSessionToken(session.sessionToken);
+        currentConvId = session.conversationId;
+        currentUserId = session.userId;
+        setUserId(session.userId);
+        setConversationId(session.conversationId);
+        sessionStorage.setItem(getConversationStorageKey(agentId), session.conversationId);
       }
+
+      trackEvent({
+        event_type: 'message_sent',
+        actor_type: 'user',
+        actor_id: currentUserId,
+        agent_id: agentId,
+        conversation_id: currentConvId,
+        page_context: extractPageContext(),
+      });
 
       addMessage({ id: assistantMessageId, content: '', role: 'assistant', timestamp: new Date(), citations: [] });
 
       const client = useWebSocket ? wsClient : apiClient;
       const response = await client.sendMessage(
-        { content: text, context, userId },
+        { content: text, context, userId: currentUserId },
         currentConvId,
         agentId,
         (chunk) => {

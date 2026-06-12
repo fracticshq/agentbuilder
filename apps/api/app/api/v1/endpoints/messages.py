@@ -2,10 +2,11 @@
 Messages API Endpoints
 """
 
-from typing import AsyncGenerator
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from typing import AsyncGenerator, Optional
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Header
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
+from pydantic import BaseModel, Field
 import json
 import asyncio
 import structlog
@@ -14,6 +15,12 @@ from urllib.parse import urlparse
 from commons.types.requests import MessageRequest
 from commons.types.responses import MessageResponse, StreamingMessageResponse
 from ....auth.admin_key import is_admin_key_authorized
+from ....auth.widget_session import (
+    WidgetSession,
+    decode_widget_session,
+    encode_widget_session,
+    issue_widget_session,
+)
 from ....connections import connection_manager
 from ....dependencies import get_message_service, get_settings
 from ....security.rate_limiter import check_named_rate_limit
@@ -24,6 +31,26 @@ from ....websocket_manager import ws_manager
 logger = structlog.get_logger()
 router = APIRouter()
 WS_POLICY_VIOLATION = 1008
+
+
+class SessionRequest(BaseModel):
+    """Request to start or resume a widget chat session."""
+    agent_id: str = Field(..., min_length=1)
+    session_token: Optional[str] = None
+
+
+class SessionResponse(BaseModel):
+    """Server-issued, signed session bound to one conversation + user + agent."""
+    conversation_id: str
+    user_id: str
+    session_token: str
+
+
+def _bind_request_to_session(request: MessageRequest, session: WidgetSession) -> None:
+    """Force the request to act on the token's conversation/user, ignoring client-supplied ids."""
+    request.conversation_id = session.conversation_id
+    request.user_id = session.user_id
+    request.agent_id = session.agent_id
 
 
 async def _close_websocket(websocket: WebSocket, reason: str) -> None:
@@ -159,16 +186,70 @@ def _origin_matches_base_url(origin: str | None, base_url: str | None) -> bool:
     )
 
 
+async def _require_widget_session(
+    request: MessageRequest,
+    token: Optional[str],
+) -> WidgetSession:
+    """Validate the widget session token and bind the request to its identity.
+
+    Raises 401 if the token is missing or invalid. The token is the only source
+    of truth for conversation_id / user_id, so a caller cannot address another
+    visitor's conversation by guessing or replaying an id.
+    """
+    session = decode_widget_session(token, expected_agent_id=request.agent_id)
+    if session is None:
+        raise HTTPException(
+            status_code=401,
+            detail="A valid widget session token is required. Start a session at POST /messages/session.",
+        )
+    _bind_request_to_session(request, session)
+    return session
+
+
+@router.post("/session", response_model=SessionResponse)
+async def start_session(request: SessionRequest):
+    """Start or resume a widget chat session.
+
+    Returns a signed token bound to a server-generated conversation_id and
+    user_id. Presenting a still-valid token resumes the same conversation
+    (preserving short-term and episodic memory); otherwise a fresh identity is
+    minted. The agent must exist and be active.
+    """
+    system_db = connection_manager.get_system_db()
+    agent = await system_db.agents.find_one(
+        {"id": request.agent_id, "status": "active"}, {"id": 1}
+    )
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found or not active")
+
+    existing = decode_widget_session(request.session_token, expected_agent_id=request.agent_id)
+    if existing is not None:
+        token = encode_widget_session(existing)
+        session = existing
+    else:
+        token, session = issue_widget_session(request.agent_id)
+
+    return SessionResponse(
+        conversation_id=session.conversation_id,
+        user_id=session.user_id,
+        session_token=token,
+    )
+
+
 @router.post("/", response_model=MessageResponse)
 async def send_message(
     request: MessageRequest,
-    message_service: MessageService = Depends(get_message_service)
+    message_service: MessageService = Depends(get_message_service),
+    x_widget_session: Optional[str] = Header(None),
 ):
     """Send a message and get a response."""
     try:
+        await _require_widget_session(request, x_widget_session)
         await _enforce_message_rate_limit(request, "widget_chat", "POST:/messages")
         response = await message_service.process_message(request)
         return response
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error processing message", error=str(e))
         raise HTTPException(status_code=500, detail="Error processing message")
@@ -177,9 +258,11 @@ async def send_message(
 @router.post("/stream")
 async def stream_message(
     request: MessageRequest,
-    message_service: MessageService = Depends(get_message_service)
+    message_service: MessageService = Depends(get_message_service),
+    x_widget_session: Optional[str] = Header(None),
 ):
     """Send a message and get a streaming response."""
+    await _require_widget_session(request, x_widget_session)
     await _enforce_message_rate_limit(request, "widget_stream", "POST:/messages/stream")
 
     async def generate_stream():
@@ -234,6 +317,7 @@ async def websocket_endpoint(
                     if not await _safe_send_text(websocket, json.dumps({"type": "pong"})):
                         return
                     continue
+                session_token = request_data.pop("session_token", None)
                 request = MessageRequest(**request_data)
             except (json.JSONDecodeError, ValueError) as e:
                 if not await _safe_send_text(websocket, json.dumps({
@@ -242,6 +326,17 @@ async def websocket_endpoint(
                 })):
                     return
                 continue
+
+            # Bind to the signed session; ignore any client-supplied ids.
+            session = decode_widget_session(session_token, expected_agent_id=request.agent_id)
+            if session is None:
+                if not await _safe_send_text(websocket, json.dumps({
+                    "type": "error",
+                    "content": "A valid widget session token is required.",
+                })):
+                    return
+                continue
+            _bind_request_to_session(request, session)
             
             # Process message and stream response
             try:

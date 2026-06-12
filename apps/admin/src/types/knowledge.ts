@@ -1,6 +1,6 @@
 // TypeScript types for Knowledge Base documents
 
-export type ContentType = 'product' | 'dealer' | 'faq' | 'office' | 'category' | 'guide';
+export type ContentType = 'product' | 'dealer' | 'faq' | 'office' | 'category' | 'guide' | 'document';
 
 export interface ProductData {
   sku: string;
@@ -51,6 +51,9 @@ export interface DocumentSummary {
   created_at?: string;
   is_legacy?: boolean;      // True for old documents without job_id
   status?: 'ready' | 'processing' | 'error';
+  folder_id?: string | null;
+  folder_path?: string;
+  path?: string;
 }
 
 export interface DocumentPreviewSample {
@@ -80,6 +83,9 @@ export interface UploadDocumentRequest {
   product_data?: ProductData;
   dealer_data?: DealerData;
   brand_id: string;
+  agent_id?: string;
+  folder_id?: string | null;
+  folder_path?: string;
 }
 
 export interface UploadDocumentResponse {
@@ -101,4 +107,89 @@ export interface UploadJobStatus {
     total_chunks?: number;
   };
   error?: string;
+}
+
+export type KnowledgeItemKind = 'folder' | 'document' | 'file';
+export type KnowledgeItemStatus = 'ready' | 'processing' | 'error' | 'pending';
+
+export interface KnowledgeFolderSelection {
+  id?: string | null;
+  path: string;
+  name?: string;
+}
+
+export interface KnowledgeItem {
+  id: string;
+  name: string;
+  kind: KnowledgeItemKind;
+  path: string;
+  parent_id?: string | null;
+  content_type?: string;
+  chunks_count?: number;
+  item_count?: number;
+  status?: KnowledgeItemStatus;
+  created_at?: string;
+  updated_at?: string;
+  size_bytes?: number;
+  source_doc_id?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface KnowledgeFolderNode {
+  id: string | null;
+  name: string;
+  path: string;
+  parent_id?: string | null;
+  children?: KnowledgeFolderNode[];
+  items?: KnowledgeItem[];
+  documents?: DocumentSummary[];
+}
+
+export interface KnowledgeTreeResponse {
+  root: KnowledgeFolderNode;
+  items?: KnowledgeItem[];
+  documents?: DocumentSummary[];
+}
+
+export interface CreateKnowledgeFolderRequest {
+  name: string;
+  brand_id?: string;
+  parent_id?: string | null;
+  parent_path?: string;
+}
+
+export interface MoveKnowledgeItemRequest {
+  brand_id?: string;
+  parent_id?: string | null;
+  folder_path?: string;
+}
+
+export interface RenameKnowledgeItemRequest {
+  brand_id?: string;
+  name: string;
+}
+
+export interface RetrieveKnowledgeRequest {
+  query: string;
+  brand_id?: string;
+  agent_id?: string;
+  folder_id?: string | null;
+  folder_path?: string;
+  top_k?: number;
+  score_threshold?: number;
+}
+
+export interface RetrievedKnowledgeChunk {
+  id?: string;
+  doc_id?: string;
+  title?: string;
+  content: string;
+  score?: number;
+  path?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface RetrieveKnowledgeResponse {
+  query: string;
+  results: RetrievedKnowledgeChunk[];
 }

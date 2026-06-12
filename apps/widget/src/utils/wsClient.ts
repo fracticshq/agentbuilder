@@ -33,6 +33,12 @@ export class WebSocketClient {
   private pendingCallback: ((chunk: StreamingMessage) => void) | null = null;
   private accumulatedContent = '';
   private pendingMeta: Partial<Pick<Message, 'citations' | 'products' | 'dealers'>> = {};
+  private sessionToken?: string;
+
+  /** Hold the signed session token included with every outbound message frame. */
+  setSessionToken(token: string | undefined): void {
+    this.sessionToken = token;
+  }
 
   constructor(baseUrl: string, options: WebSocketClientOptions = {}) {
     this.baseUrl = baseUrl;
@@ -242,6 +248,7 @@ export class WebSocketClient {
         agent_id: agentId,
         page_context: request.context,
         stream: true,
+        session_token: this.sessionToken,
       }));
     });
   }

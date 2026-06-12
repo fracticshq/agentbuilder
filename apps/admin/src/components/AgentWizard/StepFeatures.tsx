@@ -43,9 +43,9 @@ export default function StepFeatures({ data, onChange }: StepFeaturesProps) {
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-lg font-medium text-gray-900">Rules & Compliance</h3>
+        <h3 className="text-lg font-medium text-gray-900">Memory & Responsible AI</h3>
         <p className="mt-1 text-sm text-gray-600">
-          Configure runtime rules, compliance controls, and user-facing safety behavior.
+          Configure conversation memory, runtime rules, compliance controls, and user-facing safety behavior.
         </p>
       </div>
 
@@ -113,7 +113,7 @@ export default function StepFeatures({ data, onChange }: StepFeaturesProps) {
                 Conversation Memory
               </label>
               <p className="text-xs text-gray-500">
-                Remember context from previous messages in the conversation
+                Remember context from previous messages in the active conversation.
               </p>
             </div>
             <input

@@ -9,7 +9,7 @@ import structlog
 
 from commons.types.requests import IngestionRequest
 from commons.types.responses import IngestionResponse, IngestionStatus
-from ....dependencies import get_ingestion_service
+from ....dependencies import get_settings, get_ingestion_service
 from ....services.ingestion_service import IngestionService
 from ....auth.dependencies import require_dashboard_access
 
@@ -51,20 +51,27 @@ async def upload_documents(
         # Validate file types
         allowed_types = {
             "text/plain", "text/markdown", "application/pdf",
-            "text/html", "application/json"
+            "text/html", "application/json", "text/csv",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         }
-        
+
         for file in files:
             if file.content_type not in allowed_types:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Unsupported file type: {file.content_type}"
                 )
-        
+
         # Read file contents before starting background task
+        max_file_bytes = get_settings().MAX_FILE_SIZE_MB * 1024 * 1024
         file_contents = []
         for file in files:
             content = await file.read()
+            if len(content) > max_file_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File {file.filename} exceeds the {get_settings().MAX_FILE_SIZE_MB}MB upload limit"
+                )
             file_contents.append({
                 'content': content,
                 'filename': file.filename,

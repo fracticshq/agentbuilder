@@ -170,10 +170,13 @@ class Settings(BaseSettings):
     # CORS Configuration
     CORS_ALLOW_ORIGINS: Union[str, List[str]] = [
         "http://localhost:3000",
+        "http://localhost:3010",
         "http://localhost:1337",  # Strapi dashboard
         "http://localhost:3001",  # Admin Dashboard
         "http://localhost:5173",  # Strapi Vite HMR
         "http://localhost:5174",  # Widget
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3010",
         "http://127.0.0.1:3001",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174"

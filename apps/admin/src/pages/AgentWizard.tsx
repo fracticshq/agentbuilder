@@ -4,25 +4,22 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, AzureOpenAIDeploymentsResponse, Brand, CreateAgentRequest } from '../api/client';
 import { showErrorAlert } from '../api/errorHandler';
 
-// Import wizard components
-import WizardNavigation from '../components/AgentWizard/WizardNavigation';
-import StepBasicInfo from '../components/AgentWizard/StepBasicInfo';
-import StepLLMConfig from '../components/AgentWizard/StepLLMConfig';
-import StepSystemPrompt from '../components/AgentWizard/StepSystemPrompt';
-import StepKnowledgeBase from '../components/AgentWizard/StepKnowledgeBase';
-import StepRAGConfig from '../components/AgentWizard/StepRAGConfig';
-import StepFeatures from '../components/AgentWizard/StepFeatures';
-import StepReview from '../components/AgentWizard/StepReview';
+import AgentStudioShell from '../components/AgentStudio/AgentStudioShell';
+import AgentConfigForm from '../components/AgentStudio/AgentConfigForm';
+import AgentCapabilityRail from '../components/AgentStudio/AgentCapabilityRail';
+import AgentSetupPanel from '../components/AgentStudio/AgentSetupPanel';
+import AgentManagePanel from '../components/AgentStudio/AgentManagePanel';
+import AgentJsonModal from '../components/AgentStudio/AgentJsonModal';
+import AgentApiPanel from '../components/AgentStudio/AgentApiPanel';
+import VersionHistoryPanel from '../components/AgentStudio/VersionHistoryPanel';
 import {
   AZURE_OPENAI_PROVIDER,
   getDefaultDeployment,
   isAzureOpenAIProvider,
 } from '../utils/llmOptions';
-import { buildEmbedCode, buildWidgetUrl, getWidgetBaseUrl } from '../utils/widget';
+import { buildWidgetUrl } from '../utils/widget';
 
 const isDev = process.env.NODE_ENV !== 'production';
-
-type StepStatus = 'complete' | 'current' | 'upcoming';
 
 function parseStructuredField(value: string, fallback: any): any {
   if (!value?.trim()) {
@@ -36,11 +33,96 @@ function parseStructuredField(value: string, fallback: any): any {
   }
 }
 
+const CAPABILITY_RESERVED_KEYS = new Set([
+  'enabled',
+  'selected',
+  'selected_skill_ids',
+  'selected_tool_ids',
+  'enabled_skills',
+  'enabled_tools',
+]);
+
+function isPlainObject(value: any): value is Record<string, any> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function uniqueStringArray(values: any): string[] {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  return Array.from(new Set(
+    values
+      .map(value => String(value || '').trim())
+      .filter(Boolean)
+  ));
+}
+
+function extractSelectedCapabilityIds(config: any, idField: 'skill_id' | 'tool_id'): string[] {
+  if (Array.isArray(config)) {
+    return uniqueStringArray(
+      config.map(entry => {
+        if (typeof entry === 'string') {
+          return entry;
+        }
+        if (isPlainObject(entry) && entry.enabled !== false) {
+          return entry[idField] || entry.id;
+        }
+        return '';
+      })
+    );
+  }
+
+  if (!isPlainObject(config)) {
+    return [];
+  }
+
+  const selected = uniqueStringArray(
+    config.selected || config[`selected_${idField === 'skill_id' ? 'skill_ids' : 'tool_ids'}`] || config[idField === 'skill_id' ? 'enabled_skills' : 'enabled_tools']
+  );
+  if (selected.length > 0) {
+    return selected;
+  }
+
+  return uniqueStringArray(
+    Object.entries(config).map(([key, value]) => {
+      if (CAPABILITY_RESERVED_KEYS.has(key) || !isPlainObject(value) || !value.enabled) {
+        return '';
+      }
+      return value[idField] || value.id || key;
+    })
+  );
+}
+
+function buildCapabilityConfig(existingConfig: any, selectedIds: string[], idField: 'skill_id' | 'tool_id') {
+  const selected = uniqueStringArray(selectedIds);
+  const selectedSet = new Set(selected);
+  const next: Record<string, any> = isPlainObject(existingConfig) ? { ...existingConfig } : {};
+
+  Object.keys(next).forEach(key => {
+    if (CAPABILITY_RESERVED_KEYS.has(key) || !isPlainObject(next[key])) {
+      return;
+    }
+    const entryId = String(next[key][idField] || next[key].id || key);
+    next[key] = {
+      ...next[key],
+      [idField]: next[key][idField] || entryId,
+      enabled: selectedSet.has(entryId),
+    };
+  });
+
+  return {
+    ...next,
+    enabled: selected.length > 0,
+    selected,
+  };
+}
+
 interface AgentData {
   // Basic Info
   name: string;
   description: string;
   brand_id: string;
+  agent_template: string;
   purpose: string;
   role: string;
 
@@ -90,12 +172,28 @@ interface AgentData {
   shopify_shop_url: string;
   shopify_access_token: string;
   shopify_access_token_configured: boolean;
+  api_data_source_enabled: boolean;
+  api_data_source_name: string;
+  api_data_source_url: string;
+  api_data_source_auth_header: string;
+  api_data_source_auth_header_configured: boolean;
+  api_data_source_usage: string;
+  url_context_boost_enabled: boolean;
+
+  // Skills, Tools, Agent API
+  selected_skill_ids: string[];
+  selected_tool_ids: string[];
+  agent_api_enabled: boolean;
+  agent_api_key_ids: string[];
+  agent_api_allowed_origins: string;
+  agent_api_require_key: boolean;
 
   // Features
   websockets: boolean;
   file_upload: boolean;
   human_takeover: boolean;
   conversation_memory: boolean;
+  long_term_memory: boolean;
   typing_indicators: boolean;
   response_streaming: boolean;
   show_sources: boolean;
@@ -113,6 +211,7 @@ const initialData: AgentData = {
   name: '',
   description: '',
   brand_id: '',
+  agent_template: 'generic',
   purpose: '',
   role: '',
 
@@ -137,15 +236,7 @@ const initialData: AgentData = {
   }, null, 2),
   data_source_policy: JSON.stringify({
     default_sources: ['knowledge_base'],
-    task_overrides: {
-      product_recommendation: {
-        required_sources: ['products'],
-        optional_sources: ['faq']
-      },
-      dealer_lookup: {
-        required_sources: ['dealers']
-      }
-    }
+    task_overrides: {}
   }, null, 2),
   runtime_variables_schema: JSON.stringify({
     page_context: {
@@ -180,12 +271,28 @@ const initialData: AgentData = {
   shopify_shop_url: '',
   shopify_access_token: '',
   shopify_access_token_configured: false,
+  api_data_source_enabled: false,
+  api_data_source_name: '',
+  api_data_source_url: '',
+  api_data_source_auth_header: '',
+  api_data_source_auth_header_configured: false,
+  api_data_source_usage: '',
+  url_context_boost_enabled: true,
+
+  // Skills, Tools, Agent API
+  selected_skill_ids: [],
+  selected_tool_ids: [],
+  agent_api_enabled: false,
+  agent_api_key_ids: [],
+  agent_api_allowed_origins: '',
+  agent_api_require_key: true,
 
   // Features
   websockets: true,
   file_upload: false,
   human_takeover: true,
   conversation_memory: true,
+  long_term_memory: false,
   typing_indicators: true,
   response_streaming: true,
   show_sources: false,
@@ -198,25 +305,17 @@ const initialData: AgentData = {
   max_file_size: 10,
 };
 
-const steps = [
-  { id: 1, name: 'Identity', description: 'DUTIES.md and agent role' },
-  { id: 2, name: 'Model & Runtime', description: 'agent.yaml settings' },
-  { id: 3, name: 'Soul', description: 'SOUL.md personality' },
-  { id: 4, name: 'Tools & Sources', description: 'tools/ and source config' },
-  { id: 5, name: 'Knowledge', description: 'knowledge/ workspace' },
-  { id: 6, name: 'Rules & Compliance', description: 'RULES.md and compliance/' },
-  { id: 7, name: 'Package Review', description: 'Portable agent summary' },
-];
-
 export default function AgentWizard() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const [currentStep, setCurrentStep] = useState(1);
   const [agentData, setAgentData] = useState<AgentData>(initialData);
   const [isDeploying, setIsDeploying] = useState(false);
-  const [copiedEmbed, setCopiedEmbed] = useState(false);
+  const [jsonOpen, setJsonOpen] = useState(false);
+  const [agentApiOpen, setAgentApiOpen] = useState(false);
+  const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const normalizeAzureLlmState = (data: Partial<AgentData>): Partial<AgentData> => {
     const shouldPreserveModel = isAzureOpenAIProvider(data.provider);
@@ -235,7 +334,6 @@ export default function AgentWizard() {
         try {
           const parsed = JSON.parse(savedDraft);
           setAgentData(prev => ({ ...prev, ...normalizeAzureLlmState(parsed.data || {}) }));
-          setCurrentStep(parsed.step || 1);
         } catch (e) {
           console.error('Failed to load draft:', e);
         }
@@ -248,11 +346,10 @@ export default function AgentWizard() {
     if (!id && agentData.name) {
       localStorage.setItem('agent_wizard_draft', JSON.stringify({
         data: agentData,
-        step: currentStep,
         savedAt: new Date().toISOString()
       }));
     }
-  }, [agentData, currentStep, id]);
+  }, [agentData, id]);
 
   // Fetch brands for brand selection
   const { data: brands = [] } = useQuery<Brand[]>({
@@ -348,8 +445,14 @@ export default function AgentWizard() {
       const personality = config.personality || {};
       const rag = config.rag || {};
       const features = config.features || {};
+      const memory = config.memory || {};
       const security = config.security || {};
+      const domain = config.domain || {};
       const promptLayers = config.prompt_layers || {};
+      const agentApiConfig = config.agent_api || {};
+      const apiDataSource = config.api_data_source || {};
+      const selectedSkillIds = extractSelectedCapabilityIds(config.skills, 'skill_id');
+      const selectedToolIds = extractSelectedCapabilityIds(config.tools, 'tool_id');
 
       // Map backend structure to wizard state
       const mappedData: Partial<AgentData> = {
@@ -357,6 +460,7 @@ export default function AgentWizard() {
         name: existingAgent.name,
         description: existingAgent.description,
         brand_id: existingAgent.brand_id,
+        agent_template: domain.template || domain.type || config.agent_template || 'generic',
         purpose: existingAgent.metadata?.purpose || '',
         role: existingAgent.metadata?.role || '',
 
@@ -374,6 +478,23 @@ export default function AgentWizard() {
         shopify_shop_url: config.shopify?.shop_url || '',
         shopify_access_token: config.shopify?.access_token || '',
         shopify_access_token_configured: Boolean(config.shopify?.access_token_configured),
+        api_data_source_enabled: apiDataSource.enabled ?? false,
+        api_data_source_name: apiDataSource.name || '',
+        api_data_source_url: apiDataSource.url || '',
+        api_data_source_auth_header: apiDataSource.auth_header || '',
+        api_data_source_auth_header_configured: Boolean(apiDataSource.auth_header_configured),
+        api_data_source_usage: apiDataSource.usage || '',
+        url_context_boost_enabled: config.url_context_boost?.enabled ?? true,
+
+        // Skills, Tools, Agent API
+        selected_skill_ids: selectedSkillIds,
+        selected_tool_ids: selectedToolIds,
+        agent_api_enabled: agentApiConfig.enabled ?? false,
+        agent_api_key_ids: Array.isArray(agentApiConfig.key_ids) ? agentApiConfig.key_ids : [],
+        agent_api_allowed_origins: Array.isArray(agentApiConfig.allowed_origins)
+          ? agentApiConfig.allowed_origins.join('\n')
+          : agentApiConfig.allowed_origins || '',
+        agent_api_require_key: agentApiConfig.require_key ?? true,
 
         // System Prompt
         system_prompt: typeof promptLayers.soul === 'string'
@@ -409,7 +530,8 @@ export default function AgentWizard() {
         websockets: features.websockets ?? true,
         file_upload: features.file_upload?.enabled ?? features.file_upload ?? false,
         human_takeover: features.human_takeover ?? false,
-        conversation_memory: features.conversation_memory ?? true,
+        conversation_memory: memory.short_term?.enabled ?? features.conversation_memory ?? true,
+        long_term_memory: memory.long_term?.enabled ?? false,
         typing_indicators: features.typing_indicators ?? true,
         response_streaming: features.response_streaming ?? true,
         show_sources: features.show_sources ?? false,
@@ -458,62 +580,38 @@ export default function AgentWizard() {
   }, [agentData.model, azureDeployments]);
 
   const updateStepData = (field: string, value: any) => {
+    const templateDefaults: Partial<AgentData> = field === 'agent_template' && value === 'astrology_lalkitab' ? {
+      role: agentData.role || 'You are an expert LalKitab and Vedic astrology advisor.',
+      purpose: agentData.purpose || 'Help users understand LalKitab-style guidance using configured astrology API context and approved knowledge sources.',
+      system_prompt: agentData.system_prompt || [
+        'You are an expert LalKitab astrologer with deep knowledge of LalKitab principles, Vedic astrology fundamentals, planetary influences, houses, remedies, and practical life guidance.',
+        '',
+        'Ask for missing birth date, birth time, and birth place before giving chart-specific guidance. Use the configured API Data Source when chart or remedy context is required. Do not fabricate chart placements or API results. Explain source limits clearly and keep guidance practical, respectful, and non-deterministic.',
+      ].join('\n'),
+      api_data_source_enabled: true,
+      selected_skill_ids: Array.from(new Set([...(agentData.selected_skill_ids || []), 'knowledge_qa', 'api_data_lookup'])),
+    } : field === 'agent_template' && value === 'ecommerce_sales' ? {
+      role: agentData.role || 'You are an expert ecommerce sales assistant.',
+      purpose: agentData.purpose || 'Help shoppers choose products using catalog data, page context, and approved brand knowledge.',
+      system_prompt: agentData.system_prompt || 'You are a helpful ecommerce sales agent. Use product catalog, current page context, inventory, policies, and approved knowledge before recommending products. Ask concise follow-up questions when user needs are unclear.',
+      url_context_boost_enabled: true,
+      show_product_cards: true,
+      selected_skill_ids: Array.from(new Set([...(agentData.selected_skill_ids || []), 'knowledge_qa', 'product_recommendation', 'url_context_boost'])),
+    } : {};
+
     setAgentData(prev => ({
       ...prev,
+      ...templateDefaults,
       [field]: value,
+      ...(field === 'agent_template' && value !== 'ecommerce' && value !== 'ecommerce_sales' && prev.data_source === 'shopify' ? { data_source: 'none' as const } : {}),
       ...(field === 'provider' ? { provider: AZURE_OPENAI_PROVIDER } : {}),
     }));
-  };
-
-  const getStepStatus = (stepNumber: number): StepStatus => {
-    if (stepNumber < currentStep) return 'complete';
-    if (stepNumber === currentStep) return 'current';
-    return 'upcoming';
-  };
-
-  const stepsWithStatus = steps.map(step => ({
-    ...step,
-    status: getStepStatus(step.id)
-  }));
-
-  const nextStep = () => {
-    if (currentStep < 7) {
-      setCurrentStep(currentStep + 1);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
-  };
-
-  const prevStep = () => {
-    if (currentStep > 1) {
-      setCurrentStep(currentStep - 1);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
-  };
-
-  const handleCancel = () => {
-    if (agentData.name || agentData.description) {
-      const confirmLeave = window.confirm(
-        'You have unsaved changes. Your progress has been saved as a draft. Are you sure you want to leave?'
-      );
-      if (confirmLeave) {
-        navigate('/agents');
-      }
-    } else {
-      navigate('/agents');
-    }
-  };
-
-  const clearDraft = () => {
-    if (window.confirm('Are you sure you want to clear the saved draft and start fresh?')) {
-      localStorage.removeItem('agent_wizard_draft');
-      setAgentData(initialData);
-      setCurrentStep(1);
-    }
   };
 
   const handleDeploy = async () => {
     setIsDeploying(true);
     try {
+      const existingConfiguration = existingAgent?.configuration || {};
       // Transform wizard data to API format
       const apiPayload: CreateAgentRequest = {
         brand_id: agentData.brand_id,
@@ -554,6 +652,17 @@ export default function AgentWizard() {
             data_source_policy: parseStructuredField(agentData.data_source_policy, {}),
             runtime_variables_schema: parseStructuredField(agentData.runtime_variables_schema, {}),
           },
+          manifest: {
+            version: 'agentbuilder/v1',
+            kind: 'agent',
+            portable: true,
+          },
+          domain: {
+            type: (agentData.agent_template === 'ecommerce' || agentData.agent_template === 'ecommerce_sales')
+              ? 'ecommerce'
+              : (agentData.agent_template === 'astrology_lalkitab' ? 'astrology' : 'generic'),
+            template: agentData.agent_template || 'generic',
+          },
           rag: agentData.data_source === 'rag' ? {
             enabled: true,
             embedding: {
@@ -582,6 +691,38 @@ export default function AgentWizard() {
             shop_url: agentData.shopify_shop_url,
             access_token: agentData.shopify_access_token,
           } : undefined,
+          api_data_source: {
+            enabled: agentData.api_data_source_enabled,
+            name: agentData.api_data_source_name,
+            url: agentData.api_data_source_url,
+            auth_header: agentData.api_data_source_auth_header,
+            usage: agentData.api_data_source_usage,
+          },
+          url_context_boost: {
+            enabled: agentData.url_context_boost_enabled,
+          },
+          memory: {
+            short_term: {
+              enabled: agentData.conversation_memory,
+              mode: 'conversation_history',
+              retention: 'session',
+            },
+            long_term: {
+              enabled: agentData.long_term_memory,
+              status: agentData.long_term_memory ? 'enabled' : 'needs_privacy_setup',
+            },
+          },
+          skills: buildCapabilityConfig(existingConfiguration.skills, agentData.selected_skill_ids, 'skill_id'),
+          tools: buildCapabilityConfig(existingConfiguration.tools, agentData.selected_tool_ids, 'tool_id'),
+          agent_api: {
+            enabled: agentData.agent_api_enabled,
+            key_ids: agentData.agent_api_key_ids,
+            allowed_origins: agentData.agent_api_allowed_origins
+              .split(/[\n,]/)
+              .map(origin => origin.trim())
+              .filter(Boolean),
+            require_key: agentData.agent_api_require_key,
+          },
           features: {
             websockets: agentData.websockets,
             file_upload: agentData.file_upload ? {
@@ -648,8 +789,8 @@ export default function AgentWizard() {
       // Clear the draft
       localStorage.removeItem('agent_wizard_draft');
 
-      // Navigate to agents list with deployment success state
-      navigate('/agents', {
+      // Navigate to the manage surface with deployment success state
+      navigate(`/agents/${createdAgent.id}`, {
         state: {
           deployedAgent: {
             id: createdAgent.id,
@@ -671,198 +812,142 @@ export default function AgentWizard() {
     }
   };
 
-  const widgetBaseUrl = getWidgetBaseUrl();
-  const embedCode = id ? buildEmbedCode(widgetBaseUrl, id) : '';
-
-  const handleCopyEmbedCode = async () => {
-    if (!embedCode) return;
-
+  const handleExport = async () => {
+    if (!id) return;
+    setExportError(null);
     try {
-      await navigator.clipboard.writeText(embedCode);
-    } catch {
-      const textarea = document.createElement('textarea');
-      textarea.value = embedCode;
-      textarea.setAttribute('readonly', 'true');
-      textarea.style.position = 'fixed';
-      textarea.style.opacity = '0';
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textarea);
+      const blob = await api.exportAgentManifest(id);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${agentData.name || 'agent'}-manifest.zip`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (error: any) {
+      setExportError(error?.message || 'Failed to export agent manifest.');
     }
-
-    setCopiedEmbed(true);
-    window.setTimeout(() => setCopiedEmbed(false), 2000);
   };
 
-  const renderCurrentStep = () => {
-    switch (currentStep) {
-      case 1:
-        return (
-          <StepBasicInfo
-            data={agentData}
-            onChange={updateStepData}
-            brands={brands}
-          />
-        );
-      case 2:
-        return (
-          <StepLLMConfig
-            data={agentData}
-            onChange={updateStepData}
-          />
-        );
-      case 3:
-        return (
-          <StepSystemPrompt
-            data={agentData}
-            onChange={updateStepData}
-            brandVoice={brands.find((b: Brand) => b.id === agentData.brand_id)?.brand_voice}
-          />
-        );
-      case 4:
-        return (
-          <StepRAGConfig
-            data={agentData}
-            onChange={updateStepData}
-            brandId={agentData.brand_id}
-          />
-        );
-      case 5:
-        return (
-          <StepKnowledgeBase
-            data={agentData}
-            onChange={updateStepData}
-            agentId={id}
-            brandId={agentData.brand_id}
-          />
-        );
-      case 6:
-        return (
-          <StepFeatures
-            data={agentData}
-            onChange={updateStepData}
-          />
-        );
-      case 7:
-        return (
-          <StepReview
-            data={agentData}
-            onTest={() => { }}
-            onDeploy={handleDeploy}
-            isDeploying={isDeploying}
-            brands={brands}
-            agentId={id}
-            deployments={azureDeployments?.deployments || []}
-          />
-        );
-      default:
-        return null;
-    }
+  const viewJsonData = {
+    id: id || null,
+    mode: id ? 'manage' : 'create',
+    agent: {
+      name: agentData.name,
+      description: agentData.description,
+      brand_id: agentData.brand_id,
+      template: agentData.agent_template,
+      purpose: agentData.purpose,
+      role: agentData.role,
+      system_prompt: agentData.system_prompt,
+    },
+    configuration: {
+      llm: {
+        provider: agentData.provider,
+        model: agentData.model,
+        temperature: agentData.temperature,
+        max_tokens: agentData.max_tokens,
+      },
+      data_source: agentData.data_source,
+      skills: { selected: agentData.selected_skill_ids },
+      tools: { selected: agentData.selected_tool_ids },
+      agent_api: {
+        enabled: agentData.agent_api_enabled,
+        key_ids: agentData.agent_api_key_ids,
+        allowed_origins: agentData.agent_api_allowed_origins,
+        require_key: agentData.agent_api_require_key,
+      },
+      api_data_source: {
+        enabled: agentData.api_data_source_enabled,
+        name: agentData.api_data_source_name,
+        url: agentData.api_data_source_url,
+        usage: agentData.api_data_source_usage,
+      },
+      url_context_boost: {
+        enabled: agentData.url_context_boost_enabled,
+      },
+      features: {
+        conversation_memory: agentData.conversation_memory,
+        file_upload: agentData.file_upload,
+        human_takeover: agentData.human_takeover,
+        response_streaming: agentData.response_streaming,
+        show_sources: agentData.show_sources,
+        content_filtering: agentData.content_filtering,
+      },
+      memory: {
+        short_term: {
+          enabled: agentData.conversation_memory,
+          mode: 'conversation_history',
+          retention: 'session',
+        },
+        long_term: {
+          enabled: agentData.long_term_memory,
+          status: agentData.long_term_memory ? 'enabled' : 'needs_privacy_setup',
+        },
+      },
+    },
   };
 
   return (
-    <div className="max-w-4xl mx-auto">
-      {/* Header */}
-      <div className="mb-8">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">
-              {id ? 'Edit Agent' : 'Create New Agent'}
-            </h1>
-            <p className="mt-2 text-sm text-gray-600">
-              {id ? `Update the configuration for agent: ${agentData.name}` : 'Follow these steps to create your AI agent'}
-            </p>
-          </div>
-          {!id && agentData.name && (
-            <div className="flex items-center space-x-3">
-              <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                <svg className="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                </svg>
-                Auto-saved
-              </span>
-              <button
-                onClick={clearDraft}
-                className="text-xs text-gray-500 hover:text-gray-700"
-              >
-                Clear draft
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {id && (
-        <div className="mb-8 rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">Embed Widget</h2>
-              <p className="mt-1 text-sm text-gray-600">
-                Add this script before the closing body tag on any website.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={handleCopyEmbedCode}
-              className="inline-flex items-center justify-center rounded-md bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700"
-            >
-              {copiedEmbed ? 'Copied' : 'Copy Script'}
-            </button>
-          </div>
-          <pre className="mt-4 overflow-x-auto rounded-lg bg-gray-950 p-4 text-sm text-gray-100">
-            <code>{embedCode}</code>
-          </pre>
-          <p className="mt-3 text-xs text-gray-500">
-            Widget URL: {widgetBaseUrl}
-          </p>
+    <>
+      {exportError && (
+        <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {exportError}
         </div>
       )}
-
-      {/* Progress Navigation */}
-      <div className="mb-8">
-        <WizardNavigation
-          steps={stepsWithStatus}
-          currentStep={currentStep}
-          onStepClick={setCurrentStep}
-        />
-      </div>
-
-      {/* Step Content */}
-      <div className="bg-white shadow rounded-lg p-6 mb-6">
-        {renderCurrentStep()}
-      </div>
-
-      {/* Navigation Buttons */}
-      <div className="flex justify-between">
-        <div className="flex space-x-3">
-          <button
-            onClick={prevStep}
-            disabled={currentStep === 1}
-            className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Previous
-          </button>
-          {currentStep === 7 && (
-            <button
-              onClick={handleCancel}
-              className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
-            >
-              Cancel
-            </button>
-          )}
-        </div>
-
-        {currentStep < 7 && (
-          <button
-            onClick={nextStep}
-            disabled={currentStep === 2 && !agentData.model}
-            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:cursor-not-allowed disabled:bg-gray-400"
-          >
-            Next
-          </button>
+      <AgentStudioShell
+        mode={id ? 'manage' : 'create'}
+        title={id ? 'Manage Nova Agent' : 'Create Nova Agent'}
+        subtitle={agentData.name || 'Configure a generalized portable agent'}
+        saving={isDeploying}
+        canExport={Boolean(id)}
+        onBack={() => navigate('/agents')}
+        onSave={handleDeploy}
+        onViewJson={() => setJsonOpen(true)}
+        onAgentApi={() => setAgentApiOpen(true)}
+        onOpenConsole={id ? () => navigate(`/agent-console/${id}`) : undefined}
+        onVersionHistory={() => setVersionHistoryOpen(true)}
+        onExport={handleExport}
+        left={(
+          <AgentConfigForm
+            data={agentData}
+            onChange={updateStepData}
+            brands={brands}
+            deployments={azureDeployments?.deployments || []}
+          />
         )}
-      </div>
-    </div>
+        middle={<AgentCapabilityRail data={agentData} onChange={updateStepData} />}
+        right={id ? (
+          <AgentManagePanel
+            data={agentData}
+            onChange={updateStepData}
+            agentId={id}
+            onOpenConsole={() => navigate(`/agent-console/${id}`)}
+          />
+        ) : (
+          <AgentSetupPanel data={agentData} saving={isDeploying} onCreate={handleDeploy} />
+        )}
+      />
+
+      <AgentJsonModal
+        open={jsonOpen}
+        title="Agent Configuration JSON"
+        data={viewJsonData}
+        onClose={() => setJsonOpen(false)}
+      />
+      <AgentApiPanel
+        open={agentApiOpen}
+        agentId={id}
+        brandId={agentData.brand_id}
+        data={agentData}
+        onChange={updateStepData}
+        onClose={() => setAgentApiOpen(false)}
+      />
+      <VersionHistoryPanel
+        open={versionHistoryOpen}
+        onClose={() => setVersionHistoryOpen(false)}
+      />
+    </>
   );
 }

@@ -8,6 +8,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.config import Settings
 from app.connections import connection_manager
+from app.services.agent_api_keys import AgentApiKeyService
 from app.services.runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger(__name__)
@@ -57,6 +58,8 @@ async def ensure_system_indexes(system_db: AsyncIOMotorDatabase, settings: Setti
 
     await RuntimeSettingsService(settings).ensure_indexes()
     checks.append(BootstrapCheck(name="system.runtime_settings", status="ok", detail="indexes ready"))
+    await AgentApiKeyService().ensure_indexes()
+    checks.append(BootstrapCheck(name="system.agent_api_keys", status="ok", detail="indexes ready"))
     return checks
 
 

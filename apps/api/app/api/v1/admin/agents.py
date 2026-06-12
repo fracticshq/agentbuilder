@@ -8,9 +8,9 @@ import structlog
 from app.connections import connection_manager
 from app.auth.dependencies import require_dashboard_access
 from app.dependencies import get_runtime_settings_service
-from app.services.agent_config_secrets import (
-    expose_agent_for_admin,
-    protect_agent_configuration_secrets,
+from app.services.tool_config_secrets import (
+    expose_full_agent_for_admin,
+    protect_full_agent_configuration_secrets,
 )
 from app.services.runtime_settings_service import RuntimeSettingsService
 from app.services.strapi_provisioning_service import StrapiProvisioningService
@@ -29,6 +29,7 @@ class AgentCreate(AgentBase):
     brand_id: str
     configuration: dict
     status: Optional[str] = "draft"
+    metadata: Optional[dict] = None
 
 
 class AgentUpdate(BaseModel):
@@ -37,6 +38,7 @@ class AgentUpdate(BaseModel):
     system_prompt: Optional[str] = None
     configuration: Optional[dict] = None
     status: Optional[str] = None
+    metadata: Optional[dict] = None
 
 
 class Agent(AgentBase):
@@ -45,6 +47,7 @@ class Agent(AgentBase):
     brand_slug: str
     slug: str
     configuration: dict
+    metadata: Optional[dict] = None
     status: str
     created_at: datetime
     updated_at: datetime
@@ -130,7 +133,7 @@ async def list_agents(
         query = {"brand_id": brand_id} if brand_id else {}
         agents = await collection.find(query).to_list(length=None)
         return [
-            Agent(**{**expose_agent_for_admin(agent, runtime_settings_service), "_id": str(agent["_id"])})
+            Agent(**{**expose_full_agent_for_admin(agent, runtime_settings_service), "_id": str(agent["_id"])})
             for agent in agents
         ]
     except Exception as e:
@@ -148,7 +151,7 @@ async def get_agent(
         agent = await collection.find_one({"id": agent_id})
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
-        return Agent(**{**expose_agent_for_admin(agent, runtime_settings_service), "_id": str(agent["_id"])})
+        return Agent(**{**expose_full_agent_for_admin(agent, runtime_settings_service), "_id": str(agent["_id"])})
     except HTTPException:
         raise
     except Exception as e:
@@ -185,7 +188,8 @@ async def create_agent(
             "name": agent.name,
             "description": agent.description,
             "system_prompt": agent.system_prompt,
-            "configuration": protect_agent_configuration_secrets(
+            "metadata": agent.metadata or {},
+            "configuration": protect_full_agent_configuration_secrets(
                 agent.configuration,
                 runtime_settings_service=runtime_settings_service,
             ),
@@ -203,7 +207,7 @@ async def create_agent(
                 agent_doc,
             )
         logger.info("Agent created", agent_id=agent_id, name=agent.name, brand_id=agent.brand_id, brand_slug=brand_slug)
-        return Agent(**expose_agent_for_admin(agent_doc, runtime_settings_service))
+        return Agent(**expose_full_agent_for_admin(agent_doc, runtime_settings_service))
     except HTTPException:
         raise
     except Exception as e:
@@ -226,7 +230,7 @@ async def update_agent(
 
         update_data = agent_update.dict(exclude_unset=True)
         if "configuration" in update_data:
-            update_data["configuration"] = protect_agent_configuration_secrets(
+            update_data["configuration"] = protect_full_agent_configuration_secrets(
                 update_data["configuration"],
                 existing_config=existing_agent.get("configuration") or {},
                 runtime_settings_service=runtime_settings_service,
@@ -246,7 +250,7 @@ async def update_agent(
                 updated_agent,
             )
         logger.info("Agent updated", agent_id=agent_id)
-        return Agent(**{**expose_agent_for_admin(updated_agent, runtime_settings_service), "_id": str(updated_agent["_id"])})
+        return Agent(**{**expose_full_agent_for_admin(updated_agent, runtime_settings_service), "_id": str(updated_agent["_id"])})
     except HTTPException:
         raise
     except Exception as e:

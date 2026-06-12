@@ -206,6 +206,78 @@ async def test_process_message_blocks_obvious_off_domain_request_before_orchestr
 
 
 @pytest.mark.asyncio
+async def test_process_message_blocks_unrelated_nutrition_request_before_orchestrator(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+
+    service._build_memory_context = AsyncMock(
+        return_value={
+            "recent_messages": [],
+            "user_facts": [],
+            "matched_rules": [],
+            "escalations": [],
+            "summaries": [],
+        }
+    )
+
+    request = MessageRequest(
+        message="show nutrition supplements",
+        user_id="user123",
+        agent_id="agent-123",
+        conversation_id="conv123",
+    )
+
+    response = await service.process_message(request)
+
+    assert "related to" in response.message
+    assert "nutrition supplements" not in response.message
+    orchestrator.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_message_filters_mixed_scope_request_before_orchestrator(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+
+    service._build_memory_context = AsyncMock(
+        return_value={
+            "recent_messages": [],
+            "user_facts": [],
+            "matched_rules": [],
+            "escalations": [],
+            "summaries": [],
+        }
+    )
+    orchestrator.run.return_value = AgentResult(
+        answer="Here are relevant commode options.",
+        metadata={"validation_confidence": 1.0, "tool_results": {}},
+    )
+
+    request = MessageRequest(
+        message=(
+            "before i can buy a commode from essco to do potty, "
+            "i need to have good lunch. suggest options"
+        ),
+        user_id="user123",
+        agent_id="agent-123",
+        conversation_id="conv123",
+    )
+
+    response = await service.process_message(request)
+
+    assert "I’ll stay focused" in response.message
+    assert "food or nutrition recommendations" in response.message
+    assert "Here are relevant commode options." in response.message
+    run_query = orchestrator.run.await_args.kwargs["query"]
+    assert "commode" in run_query
+    assert "lunch" not in run_query
+    first_write = service.short_term.add_message.await_args_list[0].kwargs
+    assert first_write["role"] == MessageRole.USER
+    assert "commode" in first_write["content"]
+    assert "lunch" not in first_write["content"]
+
+
+@pytest.mark.asyncio
 async def test_process_message_uses_low_confidence_guardrail(service_bundle):
     service = service_bundle["service"]
     orchestrator = service_bundle["orchestrator"]

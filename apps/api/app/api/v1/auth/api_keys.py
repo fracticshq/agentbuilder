@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timedelta
 
-from ....auth.models import APIKey, User, UserRole, Permission
+from ....auth.models import APIKey, User, UserRole, Permission, GLOBAL_ADMIN_ROLES
 from ....auth.api_keys import generate_api_key
 from ....auth.dependencies import get_current_active_user
 from ....auth.dependencies import get_db
@@ -154,7 +154,7 @@ async def get_api_key(
         )
     
     # Check ownership (admins can access any key)
-    if key["user_id"] != str(current_user.id) and current_user.role != UserRole.ADMIN:
+    if key["user_id"] != str(current_user.id) and current_user.role not in GLOBAL_ADMIN_ROLES:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this API key"
@@ -182,7 +182,7 @@ async def delete_api_key(
         )
     
     # Check ownership (admins can delete any key)
-    if key["user_id"] != str(current_user.id) and current_user.role != UserRole.ADMIN:
+    if key["user_id"] != str(current_user.id) and current_user.role not in GLOBAL_ADMIN_ROLES:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to delete this API key"
@@ -214,7 +214,7 @@ async def disable_api_key(
         )
     
     # Check ownership
-    if key["user_id"] != str(current_user.id) and current_user.role != UserRole.ADMIN:
+    if key["user_id"] != str(current_user.id) and current_user.role not in GLOBAL_ADMIN_ROLES:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to disable this API key"

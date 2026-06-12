@@ -10,6 +10,8 @@ import BrandDetail from './pages/BrandDetail';
 import Agents from './pages/Agents';
 import AgentDetail from './pages/AgentDetail';
 import AgentWizard from './pages/AgentWizard';
+import AgentConsole from './pages/AgentConsole';
+import KnowledgeBase from './pages/KnowledgeBase';
 import Settings from './pages/Settings';
 import Observability from './pages/Observability';
 import Login from './pages/Login';
@@ -86,6 +88,9 @@ function App() {
                   <Route path="/agents/new" element={<AgentWizard />} />
                   <Route path="/agents/:id" element={<AgentDetail />} />
                   <Route path="/agents/:id/edit" element={<AgentWizard />} />
+                  <Route path="/agent-console" element={<AgentConsole />} />
+                  <Route path="/agent-console/:agentId" element={<AgentConsole />} />
+                  <Route path="/knowledge-base" element={<KnowledgeBase />} />
                   <Route path="/observability" element={<Observability />} />
                   <Route path="/settings" element={<Settings />} />
                 </Route>

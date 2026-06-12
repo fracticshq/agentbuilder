@@ -2,10 +2,12 @@ import React, { useState } from 'react';
 import JsonUpload from './JsonUpload';
 import ContentTypeSelector from './ContentTypeSelector';
 import JsonFieldMapper from './JsonFieldMapper';
+import DocumentFileUpload from './DocumentFileUpload';
 import { knowledgeApi } from '../../api/knowledge';
-import type { ContentType, UploadDocumentResponse } from '../../types/knowledge';
+import type { ContentType, KnowledgeFolderSelection, UploadDocumentResponse } from '../../types/knowledge';
 
 const isDev = process.env.NODE_ENV !== 'production';
+type StructuredContentType = Exclude<ContentType, 'document'>;
 
 interface WizardStep {
   id: number;
@@ -15,23 +17,28 @@ interface WizardStep {
 
 const steps: WizardStep[] = [
   { id: 1, title: 'Content Type', description: 'What type of data are you uploading?' },
-  { id: 2, title: 'Upload JSON', description: 'Upload or paste your JSON data' },
+  { id: 2, title: 'Upload Data', description: 'Upload documents or structured JSON data' },
   { id: 3, title: 'Map Fields', description: 'Map your fields to our schema' },
   { id: 4, title: 'Review & Upload', description: 'Preview and confirm upload' },
 ];
 
 interface DocumentUploadWizardProps {
   brandId: string;
+  agentId?: string;
+  selectedFolder?: KnowledgeFolderSelection;
   onComplete: (response: UploadDocumentResponse) => void;
   onCancel: () => void;
 }
 
 export default function DocumentUploadWizard({
   brandId,
+  agentId,
+  selectedFolder,
   onComplete,
   onCancel,
 }: DocumentUploadWizardProps) {
-  const [currentStep, setCurrentStep] = useState(1);
+  const [uploadMode, setUploadMode] = useState<'document' | 'structured'>('document');
+  const [currentStep, setCurrentStep] = useState(2);
   const [contentType, setContentType] = useState<ContentType | null>(null);
   const [jsonData, setJsonData] = useState<any[]>([]);
   const [mappedData, setMappedData] = useState<any[]>([]);
@@ -39,6 +46,15 @@ export default function DocumentUploadWizard({
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   // Unused handlers removed
+
+  const selectUploadMode = (mode: 'document' | 'structured') => {
+    setUploadMode(mode);
+    setCurrentStep(mode === 'document' ? 2 : 1);
+    setContentType(null);
+    setJsonData([]);
+    setMappedData([]);
+    setUploadError(null);
+  };
 
   const handleContentTypeSelect = (type: ContentType) => {
     setContentType(type);
@@ -132,6 +148,8 @@ export default function DocumentUploadWizard({
         content_type: contentType as 'product' | 'dealer',
         items: itemsWithDefaults,
         brand_id: brandId,
+        folder_id: selectedFolder?.id || undefined,
+        folder_path: selectedFolder?.path || '/',
       });
 
       isDev && console.log('[Upload] API response received:', response);
@@ -153,13 +171,13 @@ export default function DocumentUploadWizard({
       
       // Show detailed alert with formatting
       alert(
-        `❌ Upload failed\n\n` +
+        `Upload failed\n\n` +
         `Error: ${errorMessage}\n\n` +
         `Tips:\n` +
-        `• Check that all required fields are mapped\n` +
-        `• Products need: sku, name, price, currency, category\n` +
-        `• Dealers need: dealer_id, name, city, phone\n` +
-        `• Use "Fixed Value" mode for missing fields like currency`
+        `- Check that all required fields are mapped\n` +
+        `- Products need: sku, name, price, currency, category\n` +
+        `- Dealers need: dealer_id, name, city, phone\n` +
+        `- Use "Fixed Value" mode for missing fields like currency`
       );
     } finally {
       setUploading(false);
@@ -167,15 +185,35 @@ export default function DocumentUploadWizard({
   };
 
   const renderStepContent = () => {
+    if (uploadMode === 'document') {
+      return (
+        <div>
+          <h2 className="text-xl font-semibold text-gray-900 mb-2">
+            Upload Document
+          </h2>
+          <p className="text-sm text-gray-600 mb-6">
+            Add PDF, DOCX, TXT, Markdown, HTML, or CSV files to <span className="font-mono">{selectedFolder?.path || '/'}</span> for retrieval.
+          </p>
+          <DocumentFileUpload
+            brandId={brandId}
+            agentId={agentId}
+            selectedFolder={selectedFolder}
+            onComplete={onComplete}
+            onBack={() => selectUploadMode('structured')}
+          />
+        </div>
+      );
+    }
+
     switch (currentStep) {
       case 1:
         return (
           <div>
             <h2 className="text-xl font-semibold text-gray-900 mb-2">
-              📁 Select Content Type
+              Select Structured Content Type
             </h2>
             <p className="text-sm text-gray-600 mb-6">
-              What type of data are you uploading to the knowledge base?
+              Choose the structured data schema for JSON imports.
             </p>
             <ContentTypeSelector
               selectedType={contentType}
@@ -188,15 +226,15 @@ export default function DocumentUploadWizard({
         return (
           <div>
             <h2 className="text-xl font-semibold text-gray-900 mb-2">
-              📤 Upload JSON Data
+              Upload Structured Data
             </h2>
             <p className="text-sm text-gray-600 mb-6">
-              Upload a JSON file or paste your data.
+              Upload a JSON file, paste JSON, or import from a supported catalog source.
               {(contentType === 'product' || contentType === 'dealer') && 
                 " We'll auto-detect and map the fields in the next step."}
             </p>
             <JsonUpload
-              contentType={contentType!}
+              contentType={contentType as StructuredContentType}
               onUpload={handleJsonUpload}
               onBack={() => setCurrentStep(1)}
               brandId={brandId}
@@ -249,6 +287,10 @@ export default function DocumentUploadWizard({
                 <div>
                   <dt className="text-blue-700 font-medium">Brand ID:</dt>
                   <dd className="text-blue-900 font-mono text-xs">{brandId}</dd>
+                </div>
+                <div>
+                  <dt className="text-blue-700 font-medium">Folder:</dt>
+                  <dd className="text-blue-900 font-mono text-xs">{selectedFolder?.path || '/'}</dd>
                 </div>
                 <div>
                   <dt className="text-blue-700 font-medium">Fields Mapped:</dt>
@@ -332,17 +374,43 @@ export default function DocumentUploadWizard({
     <div className="bg-white rounded-lg shadow-lg p-8">
       {/* Progress Steps */}
       <div className="mb-8">
+        <div className="mb-6 border-b border-gray-200">
+          <nav className="-mb-px flex gap-6" aria-label="Upload type">
+            <button
+              type="button"
+              onClick={() => selectUploadMode('document')}
+              className={`whitespace-nowrap border-b-2 px-1 py-3 text-sm font-medium ${
+                uploadMode === 'document'
+                  ? 'border-primary-500 text-primary-600'
+                  : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'
+              }`}
+            >
+              Documents
+            </button>
+            <button
+              type="button"
+              onClick={() => selectUploadMode('structured')}
+              className={`whitespace-nowrap border-b-2 px-1 py-3 text-sm font-medium ${
+                uploadMode === 'structured'
+                  ? 'border-primary-500 text-primary-600'
+                  : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'
+              }`}
+            >
+              Structured JSON
+            </button>
+          </nav>
+        </div>
         <nav aria-label="Progress">
           <ol className="flex items-center">
-            {steps.map((step, idx) => (
+            {(uploadMode === 'document' ? steps.slice(1, 2) : steps).map((step, idx, visibleSteps) => (
               <li
                 key={step.id}
                 className={`relative ${
-                  idx !== steps.length - 1 ? 'flex-1 pr-8' : ''
+                  idx !== visibleSteps.length - 1 ? 'flex-1 pr-8' : ''
                 }`}
               >
                 {/* Connector Line */}
-                {idx !== steps.length - 1 && (
+                {idx !== visibleSteps.length - 1 && (
                   <div
                     className={`absolute top-4 left-4 -ml-px mt-0.5 h-0.5 w-full ${
                       currentStep > step.id ? 'bg-primary-600' : 'bg-gray-300'

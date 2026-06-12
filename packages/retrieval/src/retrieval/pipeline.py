@@ -213,7 +213,13 @@ class RetrievalPipeline:
             # Step 6: Apply page context boost
             if self.page_boost and page_context and self.config.page_boost_enabled:
                 # Convert dict to PageContext if needed
-                page_ctx = PageContext(**page_context) if isinstance(page_context, dict) else page_context
+                if isinstance(page_context, dict):
+                    normalized_page_context = dict(page_context)
+                    if "meta" not in normalized_page_context and isinstance(normalized_page_context.get("metadata"), dict):
+                        normalized_page_context["meta"] = normalized_page_context["metadata"]
+                    page_ctx = PageContext(**normalized_page_context)
+                else:
+                    page_ctx = page_context
                 reranked_chunks = self.page_boost.apply_boost(reranked_chunks, page_ctx)
                 logger.debug("Page boost applied")
 

@@ -3,9 +3,10 @@ Ingestion Service - Document processing and chunking
 """
 
 import asyncio
+import io
 import uuid
 import json
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from datetime import datetime
 from fastapi import UploadFile
 import structlog
@@ -15,6 +16,7 @@ from commons.types.requests import IngestionRequest
 from commons.types.responses import IngestionResponse, IngestionStatus
 from ..config import Settings
 from ..connections import connection_manager
+from .chunking import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, chunk_text, resolve_agent_chunking
 from .job_store import JobStore
 from .qdrant_vector_service import QdrantVectorService
 from .runtime_settings_service import RuntimeSettingsService
@@ -60,6 +62,8 @@ class IngestionService:
         try:
             await self.job_store.update(job_id, {"status": "processing"})
 
+            chunk_size, chunk_overlap = await self._resolve_chunking(agent_id)
+
             for i, file_data in enumerate(files):
                 # Extract file information
                 content = file_data['content']
@@ -67,7 +71,10 @@ class IngestionService:
                 content_type = file_data['content_type']
 
                 # Process based on content type
-                chunks = await self._extract_and_chunk(content, content_type, filename)
+                chunks = await self._extract_and_chunk(
+                    content, content_type, filename,
+                    chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                )
 
                 # Store chunks with embeddings
                 await self._store_chunks(chunks, job_id, filename, agent_id)
@@ -271,12 +278,56 @@ class IngestionService:
         # Default to guide
         return "guide"
 
-    async def _extract_and_chunk(self, content: bytes, content_type: str, filename: str) -> List[dict]:
+    async def _resolve_chunking(self, agent_id: Optional[str]) -> Tuple[int, int]:
+        """Resolve chunk size/overlap via the shared chunking module."""
+        return await resolve_agent_chunking(agent_id)
+
+    def _extract_pdf_text(self, content: bytes) -> str:
+        """Extract text from a PDF using pypdf."""
+        try:
+            from pypdf import PdfReader
+        except ImportError as exc:
+            raise RuntimeError("PDF extraction requires pypdf to be installed") from exc
+
+        reader = PdfReader(io.BytesIO(content))
+        page_text = []
+        for page_number, page in enumerate(reader.pages, start=1):
+            extracted = (page.extract_text() or "").strip()
+            if extracted:
+                page_text.append(f"Page {page_number}\n{extracted}")
+        return "\n\n".join(page_text)
+
+    def _extract_docx_text(self, content: bytes) -> str:
+        """Extract text from a DOCX using python-docx."""
+        try:
+            from docx import Document
+        except ImportError as exc:
+            raise RuntimeError("DOCX extraction requires python-docx to be installed") from exc
+
+        document = Document(io.BytesIO(content))
+        paragraphs = [p.text.strip() for p in document.paragraphs if p.text.strip()]
+        table_rows = []
+        for table in document.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if cells:
+                    table_rows.append(" | ".join(cells))
+        return "\n\n".join(paragraphs + table_rows)
+
+    async def _extract_and_chunk(
+        self,
+        content: bytes,
+        content_type: str,
+        filename: str,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+    ) -> List[dict]:
         """Extract text and create chunks with structured data extraction."""
         # Extract text based on content type
         json_data = None
         structured_content_type = None
-        
+        lower_name = (filename or "").lower()
+
         if content_type == "application/json":
             text = content.decode('utf-8')
             # For JSON files, try to extract structured data
@@ -299,15 +350,25 @@ class IngestionService:
                 text = self._json_to_text(json_data)
             except json.JSONDecodeError:
                 pass  # Treat as plain text
-        elif content_type == "text/plain" or content_type == "text/markdown":
-            text = content.decode('utf-8')
+        elif content_type in ("text/plain", "text/markdown", "text/csv", "text/html"):
+            text = content.decode('utf-8', errors='replace')
+        elif content_type == "application/pdf" or lower_name.endswith(".pdf"):
+            text = self._extract_pdf_text(content)
+        elif (
+            content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            or lower_name.endswith(".docx")
+        ):
+            text = self._extract_docx_text(content)
         else:
-            # For other types, try to decode as text
-            text = content.decode('utf-8', errors='ignore')
-        
-        # Chunk the text
-        chunk_size = 500  # Characters per chunk
-        chunk_overlap = 50  # Overlap between chunks
+            # For other types, try to decode as text but reject binary garbage
+            # instead of embedding unreadable bytes.
+            text = content.decode('utf-8', errors='replace')
+            if text and (text.count('�') / len(text)) > 0.2:
+                raise ValueError(
+                    f"File {filename} ({content_type or 'unknown type'}) does not contain extractable text"
+                )
+
+        # Chunk the text (bounds are enforced by the shared chunker)
         chunks = []
         
         # If we have structured JSON data (list of items), create one chunk per item
@@ -342,31 +403,21 @@ class IngestionService:
                     }
                 })
         else:
-            # Standard chunking for non-structured content
-            start = 0
-            chunk_index = 0
-            while start < len(text):
-                end = start + chunk_size
-                chunk_text = text[start:end]
-                
-                if chunk_text.strip():  # Only add non-empty chunks
-                    chunks.append({
-                        "content": chunk_text,
-                        "content_type": "guide",  # Default content type
-                        "product_data": None,
-                        "dealer_data": None,
-                        "metadata": {
-                            "filename": filename,
-                            "chunk_index": chunk_index,
-                            "content_type": content_type,
-                            "start_char": start,
-                            "end_char": end
-                        }
-                    })
-                    chunk_index += 1
-                
-                start = end - chunk_overlap
-        
+            # Standard chunking for non-structured content via the shared
+            # paragraph-aware chunker (same chunks as the Knowledge Base upload path).
+            for chunk_index, piece in enumerate(chunk_text(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)):
+                chunks.append({
+                    "content": piece,
+                    "content_type": "guide",  # Default content type
+                    "product_data": None,
+                    "dealer_data": None,
+                    "metadata": {
+                        "filename": filename,
+                        "chunk_index": chunk_index,
+                        "content_type": content_type,
+                    }
+                })
+
         return chunks
     
     def _json_to_text(self, data, prefix="") -> str:

@@ -10,6 +10,9 @@ class PageContext(BaseModel):
     """Page context information."""
     url: str
     title: Optional[str] = None
+    path: Optional[str] = None
+    sku: Optional[str] = None
+    category: Optional[str] = None
     content: Optional[str] = None
     metadata: Dict[str, Any] = {}
 

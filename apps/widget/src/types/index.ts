@@ -118,12 +118,15 @@ export interface DealerData {
 export interface PageContext {
   url: string;
   title?: string;
+  path?: string;
+  sku?: string;
+  category?: string;
   content?: string;
   metadata?: Record<string, any>;
 }
 
 export interface StreamingMessage {
-  type: 'status' | 'content' | 'metadata' | 'error';
+  type: 'status' | 'context_start' | 'context_result' | 'skill_start' | 'skill_result' | 'tool_start' | 'tool_result' | 'tool_error' | 'citation' | 'content' | 'metadata' | 'done' | 'error';
   content: string;
   conversation_id: string;
   citations?: Citation[];
