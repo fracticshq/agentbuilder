@@ -40,13 +40,10 @@ export default function Layout({ children }: LayoutProps) {
       {/* Sidebar */}
       <div className="fixed inset-y-0 left-0 z-40 flex w-[232px] flex-col border-r border-gray-200 bg-white">
         <div className="flex h-16 items-center border-b border-gray-100 px-4">
-          <Link to="/dashboard" className="flex items-center gap-3 text-left" aria-label="Nova Agent dashboard">
-            <span className="inline-flex h-9 w-9 items-center justify-center overflow-hidden rounded-lg bg-gray-950">
-              <img src="/brand/nova-logo.svg" alt="NOVA" className="h-7 w-7 object-contain" />
-            </span>
-            <span className="leading-tight">
-              <span className="block text-base font-semibold tracking-tight text-gray-950">Nova Agent</span>
-              <span className="block text-[10px] font-medium uppercase tracking-wide text-gray-500">Agent Studio</span>
+          <Link to="/dashboard" className="flex items-center gap-2.5 text-left" aria-label="Nova Agent Studio dashboard">
+            <img src="/brand/nova-logo.svg" alt="NOVA" className="h-6 w-auto" />
+            <span className="border-l border-gray-200 pl-2.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500">
+              Agent Studio
             </span>
           </Link>
         </div>
