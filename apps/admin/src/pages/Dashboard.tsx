@@ -5,7 +5,6 @@ import {
   BuildingOfficeIcon,
   CpuChipIcon,
   DocumentTextIcon,
-  ChartBarIcon,
 } from '@heroicons/react/24/outline';
 import { brandApi, agentApi } from '../api/client';
 
@@ -39,12 +38,6 @@ export default function Dashboard() {
       icon: DocumentTextIcon,
       href: '/agents',
     },
-    {
-      name: 'Conversations',
-      value: '1.2k',
-      icon: ChartBarIcon,
-      href: '/analytics',
-    },
   ];
 
   return (
@@ -57,7 +50,7 @@ export default function Dashboard() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 mb-8">
         {stats.map((stat) => (
           <Link
             key={stat.name}

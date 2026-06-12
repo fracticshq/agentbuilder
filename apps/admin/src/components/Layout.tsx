@@ -21,15 +21,26 @@ interface LayoutProps {
   children: React.ReactNode;
 }
 
-const navigation = [
+type NavItem = {
+  name: string;
+  href: string;
+  icon: typeof HomeIcon;
+  consoleOnly?: boolean;
+  soon?: boolean;
+};
+
+const navigation: NavItem[] = [
   { name: 'Home', href: '/dashboard', icon: HomeIcon },
   { name: 'Agent Builder', href: '/agents', icon: CubeTransparentIcon },
   { name: 'Knowledge Base', href: '/knowledge-base', icon: CircleStackIcon },
   { name: 'Agent Console', href: '/agent-console', icon: CommandLineIcon, consoleOnly: true },
+  // Runtime Settings is where model providers are configured.
   { name: 'Models', href: '/settings', icon: SparklesIcon },
-  { name: 'Tools', href: '/settings', icon: WrenchScrewdriverIcon },
-  { name: 'Data Connectors', href: '/settings', icon: PuzzlePieceIcon },
-  { name: 'Marketplace', href: '/settings', icon: BuildingStorefrontIcon },
+  // These surfaces aren't built yet — don't route them all to /settings and
+  // pretend they exist. Shown as disabled "Soon" until their pages land.
+  { name: 'Tools', href: '/settings', icon: WrenchScrewdriverIcon, soon: true },
+  { name: 'Data Connectors', href: '/settings', icon: PuzzlePieceIcon, soon: true },
+  { name: 'Marketplace', href: '/settings', icon: BuildingStorefrontIcon, soon: true },
 ];
 
 export default function Layout({ children }: LayoutProps) {
@@ -57,6 +68,22 @@ export default function Layout({ children }: LayoutProps) {
       <nav className="mt-6 flex-1 overflow-y-auto px-3">
         <div className="space-y-1">
           {visibleNavigation.map((item) => {
+            if (item.soon) {
+              return (
+                <div
+                  key={item.name}
+                  className="group flex cursor-not-allowed items-center justify-start gap-x-3 rounded-md border border-transparent px-3 py-2 text-left text-sm font-semibold leading-6 text-gray-400"
+                  aria-disabled="true"
+                  title="Coming soon"
+                >
+                  <item.icon className="h-5 w-5 shrink-0 text-gray-300" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate whitespace-nowrap">{item.name}</span>
+                  <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500">
+                    Soon
+                  </span>
+                </div>
+              );
+            }
             const isActive = location.pathname === item.href || (
               item.href === '/agents' && location.pathname.startsWith('/agents')
             ) || (
