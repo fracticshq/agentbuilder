@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { PlusIcon, CpuChipIcon, TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, CpuChipIcon, TrashIcon, PencilIcon, CheckCircleIcon, XCircleIcon, ArrowTopRightOnSquareIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
 import { api, Agent } from '../api/client';
 import { ApiError, showErrorAlert } from '../api/errorHandler';
 import { getModelLabel, getProviderLabel } from '../utils/llmOptions';
@@ -15,6 +15,7 @@ export default function Agents() {
     name: string;
     url: string;
   } | null>(null);
+  const [copied, setCopied] = useState(false);
 
   // Check for deployment success from navigation state
   useEffect(() => {
@@ -112,47 +113,45 @@ export default function Agents() {
     <div>
       {/* Deployment Success Banner */}
       {deploymentSuccess && (
-        <div className="mb-6 rounded-lg bg-green-50 border border-green-200 p-6 shadow-sm">
-          <div className="flex items-start">
-            <div className="flex-shrink-0">
-              <CheckCircleIcon className="h-6 w-6 text-green-600" />
-            </div>
-            <div className="ml-4 flex-1">
-              <h3 className="text-lg font-semibold text-green-900">
-                🎉 Agent "{deploymentSuccess.name}" deployed successfully!
+        <div className="mb-6 rounded-lg border border-emerald-200 bg-emerald-50 p-5 shadow-sm">
+          <div className="flex items-start gap-3">
+            <CheckCircleIcon className="h-5 w-5 flex-none text-emerald-600" />
+            <div className="min-w-0 flex-1">
+              <h3 className="text-sm font-semibold text-gray-900">
+                Agent "{deploymentSuccess.name}" deployed
               </h3>
-              <div className="mt-3 space-y-2">
-                <div className="flex items-center gap-3">
-                  <span className="text-sm font-medium text-green-800">Widget URL:</span>
-                  <a
-                    href={deploymentSuccess.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 transition-colors"
-                  >
-                    🚀 Open Widget Preview
-                  </a>
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(deploymentSuccess.url);
-                      alert('URL copied to clipboard!');
-                    }}
-                    className="px-4 py-2 bg-white border border-green-300 text-green-700 text-sm font-medium rounded-md hover:bg-green-50 transition-colors"
-                  >
-                    📋 Copy URL
-                  </button>
-                </div>
-                <p className="text-sm text-green-700">
-                  Your agent is now live and ready to use. You can embed the widget on your website or test it directly.
-                </p>
+              <p className="mt-1 text-sm text-gray-600">
+                Your agent is live. Embed the widget on your site or open the preview to test it.
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <a
+                  href={deploymentSuccess.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-primary-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-primary-500"
+                >
+                  <ArrowTopRightOnSquareIcon className="h-4 w-4" />
+                  Open widget preview
+                </a>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(deploymentSuccess.url);
+                    setCopied(true);
+                    window.setTimeout(() => setCopied(false), 2000);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
+                >
+                  <ClipboardDocumentIcon className="h-4 w-4" />
+                  {copied ? 'Copied' : 'Copy URL'}
+                </button>
               </div>
-              <button
-                onClick={() => setDeploymentSuccess(null)}
-                className="mt-4 text-sm text-green-600 hover:text-green-800 font-medium"
-              >
-                Dismiss
-              </button>
             </div>
+            <button
+              onClick={() => setDeploymentSuccess(null)}
+              className="flex-none rounded-md px-2 py-1 text-sm font-medium text-gray-500 hover:bg-white hover:text-gray-900"
+            >
+              Dismiss
+            </button>
           </div>
         </div>
       )}
@@ -227,9 +226,10 @@ export default function Agents() {
                         href={widgetUrlFor(agent.id)}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-800 bg-blue-50 px-2.5 py-1.5 rounded-md border border-blue-200 hover:bg-blue-100 transition-colors"
+                        className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
                       >
-                        🚀 Open Widget
+                        <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
+                        Open widget
                       </a>
                     </div>
                   )}
