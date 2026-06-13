@@ -88,6 +88,46 @@ class QdrantVectorService:
             points=[models.PointStruct(id=point_id, vector=vector, payload=payload)],
         )
 
+    async def delete_by_document(
+        self,
+        doc_id: str,
+        brand_slug: str | None = None,
+        brand_aliases: list[str] | None = None,
+    ) -> int:
+        """Delete all vector points belonging to a document/job batch.
+
+        Mirrors how Mongo chunks are removed: match on metadata.job_id first
+        (new uploads) and doc_id (legacy / single chunks). Scoped to the brand's
+        collection so deletes never cross tenants.
+        """
+        from qdrant_client.http import models
+
+        client = self._get_client()
+        collection = qdrant_collection_name(self.settings, brand_slug)
+        if not await client.collection_exists(collection):
+            return 0
+
+        # job_id and doc_id are both stored under payload.metadata and top-level.
+        match = models.Filter(
+            should=[
+                models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id)),
+                models.FieldCondition(key="metadata.job_id", match=models.MatchValue(value=doc_id)),
+                models.FieldCondition(key="metadata.doc_id", match=models.MatchValue(value=doc_id)),
+            ]
+        )
+        result = await client.delete(
+            collection_name=collection,
+            points_selector=models.FilterSelector(filter=match),
+            wait=True,
+        )
+        logger.info(
+            "qdrant_document_deleted",
+            collection=collection,
+            doc_id=doc_id,
+            status=getattr(result, "status", None),
+        )
+        return 1
+
     async def close(self) -> None:
         if self._client is not None:
             await self._client.close()

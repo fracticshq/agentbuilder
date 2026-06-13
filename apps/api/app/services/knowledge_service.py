@@ -1341,6 +1341,19 @@ class KnowledgeService:
                 })
                 deleted_count += result.deleted_count
 
+        # When Qdrant is the vector backend, chunks live there too. Mongo deletion
+        # alone leaves the vectors searchable, so the "deleted" file would still
+        # surface in retrieval. Purge the matching points as well.
+        if self.qdrant:
+            try:
+                await self.qdrant.delete_by_document(
+                    doc_id,
+                    brand_slug=brand_scope.get("brand_slug") or brand_id,
+                    brand_aliases=brand_aliases,
+                )
+            except Exception as e:
+                logger.error("qdrant_delete_failed", doc_id=doc_id, error=str(e))
+
         return deleted_count > 0
 
     async def delete_item(self, item_id: str, brand_id: str, agent_id: Optional[str] = None) -> Dict[str, Any]:
