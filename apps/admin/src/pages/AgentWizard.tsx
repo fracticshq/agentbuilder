@@ -196,6 +196,7 @@ interface AgentData {
   long_term_memory: boolean;
   typing_indicators: boolean;
   response_streaming: boolean;
+  widget_enabled: boolean;
   show_sources: boolean;
   show_product_cards: boolean;
   rate_limiting: boolean;
@@ -295,6 +296,7 @@ const initialData: AgentData = {
   long_term_memory: false,
   typing_indicators: true,
   response_streaming: true,
+  widget_enabled: true,
   show_sources: false,
   show_product_cards: true,
   rate_limiting: true,
@@ -445,6 +447,7 @@ export default function AgentWizard() {
       const personality = config.personality || {};
       const rag = config.rag || {};
       const features = config.features || {};
+      const widgetChannel = config.channels?.widget || {};
       const memory = config.memory || {};
       const security = config.security || {};
       const domain = config.domain || {};
@@ -534,6 +537,7 @@ export default function AgentWizard() {
         long_term_memory: memory.long_term?.enabled ?? false,
         typing_indicators: features.typing_indicators ?? true,
         response_streaming: features.response_streaming ?? true,
+        widget_enabled: widgetChannel.enabled ?? true,
         show_sources: features.show_sources ?? false,
         show_product_cards: features.show_product_cards ?? true,
         allowed_file_types: features.file_upload?.allowed_types || [],
@@ -722,6 +726,18 @@ export default function AgentWizard() {
               .map(origin => origin.trim())
               .filter(Boolean),
             require_key: agentData.agent_api_require_key,
+          },
+          channels: {
+            ...(existingConfiguration.channels || {}),
+            widget: {
+              ...((existingConfiguration.channels || {}).widget || {}),
+              enabled: agentData.widget_enabled,
+              preview_enabled: agentData.widget_enabled,
+              allowed_origins: ((existingConfiguration.channels || {}).widget || {}).allowed_origins || [],
+              show_sources: agentData.show_sources,
+              show_product_cards: agentData.show_product_cards,
+              human_takeover: agentData.human_takeover,
+            },
           },
           features: {
             websockets: agentData.websockets,
@@ -923,6 +939,7 @@ export default function AgentWizard() {
             data={agentData}
             onChange={updateStepData}
             agentId={id}
+            agentStatus={existingAgent?.status}
             onOpenConsole={() => navigate(`/agent-console/${id}`)}
           />
         ) : (

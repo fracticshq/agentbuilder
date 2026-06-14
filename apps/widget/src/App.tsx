@@ -107,6 +107,7 @@ function App({ config }: AppProps) {
   const [humanTakeoverEnabled, setHumanTakeoverEnabled] = React.useState(false);
   const [showSources, setShowSources] = React.useState(config?.showSources ?? false);
   const [showProductCards, setShowProductCards] = React.useState(config?.showProductCards ?? true);
+  const [unavailableMessage, setUnavailableMessage] = React.useState<string | null>(null);
   // Holds the pending conversation lifecycle event type until agentId is ready.
   const [convStartEvent, setConvStartEvent] = React.useState<'conversation_started' | 'conversation_resumed' | null>(null);
 
@@ -127,17 +128,26 @@ function App({ config }: AppProps) {
 
     const fetchBrandTheme = async () => {
       try {
+        setUnavailableMessage(null);
         // 1. Get agent → extract brand_id
         const agentRes = await fetch(`${API_BASE}/api/v1/public/agents/${agentId}`);
-        if (!agentRes.ok) return;
+        if (!agentRes.ok) {
+          setUnavailableMessage('This agent is not available for widget preview. Activate it and enable the Public Widget channel in NOVA Admin.');
+          return;
+        }
         const agent = await agentRes.json();
         const brandId: string | undefined = agent.brand_id;
         // Read WebSocket setting from agent config (default true if not set)
         const features = agent.configuration?.features || {};
+        const widgetChannel = agent.configuration?.channels?.widget || {};
+        if (widgetChannel.enabled === false) {
+          setUnavailableMessage('This agent has the Public Widget channel disabled.');
+          return;
+        }
         const wsEnabled = features.websockets !== false;
-        const takeoverEnabled = config?.enableHumanTakeover ?? features.human_takeover === true;
-        const shouldShowSources = config?.showSources ?? features.show_sources === true;
-        const shouldShowProductCards = config?.showProductCards ?? features.show_product_cards !== false;
+        const takeoverEnabled = config?.enableHumanTakeover ?? widgetChannel.human_takeover ?? features.human_takeover === true;
+        const shouldShowSources = config?.showSources ?? widgetChannel.show_sources ?? features.show_sources === true;
+        const shouldShowProductCards = config?.showProductCards ?? widgetChannel.show_product_cards ?? features.show_product_cards !== false;
         setUseWebSocket(wsEnabled);
         setHumanTakeoverEnabled(takeoverEnabled);
         setShowSources(shouldShowSources);
@@ -155,7 +165,7 @@ function App({ config }: AppProps) {
         // Persist agent_id for MessageBubble product fetches
         localStorage.setItem('agent_widget_agent_id', agentId);
       } catch {
-        // Non-fatal: widget renders with default styling
+        setUnavailableMessage('NOVA could not load this agent right now. Check that the API is running and the agent is active.');
       }
     };
 
@@ -293,6 +303,7 @@ function App({ config }: AppProps) {
       } catch (err) {
         if (!cancelled) {
           console.error('Failed to establish widget session:', err);
+          setUnavailableMessage('This agent is not ready for widget chat. Activate it and enable the Public Widget channel in NOVA Admin.');
         }
       }
     })();
@@ -454,6 +465,7 @@ function App({ config }: AppProps) {
             showSources={showSources}
             showProductCards={showProductCards}
             isAgentConfigured={Boolean(agentId)}
+            unavailableMessage={unavailableMessage || undefined}
           />
         </div>
       )}

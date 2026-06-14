@@ -40,6 +40,43 @@ def _system_db():
     return connection_manager.system_db
 
 
+def _widget_enabled(configuration: dict[str, Any]) -> bool:
+    channels = configuration.get("channels") or {}
+    widget = channels.get("widget") or {}
+    return widget.get("enabled", True) is not False
+
+
+def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
+    """Return widget-safe configuration without secrets or admin-only material."""
+    features = configuration.get("features") or {}
+    channels = configuration.get("channels") or {}
+    widget = channels.get("widget") or {}
+    domain = configuration.get("domain") or {}
+    url_context_boost = configuration.get("url_context_boost") or {}
+
+    return {
+        "domain": domain,
+        "url_context_boost": {
+            "enabled": url_context_boost.get("enabled", False),
+        },
+        "features": {
+            "websockets": features.get("websockets", True),
+            "show_sources": widget.get("show_sources", features.get("show_sources", False)),
+            "show_product_cards": widget.get("show_product_cards", features.get("show_product_cards", True)),
+            "human_takeover": widget.get("human_takeover", features.get("human_takeover", False)),
+        },
+        "channels": {
+            "widget": {
+                "enabled": widget.get("enabled", True),
+                "preview_enabled": widget.get("preview_enabled", widget.get("enabled", True)),
+                "show_sources": widget.get("show_sources", features.get("show_sources", False)),
+                "show_product_cards": widget.get("show_product_cards", features.get("show_product_cards", True)),
+                "human_takeover": widget.get("human_takeover", features.get("human_takeover", False)),
+            }
+        },
+    }
+
+
 @router.get("/agents", response_model=list[PublicAgentResponse])
 async def list_public_agents():
     db = _system_db()
@@ -50,10 +87,11 @@ async def list_public_agents():
             brand_id=agent["brand_id"],
             name=agent["name"],
             description=agent.get("description", ""),
-            configuration=agent.get("configuration", {}),
+            configuration=_public_agent_config(agent.get("configuration", {})),
             status=agent.get("status", "draft"),
         )
         for agent in agents
+        if _widget_enabled(agent.get("configuration", {}))
     ]
 
 
@@ -61,14 +99,14 @@ async def list_public_agents():
 async def get_public_agent(agent_id: str):
     db = _system_db()
     agent = await db.agents.find_one({"id": agent_id, "status": "active"})
-    if not agent:
+    if not agent or not _widget_enabled(agent.get("configuration", {})):
         raise HTTPException(status_code=404, detail="Agent not found")
     return PublicAgentResponse(
         id=agent["id"],
         brand_id=agent["brand_id"],
         name=agent["name"],
         description=agent.get("description", ""),
-        configuration=agent.get("configuration", {}),
+        configuration=_public_agent_config(agent.get("configuration", {})),
         status=agent.get("status", "draft"),
     )
 
@@ -88,4 +126,3 @@ async def get_public_brand(brand_id: str):
         website=brand.get("website"),
         updated_at=brand["updated_at"],
     )
-

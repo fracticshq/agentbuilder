@@ -116,7 +116,7 @@ export default function Layout({ children }: LayoutProps) {
 
       <div className="border-t border-gray-100 p-3">
         <Link
-          to="/observability"
+          to="/support"
           className="mb-3 flex items-center justify-start gap-3 rounded-md px-3 py-2 text-left text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-950"
         >
           <ChatBubbleLeftRightIcon className="h-5 w-5 text-gray-400" />

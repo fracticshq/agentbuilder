@@ -58,6 +58,7 @@ function renderPanel(onChange = jest.fn()) {
           long_term_memory: false,
           typing_indicators: true,
           response_streaming: true,
+          widget_enabled: true,
           show_sources: true,
           show_product_cards: false,
           rate_limiting: true,

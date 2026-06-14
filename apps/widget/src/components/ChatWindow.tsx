@@ -20,6 +20,7 @@ interface ChatWindowProps {
   showSources?: boolean;
   showProductCards?: boolean;
   isAgentConfigured?: boolean;
+  unavailableMessage?: string;
 }
 
 // ── Icon components ────────────────────────────────────────────
@@ -139,6 +140,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   showSources = false,
   showProductCards = true,
   isAgentConfigured = true,
+  unavailableMessage,
 }) => {
   const { brandTheme } = useWidgetStore();
   const [inputValue, setInputValue] = React.useState('');
@@ -302,9 +304,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               </>
             ) : (
               <div className="chat-hero-subtitle" style={{ color: subtitleColor }}>
-                {isAgentConfigured
+                {unavailableMessage || (isAgentConfigured
                   ? (brandTheme?.heroSubtitle ?? 'Ask me anything')
-                  : 'Add ?agent_id=your-agent-id&open=1 to activate a specific agent.'}
+                  : 'Add ?agent_id=your-agent-id&open=1 to activate a specific agent.')}
               </div>
             )}
           </div>
@@ -328,7 +330,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 ))}
               </div>
             )}
-            {isAgentConfigured && (
+            {isAgentConfigured && !unavailableMessage && (
               <InputRow
                 value={inputValue}
                 onChange={setInputValue}
@@ -405,7 +407,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           </div>
 
           <div className="chat-bottom">
-            {tk && (
+            {tk && !unavailableMessage && (
               <InputRow
                 value={inputValue}
                 onChange={setInputValue}

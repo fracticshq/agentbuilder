@@ -5,7 +5,7 @@ import { PlusIcon, CpuChipIcon, TrashIcon, PencilIcon, CheckCircleIcon, XCircleI
 import { api, Agent } from '../api/client';
 import { ApiError, showErrorAlert } from '../api/errorHandler';
 import { getModelLabel, getProviderLabel } from '../utils/llmOptions';
-import { buildWidgetUrl } from '../utils/widget';
+import { buildEmbedCode, buildWidgetUrl, getWidgetBaseUrl, getWidgetChannel } from '../utils/widget';
 
 export default function Agents() {
   const queryClient = useQueryClient();
@@ -15,7 +15,7 @@ export default function Agents() {
     name: string;
     url: string;
   } | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
 
   // Check for deployment success from navigation state
   useEffect(() => {
@@ -136,13 +136,13 @@ export default function Agents() {
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(deploymentSuccess.url);
-                    setCopied(true);
-                    window.setTimeout(() => setCopied(false), 2000);
+                    setCopied(`deploy-url-${deploymentSuccess.id}`);
+                    window.setTimeout(() => setCopied(null), 2000);
                   }}
                   className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
                 >
                   <ClipboardDocumentIcon className="h-4 w-4" />
-                  {copied ? 'Copied' : 'Copy URL'}
+                  {copied === `deploy-url-${deploymentSuccess.id}` ? 'Copied' : 'Copy URL'}
                 </button>
               </div>
             </div>
@@ -219,20 +219,85 @@ export default function Agents() {
                     {agent.description || 'No description provided'}
                   </p>
                   
-                  {/* Widget URL */}
-                  {agent.status === 'active' && (
-                    <div className="mb-3">
-                      <a
-                        href={widgetUrlFor(agent.id)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
-                      >
-                        <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
-                        Open widget
-                      </a>
-                    </div>
-                  )}
+                  {(() => {
+                    const widget = getWidgetChannel(agent.configuration);
+                    const widgetReady = agent.status === 'active' && widget.enabled;
+                    const widgetUrl = widgetUrlFor(agent.id);
+                    const embedCode = buildEmbedCode(getWidgetBaseUrl(), agent.id);
+
+                    return (
+                      <div className="mb-4 rounded-md border border-gray-200 bg-gray-50 p-3">
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Widget</p>
+                          <span className={`rounded px-2 py-0.5 text-[11px] font-medium ${
+                            widgetReady
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : agent.status !== 'active'
+                                ? 'bg-amber-50 text-amber-700'
+                                : 'bg-gray-100 text-gray-600'
+                          }`}>
+                            {widgetReady ? 'Ready' : agent.status !== 'active' ? 'Activate first' : 'Disabled'}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {widgetReady ? (
+                            <a
+                              href={widgetUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 rounded-md bg-primary-600 px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-primary-500"
+                            >
+                              <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
+                              Open widget
+                            </a>
+                          ) : agent.status !== 'active' ? (
+                            <button
+                              onClick={() => toggleAgentStatus(agent)}
+                              disabled={updateStatusMutation.isPending}
+                              className="inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-white px-2.5 py-1.5 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-50 disabled:opacity-50"
+                            >
+                              <CheckCircleIcon className="h-3.5 w-3.5" />
+                              Activate to use widget
+                            </button>
+                          ) : (
+                            <Link
+                              to={`/agents/${agent.id}/edit`}
+                              className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
+                            >
+                              <PencilIcon className="h-3.5 w-3.5" />
+                              Enable in Manage Agent
+                            </Link>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(widgetUrl);
+                              setCopied(`url-${agent.id}`);
+                              window.setTimeout(() => setCopied(null), 2000);
+                            }}
+                            disabled={!widgetReady}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <ClipboardDocumentIcon className="h-3.5 w-3.5" />
+                            {copied === `url-${agent.id}` ? 'Copied URL' : 'Copy URL'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(embedCode);
+                              setCopied(`embed-${agent.id}`);
+                              window.setTimeout(() => setCopied(null), 2000);
+                            }}
+                            disabled={!widgetReady}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <ClipboardDocumentIcon className="h-3.5 w-3.5" />
+                            {copied === `embed-${agent.id}` ? 'Copied embed' : 'Copy embed'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
                   
                   <div className="text-xs text-gray-500">
                     <p>Created: {new Date(agent.created_at).toLocaleDateString()}</p>

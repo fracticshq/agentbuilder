@@ -32,6 +32,7 @@ export interface AgentStudioData {
   long_term_memory: boolean;
   typing_indicators: boolean;
   response_streaming: boolean;
+  widget_enabled: boolean;
   show_sources: boolean;
   show_product_cards: boolean;
   rate_limiting: boolean;

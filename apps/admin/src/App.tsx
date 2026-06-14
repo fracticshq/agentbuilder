@@ -14,6 +14,7 @@ import AgentConsole from './pages/AgentConsole';
 import KnowledgeBase from './pages/KnowledgeBase';
 import Settings from './pages/Settings';
 import Observability from './pages/Observability';
+import Support from './pages/Support';
 import Login from './pages/Login';
 import Signup from './pages/Signup';
 import ForgotPassword from './pages/ForgotPassword';
@@ -92,6 +93,7 @@ function App() {
                   <Route path="/agent-console/:agentId" element={<AgentConsole />} />
                   <Route path="/knowledge-base" element={<KnowledgeBase />} />
                   <Route path="/observability" element={<Observability />} />
+                  <Route path="/support" element={<Support />} />
                   <Route path="/settings" element={<Settings />} />
                 </Route>
               </Route>

@@ -217,10 +217,12 @@ async def start_session(request: SessionRequest):
     """
     system_db = connection_manager.get_system_db()
     agent = await system_db.agents.find_one(
-        {"id": request.agent_id, "status": "active"}, {"id": 1}
+        {"id": request.agent_id, "status": "active"}, {"id": 1, "configuration": 1}
     )
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found or not active")
+    channels = (((agent or {}).get("configuration") or {}).get("channels") or {})
+    widget = channels.get("widget") or {}
+    if not agent or widget.get("enabled", True) is False:
+        raise HTTPException(status_code=404, detail="Agent not found, not active, or widget disabled")
 
     existing = decode_widget_session(request.session_token, expected_agent_id=request.agent_id)
     if existing is not None:
