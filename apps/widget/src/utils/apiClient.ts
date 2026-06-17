@@ -18,6 +18,12 @@ export interface WidgetSession {
   sessionToken: string;
 }
 
+const mergeStreamingMetadata = (messageData: Partial<Message>, chunk: StreamingMessage): void => {
+  if (chunk.citations?.length) messageData.citations = chunk.citations;
+  if (chunk.products?.length) messageData.products = chunk.products;
+  if (chunk.dealers?.length) messageData.dealers = chunk.dealers;
+};
+
 export class APIClient {
   private baseUrl: string;
   private sessionToken?: string;
@@ -184,23 +190,23 @@ export class APIClient {
                 isDev && console.log('[APIClient] Parsing SSE data:', data);
                 const chunk: StreamingMessage = JSON.parse(data);
                 isDev && console.log('[APIClient] Parsed chunk:', chunk);
+                mergeStreamingMetadata(messageData, chunk);
                 
                 if (chunk.type === 'content') {
                   fullMessage += chunk.content || '';
                   onStream(chunk);
-                } else if (chunk.type === 'status') {
+                } else if (
+                  chunk.type === 'status' ||
+                  chunk.type === 'context_start' ||
+                  chunk.type === 'context_result' ||
+                  chunk.type === 'skill_start' ||
+                  chunk.type === 'skill_result' ||
+                  chunk.type === 'tool_start' ||
+                  chunk.type === 'tool_result' ||
+                  chunk.type === 'tool_error' ||
+                  chunk.type === 'citation'
+                ) {
                   onStream(chunk);
-                } else if (chunk.type === 'metadata') {
-                  // Phase 5: Store metadata (citations, products, dealers)
-                  if (chunk.citations) {
-                    messageData.citations = chunk.citations;
-                  }
-                  if (chunk.products) {
-                    messageData.products = chunk.products;
-                  }
-                  if (chunk.dealers) {
-                    messageData.dealers = chunk.dealers;
-                  }
                 } else if (chunk.type === 'error') {
                   reject(new Error(chunk.content || 'Streaming error'));
                   return;

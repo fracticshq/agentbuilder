@@ -52,6 +52,12 @@ export class WebSocketClient {
     return this.baseUrl.replace(/^http/, 'ws') + '/api/v1/messages/ws';
   }
 
+  private mergeChunkMetadata(chunk: StreamingMessage): void {
+    if (chunk.citations?.length) this.pendingMeta.citations = chunk.citations;
+    if (chunk.products?.length) this.pendingMeta.products = chunk.products;
+    if (chunk.dealers?.length) this.pendingMeta.dealers = chunk.dealers;
+  }
+
   // Central message router — set once per connection in connect()
   private handleMessage = (event: MessageEvent): void => {
     let msg: Record<string, unknown>;
@@ -73,15 +79,24 @@ export class WebSocketClient {
     if (!this.pendingResolve) return;
 
     const chunk = msg as unknown as StreamingMessage;
+    this.mergeChunkMetadata(chunk);
+
     if (chunk.type === 'content') {
       this.accumulatedContent += chunk.content || '';
       this.pendingCallback?.(chunk);
-    } else if (chunk.type === 'status') {
+    } else if (
+      chunk.type === 'status' ||
+      chunk.type === 'context_start' ||
+      chunk.type === 'context_result' ||
+      chunk.type === 'skill_start' ||
+      chunk.type === 'skill_result' ||
+      chunk.type === 'tool_start' ||
+      chunk.type === 'tool_result' ||
+      chunk.type === 'tool_error' ||
+      chunk.type === 'citation'
+    ) {
       this.pendingCallback?.(chunk);
     } else if (chunk.type === 'metadata') {
-      if (chunk.citations) this.pendingMeta.citations = chunk.citations;
-      if (chunk.products) this.pendingMeta.products = chunk.products;
-      if (chunk.dealers) this.pendingMeta.dealers = chunk.dealers;
       const resolve = this.pendingResolve;
       const content = this.accumulatedContent;
       const meta = { ...this.pendingMeta };

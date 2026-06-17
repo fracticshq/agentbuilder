@@ -38,6 +38,16 @@ const md = new MarkdownIt({
   breaks: true        // Convert \n to <br>
 });
 
+const defaultLinkOpenRenderer = md.renderer.rules.link_open || ((tokens, idx, options, _env, self) => {
+  return self.renderToken(tokens, idx, options);
+});
+
+md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  tokens[idx].attrSet('target', '_blank');
+  tokens[idx].attrSet('rel', 'noopener noreferrer');
+  return defaultLinkOpenRenderer(tokens, idx, options, env, self);
+};
+
 // Parse <product_info> tags and extract product SKUs
 const parseProductInfo = (content: string): { cleanContent: string; productSkus: string[] } => {
   const productSkus: string[] = [];

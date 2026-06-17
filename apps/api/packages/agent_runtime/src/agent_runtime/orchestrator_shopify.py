@@ -105,11 +105,14 @@ class ShopifyOrchestrator(Orchestrator):
                 logger.info("shopify_agent_loop_iteration", iteration=iteration)
 
                 if iteration == 1:
-                    proactive_call = self._get_proactive_catalog_search()
-                    if proactive_call:
-                        tool_name = proactive_call["tool_name"]
-                        tool_input = proactive_call.get("tool_input") or {}
-                        logger.info("shopify_proactive_catalog_search", tool=tool_name, input=tool_input)
+                    confirmed_cart_add = self._get_confirmed_cart_add()
+                    proactive_call = None if confirmed_cart_add else self._get_proactive_catalog_search()
+                    first_pass_call = confirmed_cart_add or proactive_call
+                    if first_pass_call:
+                        tool_name = first_pass_call["tool_name"]
+                        tool_input = first_pass_call.get("tool_input") or {}
+                        event_name = "shopify_confirmed_cart_add" if confirmed_cart_add else "shopify_proactive_catalog_search"
+                        logger.info(event_name, tool=tool_name, input=tool_input)
                         if on_status and callable(on_status):
                             try:
                                 res = on_status(self._get_status_message(tool_name))
@@ -121,7 +124,7 @@ class ShopifyOrchestrator(Orchestrator):
                         tool_result = await self._execute_tool_action(tool_name, tool_input)
                         tool_results_map[tool_name] = tool_result
                         logger.info(
-                            "shopify_proactive_catalog_result",
+                            f"{event_name}_result",
                             tool=tool_name,
                             success=tool_result.success,
                             error=tool_result.error,
@@ -129,7 +132,7 @@ class ShopifyOrchestrator(Orchestrator):
                         )
                         self.conversation.append({
                             "role": "assistant",
-                            "content": json.dumps(proactive_call),
+                            "content": json.dumps(first_pass_call),
                         })
                         content = tool_result.error if not tool_result.success else self._format_tool_output(tool_result.data)
                         self.conversation.append({
@@ -137,6 +140,11 @@ class ShopifyOrchestrator(Orchestrator):
                             "name": tool_name,
                             "content": content,
                         })
+                        if confirmed_cart_add:
+                            self.conversation.append({
+                                "role": "system",
+                                "content": "The referenced product has been added to the cart. Respond with a concise confirmation using the cart context; do not call update_cart again for the same item.",
+                            })
                 
                 # A. Get next action from LLM
                 message, tool_call = await self._get_next_action()
@@ -190,6 +198,60 @@ class ShopifyOrchestrator(Orchestrator):
 
         logger.warning("shopify_agent_loop_max_iterations_or_loop")
         return "I've run into an issue processing your request. Could you please specify which product or action you'd like me to take?", tool_results_map
+
+    def _get_confirmed_cart_add(self) -> Optional[Dict[str, Any]]:
+        """Resolve pronoun-based add-to-cart requests from the Shopify session focus only."""
+        if not self.tools.get("update_cart"):
+            return None
+
+        last_user_msg = ""
+        for msg in reversed(self.conversation):
+            if msg.get("role") == "user":
+                last_user_msg = str(msg.get("content", ""))
+                break
+        if not last_user_msg:
+            return None
+
+        lowered = last_user_msg.lower().strip()
+        explicit_reference = bool(re.search(r"\b(add|put|place)\s+(it|this|that|one)\b", lowered))
+        cart_reference = bool(re.search(r"\b(add|put|place)\s+(it|this|that|one)?\s*(to|in|into)\s+(my\s+)?cart\b", lowered))
+        short_confirmation = lowered in {
+            "yes",
+            "yes please",
+            "ok",
+            "okay",
+            "sure",
+            "do it",
+            "add it",
+            "add this",
+            "add that",
+            "add to cart",
+            "add it to cart",
+        }
+        if not (explicit_reference or cart_reference or short_confirmation):
+            return None
+
+        focused_products = self.last_searched or self.captured_ids
+        if not focused_products:
+            return None
+
+        title, variant_id = next(iter(focused_products.items()))
+        if not variant_id:
+            return None
+
+        logger.info("shopify_confirmed_cart_add_resolved", title=title, variant_id=variant_id)
+        return {
+            "tool_name": "update_cart",
+            "tool_input": {
+                "add_items": [
+                    {
+                        "product_variant_id": variant_id,
+                        "quantity": 1,
+                        "title": title,
+                    }
+                ]
+            },
+        }
 
     def _get_proactive_catalog_search(self) -> Optional[Dict[str, Any]]:
         """Search first for product-intent queries so commerce answers are grounded."""
@@ -488,6 +550,8 @@ class ShopifyOrchestrator(Orchestrator):
             elif role == "tool":
                 t_name = str(msg.get("name", "unknown"))
                 text += f"Tool ({t_name}): {content}\n"
+            elif role == "system":
+                text += f"System: {content}\n"
         
         if is_tool_after_search and has_add_intent:
             text += "\n[SYSTEM NOTE]: You just found the product and the user wants to add it. You MUST now return the 'update_cart' JSON immediately. ⛔ DO NOT chat or say 'One moment'. Just return the JSON."

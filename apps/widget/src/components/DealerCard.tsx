@@ -113,6 +113,8 @@ export const DealerCard: React.FC<DealerCardProps> = ({ dealer, onViewMap }) => 
                   href={`tel:${dealer.phone}`} 
                   className="contact-link phone"
                   onClick={handlePhoneClick}
+                  target="_blank"
+                  rel="noopener noreferrer"
                   title="Call dealer"
                 >
                   <svg className="contact-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -130,6 +132,8 @@ export const DealerCard: React.FC<DealerCardProps> = ({ dealer, onViewMap }) => 
                   href={`mailto:${dealer.email}`} 
                   className="contact-link email"
                   onClick={handleEmailClick}
+                  target="_blank"
+                  rel="noopener noreferrer"
                   title="Email dealer"
                 >
                   <svg className="contact-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -183,6 +187,8 @@ export const DealerCard: React.FC<DealerCardProps> = ({ dealer, onViewMap }) => 
                 href={`tel:${dealer.phone}`} 
                 className="detail-value contact-value"
                 onClick={handlePhoneClick}
+                target="_blank"
+                rel="noopener noreferrer"
               >
                 {dealer.phone}
               </a>
@@ -206,6 +212,8 @@ export const DealerCard: React.FC<DealerCardProps> = ({ dealer, onViewMap }) => 
                 href={`mailto:${dealer.email}`} 
                 className="detail-value contact-value"
                 onClick={handleEmailClick}
+                target="_blank"
+                rel="noopener noreferrer"
               >
                 {dealer.email}
               </a>
