@@ -153,6 +153,29 @@ describe('WebSocketClient', () => {
       expect(result.dealers).toEqual(dealers);
     });
 
+    it('captures Shopify product focus metadata from tool result chunks', async () => {
+      const products = [{ sku: 'P1', name: 'Heart Drop Earrings', price: 44900 }];
+      const p = client.sendMessage({ content: 'show me heart drop earrings' });
+      await flushMicrotasks();
+      lastWS().simulateMessage({
+        type: 'tool_result',
+        content: 'Found products.',
+        conversation_id: 'c',
+        products,
+        metadata: {
+          original_query: 'show me heart drop earrings',
+          search_query: 'heart drop earrings',
+          active_product_focus: products,
+        },
+      });
+      lastWS().simulateMessage({ type: 'metadata', content: '', conversation_id: 'c' });
+
+      const result = await p;
+      expect(result.products).toEqual(products);
+      expect(result.metadata?.search_query).toBe('heart drop earrings');
+      expect(result.metadata?.active_product_focus).toEqual(products);
+    });
+
     it('rejects the Promise on an error chunk', async () => {
       const p = client.sendMessage({ content: 'hi' });
       await flushMicrotasks();

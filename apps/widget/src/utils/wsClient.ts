@@ -32,7 +32,7 @@ export class WebSocketClient {
   private pendingReject: ((err: Error) => void) | null = null;
   private pendingCallback: ((chunk: StreamingMessage) => void) | null = null;
   private accumulatedContent = '';
-  private pendingMeta: Partial<Pick<Message, 'citations' | 'products' | 'dealers'>> = {};
+  private pendingMeta: Partial<Pick<Message, 'citations' | 'products' | 'dealers' | 'metadata'>> = {};
   private sessionToken?: string;
 
   /** Hold the signed session token included with every outbound message frame. */
@@ -56,6 +56,7 @@ export class WebSocketClient {
     if (chunk.citations?.length) this.pendingMeta.citations = chunk.citations;
     if (chunk.products?.length) this.pendingMeta.products = chunk.products;
     if (chunk.dealers?.length) this.pendingMeta.dealers = chunk.dealers;
+    if (chunk.metadata) this.pendingMeta.metadata = { ...(this.pendingMeta.metadata || {}), ...chunk.metadata };
   }
 
   // Central message router — set once per connection in connect()
@@ -109,6 +110,7 @@ export class WebSocketClient {
         citations: meta.citations,
         products: meta.products ?? [],
         dealers: meta.dealers ?? [],
+        metadata: meta.metadata,
       });
     } else if (chunk.type === 'error') {
       const reject = this.pendingReject;
@@ -143,6 +145,7 @@ export class WebSocketClient {
       citations: this.pendingMeta.citations,
       products: this.pendingMeta.products ?? [],
       dealers: this.pendingMeta.dealers ?? [],
+      metadata: this.pendingMeta.metadata,
     };
   }
 

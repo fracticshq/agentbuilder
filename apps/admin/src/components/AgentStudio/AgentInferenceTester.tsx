@@ -283,6 +283,20 @@ export default function AgentInferenceTester({
             setProducts(payload.products);
             addTrace({ label: 'Tool data', detail: `${payload.products.length} product result${payload.products.length === 1 ? '' : 's'} returned`, state: 'done' });
           }
+          const commerceMeta = payload.metadata || {};
+          if (commerceMeta.original_query && commerceMeta.search_query) {
+            addTrace({ label: 'Search intent', detail: `${commerceMeta.original_query} -> ${commerceMeta.search_query}`, state: 'done' });
+          }
+          if (Array.isArray(commerceMeta.rerank_results) && commerceMeta.rerank_results.length) {
+            const top = commerceMeta.rerank_results[0];
+            addTrace({ label: 'Rerank', detail: `Top match: ${top.name || 'Product'}${top.match_score ? ` (${Math.round(top.match_score * 100)} score)` : ''}`, state: 'done' });
+          }
+          if (commerceMeta.resolved_reference?.status === 'resolved') {
+            addTrace({ label: 'Reference', detail: `${commerceMeta.resolved_reference.product_name || 'Product'} resolved for cart action`, state: 'done' });
+          }
+          if (Array.isArray(commerceMeta.active_product_focus) && commerceMeta.active_product_focus.length) {
+            addTrace({ label: 'Product focus', detail: `${commerceMeta.active_product_focus.length} focused product${commerceMeta.active_product_focus.length === 1 ? '' : 's'} kept for follow-up references`, state: 'done' });
+          }
           if (Array.isArray(payload.dealers) && payload.dealers.length) {
             setDealers(payload.dealers);
             addTrace({ label: 'Tool data', detail: `${payload.dealers.length} dealer result${payload.dealers.length === 1 ? '' : 's'} returned`, state: 'done' });
