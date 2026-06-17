@@ -35,6 +35,14 @@ class ShopifyOrchestrator(Orchestrator):
         self.cart_lines: List[Dict[str, Any]] = []
         self.conversation: List[Dict[str, Any]] = []
         self.prompt_runtime_context: Dict[str, Any] = {}
+        self.active_product_focus: List[Dict[str, Any]] = []
+        self.product_reference_map: Dict[str, Dict[str, Any]] = {}
+        self.last_user_query: Optional[str] = None
+        self.last_search_query: Optional[str] = None
+        self.last_constraints: Dict[str, Any] = {}
+        self.rerank_results: List[Dict[str, Any]] = []
+        self.resolved_reference: Optional[Dict[str, Any]] = None
+        self.pending_clarification_response: Optional[str] = None
 
     async def run(
         self, 
@@ -67,7 +75,17 @@ class ShopifyOrchestrator(Orchestrator):
                 "checkout_url": self.checkout_url,
                 "cart_lines": self.cart_lines,
                 "captured_ids": self.captured_ids,
-                "last_searched": self.last_searched
+                "last_searched": self.last_searched,
+                "active_product_focus": self.active_product_focus,
+                "product_reference_map": self.product_reference_map,
+                "last_user_query": self.last_user_query,
+                "last_search_query": self.last_search_query,
+                "last_constraints": self.last_constraints,
+                "commerce_intent": self.last_constraints,
+                "rerank_results": self.rerank_results,
+                "resolved_reference": self.resolved_reference,
+                "original_query": self.last_user_query,
+                "search_query": self.last_search_query,
             }
         )
 
@@ -79,6 +97,14 @@ class ShopifyOrchestrator(Orchestrator):
         self.cart_lines = session_state.get("cart_lines", [])
         self.captured_ids = session_state.get("captured_ids", {})
         self.last_searched = session_state.get("last_searched", {})
+        self.active_product_focus = session_state.get("active_product_focus", [])
+        self.product_reference_map = session_state.get("product_reference_map", {})
+        self.last_user_query = session_state.get("last_user_query")
+        self.last_search_query = session_state.get("last_search_query")
+        self.last_constraints = session_state.get("last_constraints", {})
+        self.rerank_results = session_state.get("rerank_results", [])
+        self.resolved_reference = None
+        self.pending_clarification_response = None
         self.prompt_runtime_context = (context or {}).get("prompt_runtime", {})
         
         self.conversation = []
@@ -106,6 +132,9 @@ class ShopifyOrchestrator(Orchestrator):
 
                 if iteration == 1:
                     confirmed_cart_add = self._get_confirmed_cart_add()
+                    if self.pending_clarification_response:
+                        logger.info("shopify_reference_clarification_needed", resolved_reference=self.resolved_reference)
+                        return self.pending_clarification_response, tool_results_map
                     proactive_call = None if confirmed_cart_add else self._get_proactive_catalog_search()
                     first_pass_call = confirmed_cart_add or proactive_call
                     if first_pass_call:
@@ -204,17 +233,15 @@ class ShopifyOrchestrator(Orchestrator):
         if not self.tools.get("update_cart"):
             return None
 
-        last_user_msg = ""
-        for msg in reversed(self.conversation):
-            if msg.get("role") == "user":
-                last_user_msg = str(msg.get("content", ""))
-                break
+        last_user_msg = self._get_last_user_message()
         if not last_user_msg:
             return None
 
         lowered = last_user_msg.lower().strip()
         explicit_reference = bool(re.search(r"\b(add|put|place)\s+(it|this|that|one)\b", lowered))
         cart_reference = bool(re.search(r"\b(add|put|place)\s+(it|this|that|one)?\s*(to|in|into)\s+(my\s+)?cart\b", lowered))
+        ordinal_reference = bool(re.search(r"\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(one|product|item)?\b", lowered))
+        price_reference = bool(re.search(r"\b(cheapest|cheaper|lowest price|least expensive|expensive|priciest|costliest|highest price)\b", lowered))
         short_confirmation = lowered in {
             "yes",
             "yes please",
@@ -228,15 +255,23 @@ class ShopifyOrchestrator(Orchestrator):
             "add to cart",
             "add it to cart",
         }
-        if not (explicit_reference or cart_reference or short_confirmation):
+        has_add_intent = any(kw in lowered for kw in ["add", "put", "place", "cart", "buy", "purchase", "yes", "ok", "do it"])
+        title_reference = self._find_focus_by_title(lowered) if has_add_intent else None
+        if not (explicit_reference or cart_reference or ordinal_reference or price_reference or short_confirmation or title_reference):
             return None
 
-        focused_products = self.last_searched or self.captured_ids
-        if not focused_products:
+        resolved = self._resolve_product_reference(last_user_msg)
+        self.resolved_reference = resolved
+
+        if resolved.get("status") != "resolved":
+            self.pending_clarification_response = self._build_reference_clarification(resolved)
             return None
 
-        title, variant_id = next(iter(focused_products.items()))
+        product = resolved.get("product") or {}
+        title = str(product.get("name") or product.get("title") or "this product")
+        variant_id = str(product.get("variant_id") or product.get("id") or "")
         if not variant_id:
+            self.pending_clarification_response = f"I found {title}, but I do not have a valid variant ID to add it to the cart. Please choose another product."
             return None
 
         logger.info("shopify_confirmed_cart_add_resolved", title=title, variant_id=variant_id)
@@ -253,6 +288,130 @@ class ShopifyOrchestrator(Orchestrator):
             },
         }
 
+    def _get_last_user_message(self) -> str:
+        for msg in reversed(self.conversation):
+            if msg.get("role") == "user":
+                return str(msg.get("content", ""))
+        return ""
+
+    def _focus_products(self) -> List[Dict[str, Any]]:
+        products = [p for p in self.active_product_focus if isinstance(p, dict)]
+        if products:
+            return products
+        fallback = []
+        for idx, (title, variant_id) in enumerate((self.last_searched or self.captured_ids).items(), start=1):
+            fallback.append({
+                "rank": idx,
+                "name": title,
+                "title": title,
+                "variant_id": variant_id,
+                "id": variant_id,
+            })
+        return fallback
+
+    def _find_focus_by_title(self, lowered_message: str) -> Optional[Dict[str, Any]]:
+        best_product = None
+        best_score = 0.0
+        message_tokens = self._tokens(lowered_message)
+        for product in self._focus_products():
+            product_tokens = self._tokens(str(product.get("name") or product.get("title") or ""))
+            if not product_tokens:
+                continue
+            common = message_tokens.intersection(product_tokens)
+            score = len(common) / max(1, len(product_tokens))
+            if score > best_score:
+                best_score = score
+                best_product = product
+        return best_product if best_score >= 0.45 else None
+
+    def _tokens(self, value: str) -> set:
+        stopwords = {
+            "the", "a", "an", "to", "cart", "product", "item", "items", "one", "this", "that",
+            "it", "add", "put", "place", "buy", "show", "me", "please", "for", "with", "and", "or",
+        }
+        return {
+            token for token in re.sub(r"[^a-z0-9\s-]", " ", value.lower()).split()
+            if token and token not in stopwords
+        }
+
+    def _to_price(self, value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, dict):
+            return self._to_price(value.get("amount"))
+        try:
+            return float(str(value).replace(",", "").replace("₹", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _display_price(self, value: Any) -> Any:
+        price = self._to_price(value)
+        if price is None:
+            return value
+        display_price = price / 100 if price >= 10000 else price
+        return int(display_price) if float(display_price).is_integer() else round(display_price, 2)
+
+    def _resolve_product_reference(self, message: str) -> Dict[str, Any]:
+        lowered = message.lower().strip()
+        products = self._focus_products()
+        if not products:
+            return {"status": "no_focus", "confidence": 0.0, "reason": "No active product focus exists."}
+
+        ordinal_map = {
+            "first": 1, "1st": 1,
+            "second": 2, "2nd": 2,
+            "third": 3, "3rd": 3,
+            "fourth": 4, "4th": 4,
+            "fifth": 5, "5th": 5,
+        }
+        for label, position in ordinal_map.items():
+            if re.search(rf"\b{label}\b", lowered):
+                if len(products) >= position:
+                    return self._resolved(products[position - 1], 0.98, f"Matched ordinal reference: {label}.")
+                return {"status": "ambiguous", "confidence": 0.0, "reason": f"The {label} product is not available in the current focus."}
+        if re.search(r"\blast\b", lowered):
+            return self._resolved(products[-1], 0.95, "Matched last product reference.")
+
+        priced_products = [p for p in products if self._to_price(p.get("price")) is not None]
+        if priced_products and re.search(r"\b(cheapest|cheaper|lowest price|least expensive)\b", lowered):
+            return self._resolved(min(priced_products, key=lambda p: self._to_price(p.get("price")) or 0), 0.94, "Matched lowest-price reference.")
+        if priced_products and re.search(r"\b(expensive|priciest|costliest|highest price)\b", lowered):
+            return self._resolved(max(priced_products, key=lambda p: self._to_price(p.get("price")) or 0), 0.92, "Matched highest-price reference.")
+
+        title_match = self._find_focus_by_title(lowered)
+        if title_match:
+            return self._resolved(title_match, 0.88, "Matched product title from active focus.")
+
+        if re.search(r"\b(it|this|that|this product|that product|add to cart|do it|yes|ok|okay)\b", lowered):
+            return self._resolved(products[0], 0.82, "Matched active top product reference.")
+
+        return {"status": "ambiguous", "confidence": 0.0, "reason": "Reference did not uniquely match a product."}
+
+    def _resolved(self, product: Dict[str, Any], confidence: float, reason: str) -> Dict[str, Any]:
+        return {
+            "status": "resolved",
+            "confidence": confidence,
+            "reason": reason,
+            "product": product,
+            "variant_id": product.get("variant_id") or product.get("id"),
+            "product_name": product.get("name") or product.get("title"),
+        }
+
+    def _build_reference_clarification(self, resolved: Dict[str, Any]) -> str:
+        products = self._focus_products()[:5]
+        if not products:
+            return "Which product should I add to your cart? Please mention the product name or ask me to show options again."
+        options = []
+        for idx, product in enumerate(products, start=1):
+            name = product.get("name") or product.get("title") or f"Product {idx}"
+            price = product.get("price")
+            currency = product.get("currency") or ""
+            price_text = f" ({currency} {self._display_price(price)})" if price not in (None, "") else ""
+            options.append(f"{idx}. {name}{price_text}")
+        return "Which product should I add to your cart?\n" + "\n".join(options)
+
     def _get_proactive_catalog_search(self) -> Optional[Dict[str, Any]]:
         """Search first for product-intent queries so commerce answers are grounded."""
         if self.tools.get("search_catalog"):
@@ -262,11 +421,7 @@ class ShopifyOrchestrator(Orchestrator):
         else:
             return None
 
-        last_user_msg = ""
-        for msg in reversed(self.conversation):
-            if msg.get("role") == "user":
-                last_user_msg = str(msg.get("content", ""))
-                break
+        last_user_msg = self._get_last_user_message()
         if not last_user_msg:
             return None
 
@@ -284,29 +439,105 @@ class ShopifyOrchestrator(Orchestrator):
         if not any(term in lowered for term in product_terms):
             return None
 
-        query = lowered
-        query = re.sub(
-            r"\b(can you|could you|would you|do you have|show me|find me|search for|look for|give me|please show|please find)\b",
-            " ",
-            query,
-            flags=re.IGNORECASE,
-        )
-        query = re.sub(
-            r"\b(recommend|show|find|search|give|please|from the store|include prices?|products?|product|items?|two|three|some|any|can|could|would|you|me|for|with|and|or)\b",
-            " ",
-            query,
-            flags=re.IGNORECASE,
-        )
-        query = re.sub(r"[^a-z0-9\s-]", " ", query)
-        query = re.sub(r"\s+", " ", query).strip() or last_user_msg
+        constraints = self._extract_shopping_constraints(last_user_msg)
+        query = self._build_search_query(last_user_msg, constraints)
+        self.last_user_query = last_user_msg
+        self.last_search_query = query
+        self.last_constraints = constraints
 
         return {
             "tool_name": tool_name,
             "tool_input": {
                 "query": query,
-                "pagination": {"limit": 5},
+                "pagination": {"limit": 20},
+                "context": {
+                    "original_query": last_user_msg,
+                    "constraints": constraints,
+                },
+                "signals": {
+                    "source": "nova_shopify_agent",
+                    "preserve_full_intent": True,
+                },
             },
         }
+
+    def _extract_shopping_constraints(self, query: str) -> Dict[str, Any]:
+        lowered = query.lower()
+        constraints: Dict[str, Any] = {
+            "product_type": None,
+            "attributes": [],
+            "occasion": None,
+            "budget": None,
+            "preferences": [],
+            "negative_constraints": [],
+            "recipient_context": None,
+        }
+
+        product_types = ["earrings", "earring", "necklace", "ring", "bracelet", "bangle", "pendant", "dress", "shirt", "top", "bottom", "jewelry", "jewellery"]
+        for term in product_types:
+            if term in lowered:
+                constraints["product_type"] = term
+                break
+
+        attribute_terms = ["heart", "drop", "wedding", "bridal", "lightweight", "simple", "minimal", "statement", "gold", "silver", "pearl", "diamond", "floral", "daily", "party", "office", "gift"]
+        for term in attribute_terms:
+            if term in lowered:
+                if term in {"wedding", "bridal", "party", "office", "daily"} and not constraints["occasion"]:
+                    constraints["occasion"] = term
+                else:
+                    constraints["attributes"].append(term)
+
+        pref_patterns = {
+            "lightweight": r"\blight\s*weight|lightweight\b",
+            "not flashy": r"\bnot\s+(too\s+)?flashy\b|\bsubtle\b",
+            "budget friendly": r"\bbudget\b|\baffordable\b",
+        }
+        for label, pattern in pref_patterns.items():
+            if re.search(pattern, lowered):
+                constraints["preferences"].append(label)
+
+        for neg in re.findall(r"\b(?:not|no|avoid|without)\s+([a-z0-9 -]{2,30})", lowered):
+            cleaned = re.sub(r"\b(for|with|and|or|under|below|above|over)\b.*$", "", neg).strip()
+            if cleaned:
+                constraints["negative_constraints"].append(cleaned)
+
+        budget_match = re.search(r"(?:under|below|less than|upto|up to|within)\s*(?:rs\.?|inr|₹)?\s*([0-9][0-9,]*(?:\.\d+)?)", lowered)
+        if budget_match:
+            constraints["budget"] = {
+                "operator": "max",
+                "amount": float(budget_match.group(1).replace(",", "")),
+                "currency": "INR" if "₹" in lowered or "inr" in lowered or "rs" in lowered else None,
+            }
+
+        recipient_match = re.search(r"\b(?:for|gift for)\s+(wife|husband|mother|mom|sister|friend|girlfriend|boyfriend|bride|wedding gift)\b", lowered)
+        if recipient_match:
+            constraints["recipient_context"] = recipient_match.group(1)
+
+        constraints["attributes"] = sorted(set(constraints["attributes"]))
+        constraints["preferences"] = sorted(set(constraints["preferences"]))
+        constraints["negative_constraints"] = sorted(set(constraints["negative_constraints"]))
+        return constraints
+
+    def _build_search_query(self, query: str, constraints: Dict[str, Any]) -> str:
+        lowered = query.lower()
+        cleaned = re.sub(
+            r"\b(can you|could you|would you|do you have|show me|find me|search for|look for|give me|please show|please find|recommend|show|find|search|give|please|from the store|include prices?|products?|product|items?|some|any|can|could|would|you|me|for|with|and|or)\b",
+            " ",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"[^a-z0-9\s-]", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        important_terms = [constraints.get("product_type") or ""]
+        important_terms.extend(constraints.get("attributes") or [])
+        if constraints.get("occasion"):
+            important_terms.append(constraints["occasion"])
+        merged = " ".join([cleaned, *important_terms])
+        tokens = []
+        for token in merged.split():
+            if token not in tokens:
+                tokens.append(token)
+        return " ".join(tokens).strip() or query
 
     async def _get_next_action(self) -> Tuple[str, Optional[Dict]]:
         """Consult the LLM to decide the next step."""
@@ -401,7 +632,7 @@ class ShopifyOrchestrator(Orchestrator):
                             item_tokens = set(item_str.replace("{", "").replace("}", "").replace("'", "").split())
                             title_tokens = set(title_lower.split())
                             common = item_tokens.intersection(title_tokens)
-                            common = {w for w in common if w not in {"the", "a", "an", "to", "cart", "product", "item", "yes", "ok"}}
+                            common = {w for w in common if w not in {"the", "a", "an", "to", "cart", "product", "item", "yes", "ok", "this", "that", "it"}}
                             return len(common) > 0
 
                         # 1. Check last_searched FIRST (priority for "yes" / confirmation / pronouns)
@@ -414,7 +645,7 @@ class ShopifyOrchestrator(Orchestrator):
 
                         for title, gid in self.last_searched.items():
                             title_lower = title.lower()
-                            is_affir = bool(item_str in ("yes", "ok", "it", "add it", "do it"))
+                            is_affir = bool(item_str in ("yes", "ok", "it", "this", "that", "add it", "add this", "add that", "this product", "add this product", "do it"))
                             is_ment = bool(str(title_lower) in str(assistant_last_msg))
                             if is_match(title) or (is_affir and is_ment):
                                 existing_id = gid
@@ -423,10 +654,11 @@ class ShopifyOrchestrator(Orchestrator):
                         
                         # 2. Case where user says "yes" but we didn't match the title in the assistant's text
                         # (Maybe the assistant used a generic name). Fallback to the first item in last_searched.
-                        if not existing_id and item_str in ["yes", "ok", "it", "add it", "do it"]:
-                             if self.last_searched:
-                                 existing_id = list(self.last_searched.values())[0]
-                                 logger.info("shopify_resolved_from_last_searched_fallback")
+                        if not existing_id and item_str in ["yes", "ok", "it", "this", "that", "add it", "add this", "add that", "this product", "add this product", "do it"]:
+                             focus = self._resolve_product_reference(item_str)
+                             if focus.get("status") == "resolved":
+                                 existing_id = focus.get("variant_id")
+                                 logger.info("shopify_resolved_from_focus_fallback", product=focus.get("product_name"))
 
                         # 3. Check broad captured_ids if still no ID
                         if not existing_id:
@@ -498,6 +730,29 @@ class ShopifyOrchestrator(Orchestrator):
         # Reset last_searched if this was a new search
         if tool_name in ("search_shop_catalog", "search_catalog"):
             self.last_searched = {}
+            ranked_products = self._rerank_products(products)
+            self.active_product_focus = ranked_products[:10]
+            self.product_reference_map = self._build_product_reference_map(self.active_product_focus)
+            self.rerank_results = [
+                {
+                    "rank": product.get("rank"),
+                    "name": product.get("name"),
+                    "variant_id": product.get("variant_id"),
+                    "match_score": product.get("match_score"),
+                    "matched_constraints": product.get("matched_constraints", []),
+                    "missing_constraints": product.get("missing_constraints", []),
+                    "reason": product.get("reason"),
+                }
+                for product in ranked_products[:10]
+            ]
+            metadata["products"] = ranked_products[:5]
+            metadata["active_product_focus"] = self.active_product_focus
+            metadata["product_reference_map"] = self.product_reference_map
+            metadata["commerce_intent"] = self.last_constraints
+            metadata["original_query"] = self.last_user_query
+            metadata["search_query"] = self.last_search_query
+            metadata["rerank_results"] = self.rerank_results
+            products = metadata.get("products", [])
 
         for p in products:
             if not isinstance(p, dict): continue
@@ -508,6 +763,99 @@ class ShopifyOrchestrator(Orchestrator):
                 self.captured_ids[name] = gid
                 if tool_name in ("search_shop_catalog", "search_catalog"):
                     self.last_searched[name] = gid
+
+    def _normalize_focus_product(self, product: Dict[str, Any], original_rank: int) -> Dict[str, Any]:
+        name = str(product.get("name") or product.get("title") or product.get("sku") or f"Product {original_rank}")
+        variant_id = str(product.get("variant_id") or product.get("id") or product.get("product_id") or "")
+        normalized = dict(product)
+        normalized.update({
+            "rank": original_rank,
+            "original_rank": original_rank,
+            "name": name,
+            "title": product.get("title") or name,
+            "variant_id": variant_id,
+            "id": product.get("id") or variant_id,
+            "price": product.get("price"),
+            "currency": product.get("currency"),
+            "sku": product.get("sku"),
+            "product_url": product.get("product_url") or product.get("url"),
+            "image_url": product.get("image_url") or product.get("image"),
+        })
+        return normalized
+
+    def _rerank_products(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not isinstance(products, list):
+            return []
+        constraints = self.last_constraints or {}
+        original_query_tokens = self._tokens(self.last_user_query or "")
+        ranked: List[Dict[str, Any]] = []
+        max_budget = (constraints.get("budget") or {}).get("amount") if isinstance(constraints.get("budget"), dict) else None
+        desired_terms = set(constraints.get("attributes") or [])
+        if constraints.get("product_type"):
+            desired_terms.add(str(constraints["product_type"]))
+        if constraints.get("occasion"):
+            desired_terms.add(str(constraints["occasion"]))
+        desired_terms.update(constraints.get("preferences") or [])
+
+        for idx, raw_product in enumerate(products, start=1):
+            if not isinstance(raw_product, dict):
+                continue
+            product = self._normalize_focus_product(raw_product, idx)
+            product_text = " ".join(
+                str(product.get(key) or "")
+                for key in ("name", "title", "category", "sku", "description")
+            ).lower()
+            product_tokens = self._tokens(product_text)
+            matched_terms = sorted(term for term in desired_terms if term and term.lower() in product_text)
+            token_overlap = len(original_query_tokens.intersection(product_tokens))
+            score = max(0.0, 1.0 - (idx - 1) * 0.03) + token_overlap * 0.08 + len(matched_terms) * 0.18
+            missing_terms = sorted(term for term in desired_terms if term and term not in matched_terms)
+
+            price = self._to_price(product.get("price"))
+            if max_budget is not None and price is not None:
+                budget = float(max_budget)
+                comparable_price = price / 100 if budget and price > budget * 10 else price
+                if comparable_price <= budget:
+                    score += 0.35
+                    matched_terms.append(f"under budget {max_budget:g}")
+                else:
+                    score -= 0.45
+                    missing_terms.append(f"over budget {max_budget:g}")
+
+            for negative in constraints.get("negative_constraints") or []:
+                if negative and str(negative).lower() in product_text:
+                    score -= 0.5
+                    missing_terms.append(f"avoid {negative}")
+
+            product["match_score"] = round(score, 3)
+            product["matched_constraints"] = sorted(set(matched_terms))
+            product["missing_constraints"] = sorted(set(missing_terms))[:5]
+            if product["matched_constraints"]:
+                product["reason"] = f"Matches {', '.join(product['matched_constraints'][:3])}."
+            else:
+                product["reason"] = "Relevant Shopify catalog result."
+            ranked.append(product)
+
+        ranked.sort(key=lambda p: (p.get("match_score") or 0), reverse=True)
+        for idx, product in enumerate(ranked, start=1):
+            product["rank"] = idx
+        return ranked
+
+    def _build_product_reference_map(self, products: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        reference_map: Dict[str, Dict[str, Any]] = {}
+        for product in products:
+            keys = {
+                str(product.get("rank") or ""),
+                str(product.get("name") or "").lower(),
+                str(product.get("title") or "").lower(),
+                str(product.get("sku") or "").lower(),
+                str(product.get("variant_id") or ""),
+                str(product.get("id") or ""),
+            }
+            for key in keys:
+                if key:
+                    reference_map[key] = product
+        return reference_map
 
     def _build_reasoning_prompt(self) -> str:
         """Construct the few-shot prompting context with mandatory next-step hints for adds."""
@@ -587,7 +935,17 @@ class ShopifyOrchestrator(Orchestrator):
         
         # 1. Format the ACTIVE focus (most recent search)
         active_focus_ctx = ""
-        if self.last_searched:
+        if self.active_product_focus:
+            lines = ["\n### 🎯 ACTIVE PRODUCT FOCUS (MOST RECENT RERANKED RESULTS):\n"]
+            for product in self.active_product_focus[:5]:
+                name = product.get("name") or product.get("title")
+                gid = product.get("variant_id") or product.get("id")
+                price = self._display_price(product.get("price"))
+                score = product.get("match_score")
+                lines.append(f"- #{product.get('rank')}: {name} (ID: {gid}, price: {price}, match: {score})\n")
+            lines.append("--> If the user says 'this', 'it', 'that product', or gives an ordinal like 'second one', resolve against THIS ordered list.\n")
+            active_focus_ctx = "".join(lines)
+        elif self.last_searched:
             lines = ["\n### 🎯 ACTIVE PRODUCT FOCUS (MOST RECENT SEARCH):\n"]
             for title, gid in self.last_searched.items():
                 lines.append(f"- {title} (ID: {gid})\n")
@@ -614,6 +972,9 @@ Current Cart ID: {self.cart_id or "None"}
 
 Runtime Context:
 {json.dumps(self.prompt_runtime_context, indent=2, sort_keys=True, default=str) if self.prompt_runtime_context else "None"}
+
+Commerce Intent:
+{json.dumps({"original_query": self.last_user_query, "search_query": self.last_search_query, "constraints": self.last_constraints}, indent=2, sort_keys=True, default=str)}
 
 ### STRICT TOOL-FIRST RULE
 **NEVER** return conversational text like "I will add that now" or "One moment please" if you haven't invoked the JSON tool call yet.

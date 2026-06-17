@@ -77,6 +77,7 @@ export interface Message {
   confidenceScore?: number;
   products?: ProductData[];  // Phase 5: Product cards
   dealers?: DealerData[];    // Phase 5: Dealer cards
+  metadata?: Record<string, any>;
   feedback?: 'up' | 'down';
 }
 
@@ -134,6 +135,7 @@ export interface StreamingMessage {
   confidence_score?: number;
   products?: ProductData[];  // Phase 5: Product cards in metadata
   dealers?: DealerData[];    // Phase 5: Dealer cards in metadata
+  metadata?: Record<string, any>;
   timestamp?: string;
 }
 

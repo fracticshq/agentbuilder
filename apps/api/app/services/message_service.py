@@ -939,6 +939,16 @@ class MessageService:
                         session_state["captured_ids"] = meta.get("captured_ids", {})
                     if "last_searched" in meta:
                         session_state["last_searched"] = meta.get("last_searched", {})
+                    for key in (
+                        "active_product_focus",
+                        "product_reference_map",
+                        "last_user_query",
+                        "last_search_query",
+                        "last_constraints",
+                        "rerank_results",
+                    ):
+                        if key in meta:
+                            session_state[key] = meta.get(key)
 
             context_dict = {
                 "memory": memory_context,
@@ -1015,6 +1025,13 @@ class MessageService:
                         "cart_id": saved_cart_id,
                         "captured_ids": agent_metadata.get("captured_ids"),
                         "last_searched": agent_metadata.get("last_searched"),
+                        "active_product_focus": agent_metadata.get("active_product_focus"),
+                        "product_reference_map": agent_metadata.get("product_reference_map"),
+                        "last_user_query": agent_metadata.get("last_user_query"),
+                        "last_search_query": agent_metadata.get("last_search_query"),
+                        "last_constraints": agent_metadata.get("last_constraints"),
+                        "rerank_results": agent_metadata.get("rerank_results"),
+                        "resolved_reference": agent_metadata.get("resolved_reference"),
                     }
                 )
 
@@ -1395,6 +1412,12 @@ class MessageService:
                         "success": getattr(tool_result, "success", True),
                         "cart": _sanitize_for_json(tool_metadata.get("cart") or {}) if tool_metadata.get("cart") else None,
                         "orders_count": len(tool_metadata.get("orders") or []),
+                        "commerce_intent": _sanitize_for_json(tool_metadata.get("commerce_intent") or {}) if tool_metadata.get("commerce_intent") else None,
+                        "active_product_focus": _sanitize_for_json(tool_metadata.get("active_product_focus") or []) if tool_metadata.get("active_product_focus") else None,
+                        "product_reference_map": _sanitize_for_json(tool_metadata.get("product_reference_map") or {}) if tool_metadata.get("product_reference_map") else None,
+                        "original_query": tool_metadata.get("original_query"),
+                        "search_query": tool_metadata.get("search_query"),
+                        "rerank_results": _sanitize_for_json(tool_metadata.get("rerank_results") or []) if tool_metadata.get("rerank_results") else None,
                     },
                     products=products,
                     dealers=dealers,
@@ -1460,6 +1483,13 @@ class MessageService:
                         "cart_lines": agent_metadata.get("cart_lines"),
                         "captured_ids": agent_metadata.get("captured_ids"),
                         "last_searched": agent_metadata.get("last_searched"),
+                        "active_product_focus": agent_metadata.get("active_product_focus"),
+                        "product_reference_map": agent_metadata.get("product_reference_map"),
+                        "last_user_query": agent_metadata.get("last_user_query"),
+                        "last_search_query": agent_metadata.get("last_search_query"),
+                        "last_constraints": agent_metadata.get("last_constraints"),
+                        "rerank_results": agent_metadata.get("rerank_results"),
+                        "resolved_reference": agent_metadata.get("resolved_reference"),
                     }
                 )
 
@@ -1515,7 +1545,21 @@ class MessageService:
                 context_used=len(tool_results),
                 confidence_score=min(1.0, max(0.0, float(agent_metadata.get("validation_confidence", 1.0)))),
                 products=unique_products,
-                dealers=unique_dealers
+                dealers=unique_dealers,
+                metadata={
+                    "commerce_intent": _sanitize_for_json(agent_metadata.get("commerce_intent") or agent_metadata.get("last_constraints") or {}),
+                    "active_product_focus": _sanitize_for_json(agent_metadata.get("active_product_focus") or []),
+                    "product_reference_map": _sanitize_for_json(agent_metadata.get("product_reference_map") or {}),
+                    "original_query": agent_metadata.get("original_query") or agent_metadata.get("last_user_query"),
+                    "search_query": agent_metadata.get("search_query") or agent_metadata.get("last_search_query"),
+                    "rerank_results": _sanitize_for_json(agent_metadata.get("rerank_results") or []),
+                    "resolved_reference": _sanitize_for_json(agent_metadata.get("resolved_reference") or {}),
+                    "cart": _sanitize_for_json({
+                        "cart_id": saved_cart_id,
+                        "checkout_url": agent_metadata.get("checkout_url"),
+                        "cart_lines": agent_metadata.get("cart_lines"),
+                    }),
+                },
             )
 
             yield StreamingMessageResponse(

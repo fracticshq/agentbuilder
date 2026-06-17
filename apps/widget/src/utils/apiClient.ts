@@ -22,6 +22,7 @@ const mergeStreamingMetadata = (messageData: Partial<Message>, chunk: StreamingM
   if (chunk.citations?.length) messageData.citations = chunk.citations;
   if (chunk.products?.length) messageData.products = chunk.products;
   if (chunk.dealers?.length) messageData.dealers = chunk.dealers;
+  if (chunk.metadata) messageData.metadata = { ...(messageData.metadata || {}), ...chunk.metadata };
 };
 
 export class APIClient {
@@ -226,6 +227,7 @@ export class APIClient {
             citations: messageData.citations,
             products: messageData.products || [],  // Phase 5: Product cards
             dealers: messageData.dealers || [],    // Phase 5: Dealer cards
+            metadata: messageData.metadata,
           };
           
           isDev && console.log('[APIClient] Resolving with final message:', finalMessage);
@@ -248,6 +250,7 @@ export class APIClient {
       citations: data.citations || [],
       products: data.products || [],  // Phase 5: Product cards
       dealers: data.dealers || [],    // Phase 5: Dealer cards
+      metadata: data.metadata,
     };
   }
 
