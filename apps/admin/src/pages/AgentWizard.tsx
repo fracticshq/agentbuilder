@@ -426,12 +426,15 @@ interface AgentData {
   human_takeover: boolean;
   conversation_memory: boolean;
   long_term_memory: boolean;
+  auto_compaction: boolean;
+  context_window_messages: number;
   typing_indicators: boolean;
   response_streaming: boolean;
   widget_enabled: boolean;
   show_sources: boolean;
   show_product_cards: boolean;
   activity_mode: 'basic' | 'advanced';
+  activity_persistence: 'temporary' | 'persistent';
   rate_limiting: boolean;
   content_filtering: boolean;
   session_timeout: number;
@@ -533,12 +536,15 @@ const initialData: AgentData = {
   human_takeover: true,
   conversation_memory: true,
   long_term_memory: false,
+  auto_compaction: true,
+  context_window_messages: 12,
   typing_indicators: true,
   response_streaming: true,
   widget_enabled: true,
   show_sources: false,
   show_product_cards: true,
   activity_mode: 'basic',
+  activity_persistence: 'temporary',
   rate_limiting: true,
   content_filtering: true,
   session_timeout: 30,
@@ -781,12 +787,15 @@ export default function AgentWizard() {
         human_takeover: features.human_takeover ?? false,
         conversation_memory: memory.short_term?.enabled ?? features.conversation_memory ?? true,
         long_term_memory: memory.long_term?.enabled ?? false,
+        auto_compaction: memory.short_term?.auto_compaction ?? true,
+        context_window_messages: memory.short_term?.window_messages ?? 12,
         typing_indicators: features.typing_indicators ?? true,
         response_streaming: features.response_streaming ?? true,
         widget_enabled: widgetChannel.enabled ?? true,
         show_sources: features.show_sources ?? false,
         show_product_cards: features.show_product_cards ?? true,
         activity_mode: (widgetChannel.activity_mode ?? features.activity_mode) === 'advanced' ? 'advanced' : 'basic',
+        activity_persistence: (widgetChannel.activity_persistence ?? features.activity_persistence) === 'persistent' ? 'persistent' : 'temporary',
         allowed_file_types: features.file_upload?.allowed_types || [],
         max_file_size: features.file_upload?.max_size_mb ?? 10,
 
@@ -959,6 +968,8 @@ export default function AgentWizard() {
               enabled: agentData.conversation_memory,
               mode: 'conversation_history',
               retention: 'session',
+              auto_compaction: agentData.auto_compaction,
+              window_messages: agentData.context_window_messages,
             },
             long_term: {
               enabled: agentData.long_term_memory,
@@ -987,6 +998,7 @@ export default function AgentWizard() {
               show_product_cards: agentData.show_product_cards,
               human_takeover: agentData.human_takeover,
               activity_mode: agentData.activity_mode,
+              activity_persistence: agentData.activity_persistence,
             },
           },
           features: {

@@ -26,6 +26,29 @@ function connectorLabel(meta: Record<string, any>, fallback: string): string {
   return ENDPOINT_LABELS[id] || meta.endpoint_name || meta.connector_name || fallback;
 }
 
+// Orchestrator tool steps key/label by tool_name (e.g.
+// "tool_context_vedika_lal_kitab_lalkitab_chart" or "skill_knowledge_qa").
+function toolKey(meta: Record<string, any>, fallback: string): string {
+  return String(meta.step_id || meta.tool_id || meta.tool_name || fallback);
+}
+
+function toolLabel(meta: Record<string, any>, fallback: string): string {
+  const name = String(meta.tool_name || '');
+  // A connector tool embeds the endpoint id at the end → reuse friendly labels.
+  for (const key of Object.keys(ENDPOINT_LABELS)) {
+    if (name.endsWith(key)) return ENDPOINT_LABELS[key];
+  }
+  if (name) {
+    const cleaned = name
+      .replace(/^tool_context_[a-z0-9]+_[a-z0-9]+_/i, '')
+      .replace(/^(tool_|skill_)/i, '')
+      .replace(/_/g, ' ')
+      .trim();
+    if (cleaned) return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+  }
+  return fallback;
+}
+
 function latencyDetail(meta: Record<string, any>): string | undefined {
   const ms = Number(meta.latency_ms);
   if (!Number.isFinite(ms) || ms <= 0) return undefined;
@@ -94,23 +117,24 @@ export function reduceActivity(state: ActivityState, chunk: StreamingMessage): A
       break;
 
     case 'tool_start':
-      steps = upsert(steps, `tool:${meta.tool_id || content}`, { label: content || 'Running tool…', status: 'running' });
+      steps = upsert(steps, `tool:${toolKey(meta, content)}`, { label: toolLabel(meta, content || 'Running tool…'), status: 'running' });
       break;
     case 'tool_result':
-      steps = upsert(steps, `tool:${meta.tool_id || 'tool'}`, {
-        label: content || 'Tool finished',
+      steps = upsert(steps, `tool:${toolKey(meta, content)}`, {
+        label: toolLabel(meta, content || 'Tool finished'),
         status: meta.success === false ? 'error' : 'done',
+        detail: latencyDetail(meta),
       });
       break;
     case 'tool_error':
-      steps = upsert(steps, `tool:${meta.tool_id || content}`, { label: content || 'Tool error', status: 'error' });
+      steps = upsert(steps, `tool:${toolKey(meta, content)}`, { label: toolLabel(meta, content || 'Tool error'), status: 'error' });
       break;
 
     case 'skill_start':
-      steps = upsert(steps, `skill:${meta.skill_id || content}`, { label: content || 'Running skill…', status: 'running' });
+      steps = upsert(steps, `tool:${toolKey(meta, content)}`, { label: toolLabel(meta, content || 'Running skill…'), status: 'running' });
       break;
     case 'skill_result':
-      steps = upsert(steps, `skill:${meta.skill_id || content}`, { label: content || 'Skill finished', status: 'done' });
+      steps = upsert(steps, `tool:${toolKey(meta, content)}`, { label: toolLabel(meta, content || 'Skill finished'), status: meta.success === false ? 'error' : 'done' });
       break;
 
     case 'status':

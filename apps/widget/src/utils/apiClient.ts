@@ -196,6 +196,10 @@ export class APIClient {
                 if (chunk.type === 'content') {
                   fullMessage += chunk.content || '';
                   onStream(chunk);
+                } else if (chunk.type === 'final_answer' && typeof chunk.content === 'string' && chunk.content.length >= fullMessage.length) {
+                  // Authoritative full answer — recover from any dropped chunk.
+                  fullMessage = chunk.content;
+                  onStream(chunk);
                 } else if (chunk.type === 'error') {
                   reject(new Error(chunk.content || 'Streaming error'));
                   return;

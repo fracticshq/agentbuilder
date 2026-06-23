@@ -118,6 +118,9 @@ function App({ config }: AppProps) {
   // 'basic' = the lightweight cycling indicator; 'advanced' = the live step
   // timeline. Admin-configurable per agent; defaults to 'basic'.
   const [activityMode, setActivityMode] = React.useState<'basic' | 'advanced'>('basic');
+  // In advanced mode: 'temporary' (timeline disappears after the answer) or
+  // 'persistent' (stays attached to each answer, Claude/ChatGPT style).
+  const [activityPersistence, setActivityPersistence] = React.useState<'temporary' | 'persistent'>('temporary');
   const [unavailableMessage, setUnavailableMessage] = React.useState<string | null>(null);
   // Holds the pending conversation lifecycle event type until agentId is ready.
   const [convStartEvent, setConvStartEvent] = React.useState<'conversation_started' | 'conversation_resumed' | null>(null);
@@ -161,11 +164,14 @@ function App({ config }: AppProps) {
         const shouldShowProductCards = config?.showProductCards ?? widgetChannel.show_product_cards ?? features.show_product_cards !== false;
         const resolvedActivityMode =
           (widgetChannel.activity_mode ?? features.activity_mode) === 'advanced' ? 'advanced' : 'basic';
+        const resolvedActivityPersistence =
+          (widgetChannel.activity_persistence ?? features.activity_persistence) === 'persistent' ? 'persistent' : 'temporary';
         setUseWebSocket(wsEnabled);
         setHumanTakeoverEnabled(takeoverEnabled);
         setShowSources(shouldShowSources);
         setShowProductCards(shouldShowProductCards);
         setActivityMode(resolvedActivityMode);
+        setActivityPersistence(resolvedActivityPersistence);
         if (!brandId) return;
 
         // 2. Get brand → extract colors / identity
@@ -412,6 +418,14 @@ function App({ config }: AppProps) {
             if (!streamedContent) updateActivity(finalizeActivity(activityRef.current));
             streamedContent += chunk.content;
             updateMessage(assistantMessageId, { content: streamedContent });
+          } else if (chunk.type === 'final_answer' && chunk.content) {
+            // Authoritative full answer — guarantees nothing is lost if a
+            // content chunk was dropped mid-stream.
+            if (chunk.content.length >= streamedContent.length) {
+              streamedContent = chunk.content;
+              updateMessage(assistantMessageId, { content: streamedContent });
+            }
+            updateActivity(finalizeActivity(activityRef.current));
           } else {
             // Any other event is background activity — fold it into the timeline.
             updateActivity(reduceActivity(activityRef.current, chunk));
@@ -481,6 +495,7 @@ function App({ config }: AppProps) {
             isTyping={isTyping}
             activity={activity}
             activityMode={activityMode}
+            activityPersistence={activityPersistence}
             isExpanded={isExpanded}
             isMobile={isMobile}
             onSendMessage={handleSendMessage}

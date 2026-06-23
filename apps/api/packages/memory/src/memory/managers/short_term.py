@@ -131,10 +131,13 @@ class ShortTermMemory:
         Returns:
             List of Message objects
         """
+        # Fetch the MOST RECENT `limit` messages (sort desc + limit), then return
+        # them in chronological order. Sorting ascending + limit would return the
+        # OLDEST messages, which silently drops recent context ("forgetfulness").
         cursor = self.collection.find(
             {"conversation_id": conversation_id}
-        ).sort("timestamp", 1).limit(limit)
-        
+        ).sort("timestamp", -1).limit(limit)
+
         messages = []
         async for doc in cursor:
             try:
@@ -143,13 +146,56 @@ class ShortTermMemory:
                 messages.append(Message(**doc))
             except Exception as e:
                 logger.warning("Failed to parse message", error=str(e))
-        
+
+        messages.reverse()  # chronological: oldest → newest
+
         logger.debug("Retrieved recent messages",
                     conversation_id=conversation_id,
                     count=len(messages))
-        
+
         return messages
     
+    async def get_earliest_messages(self, conversation_id: str, limit: int) -> List[Message]:
+        """Oldest `limit` messages in chronological order (used for compaction)."""
+        if limit <= 0:
+            return []
+        cursor = self.collection.find(
+            {"conversation_id": conversation_id}
+        ).sort("timestamp", 1).limit(limit)
+        messages = []
+        async for doc in cursor:
+            try:
+                doc.pop("_id", None)
+                messages.append(Message(**doc))
+            except Exception as e:
+                logger.warning("Failed to parse message", error=str(e))
+        return messages
+
+    async def save_summary(
+        self,
+        conversation_id: str,
+        summary: str,
+        covered_count: int,
+        start_timestamp: datetime,
+        end_timestamp: datetime,
+    ) -> ConversationSummary:
+        """Persist a rolling conversation summary. `covered_count` records how
+        many of the oldest messages are folded into this summary."""
+        doc = ConversationSummary(
+            id=str(uuid.uuid4()),
+            conversation_id=conversation_id,
+            summary=summary,
+            turn_count=max(1, covered_count),
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+        await self.summaries.insert_one(doc.dict())
+        return doc
+
+    async def get_latest_summary(self, conversation_id: str) -> Optional[ConversationSummary]:
+        """Public accessor for the most recent rolling summary."""
+        return await self._get_last_summary(conversation_id)
+
     async def get_message_count(self, conversation_id: str) -> int:
         """Get total message count for conversation."""
         count = await self.collection.count_documents(

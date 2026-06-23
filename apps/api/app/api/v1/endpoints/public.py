@@ -58,6 +58,11 @@ def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
     activity_mode = widget.get("activity_mode", features.get("activity_mode", "basic"))
     if activity_mode not in ("basic", "advanced"):
         activity_mode = "basic"
+    # In advanced mode: 'temporary' (timeline disappears after the answer) or
+    # 'persistent' (stays attached to the message, Claude/ChatGPT style).
+    activity_persistence = widget.get("activity_persistence", features.get("activity_persistence", "temporary"))
+    if activity_persistence not in ("temporary", "persistent"):
+        activity_persistence = "temporary"
 
     return {
         "domain": domain,
@@ -70,6 +75,7 @@ def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
             "show_product_cards": widget.get("show_product_cards", features.get("show_product_cards", True)),
             "human_takeover": widget.get("human_takeover", features.get("human_takeover", False)),
             "activity_mode": activity_mode,
+            "activity_persistence": activity_persistence,
         },
         "channels": {
             "widget": {
@@ -79,6 +85,7 @@ def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
                 "show_product_cards": widget.get("show_product_cards", features.get("show_product_cards", True)),
                 "human_takeover": widget.get("human_takeover", features.get("human_takeover", False)),
                 "activity_mode": activity_mode,
+                "activity_persistence": activity_persistence,
             }
         },
     }

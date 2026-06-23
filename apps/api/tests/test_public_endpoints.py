@@ -105,6 +105,7 @@ def test_public_widget_bootstrap_endpoints_are_accessible(monkeypatch):
                     "show_product_cards": True,
                     "human_takeover": False,
                     "activity_mode": "basic",
+                    "activity_persistence": "temporary",
                 },
                 "channels": {
                     "widget": {
@@ -114,6 +115,7 @@ def test_public_widget_bootstrap_endpoints_are_accessible(monkeypatch):
                         "show_product_cards": True,
                         "human_takeover": False,
                         "activity_mode": "basic",
+                        "activity_persistence": "temporary",
                     }
                 },
             },
