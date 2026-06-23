@@ -85,19 +85,10 @@ export class WebSocketClient {
     if (chunk.type === 'content') {
       this.accumulatedContent += chunk.content || '';
       this.pendingCallback?.(chunk);
-    } else if (
-      chunk.type === 'status' ||
-      chunk.type === 'context_start' ||
-      chunk.type === 'context_result' ||
-      chunk.type === 'skill_start' ||
-      chunk.type === 'skill_result' ||
-      chunk.type === 'tool_start' ||
-      chunk.type === 'tool_result' ||
-      chunk.type === 'tool_error' ||
-      chunk.type === 'citation'
-    ) {
-      this.pendingCallback?.(chunk);
-    } else if (chunk.type === 'metadata') {
+    } else if (chunk.type === 'metadata' || chunk.type === 'done') {
+      // Both terminate the turn: the normal path sends `metadata` (carrying
+      // citations/products) then `done`; some paths (e.g. a clarifying question)
+      // send only `done`. Whichever lands first resolves the pending message.
       const resolve = this.pendingResolve;
       const content = this.accumulatedContent;
       const meta = { ...this.pendingMeta };
@@ -112,10 +103,19 @@ export class WebSocketClient {
         dealers: meta.dealers ?? [],
         metadata: meta.metadata,
       });
+    } else if (chunk.type === 'final_answer') {
+      // The full answer is already accumulated from `content` events; surface
+      // the event for any listeners but don't double-count the text.
+      this.pendingCallback?.(chunk);
     } else if (chunk.type === 'error') {
       const reject = this.pendingReject;
       this.clearPending();
       reject?.(new Error((chunk.content as string) || 'WebSocket stream error'));
+    } else {
+      // Any other event is background activity (status, *_start, *_result,
+      // connector_*, geocode_*, rag_context, api_context, place_disambiguation,
+      // missing_input, citation, …). Forward it so the UI can show real progress.
+      this.pendingCallback?.(chunk);
     }
   };
 

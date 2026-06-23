@@ -76,6 +76,17 @@ function compactTrace(entries: TraceEntry[]): TraceEntry[] {
   return Array.from(seen.values()).slice(-8);
 }
 
+function getConnectorMetadata(metadata: any): { enabled?: boolean; name?: string | null } | null {
+  const connector = metadata?.context_connector || metadata?.connector || metadata?.api_data_source;
+  if (connector) {
+    return connector;
+  }
+  if (Array.isArray(metadata?.context_connectors)) {
+    return metadata.context_connectors.find((entry: any) => entry?.enabled) || metadata.context_connectors[0] || null;
+  }
+  return null;
+}
+
 function formatProductPrice(price?: number, currency?: string): string | null {
   if (typeof price !== 'number' || price <= 0) return null;
 
@@ -237,16 +248,46 @@ export default function AgentInferenceTester({
             if (pageUrl) {
               addTrace({ label: 'Page', detail: pageUrl, state: 'done' });
             }
-            const apiName = payload.metadata?.api_data_source?.name;
-            if (payload.metadata?.api_data_source?.enabled && apiName) {
-              addTrace({ label: 'API Data', detail: `${apiName} enabled`, state: 'done' });
+            const connectorMetadata = getConnectorMetadata(payload.metadata);
+            const connectorName = connectorMetadata?.name;
+            if (connectorMetadata?.enabled && connectorName) {
+              addTrace({ label: 'Context Connector', detail: `${connectorName} enabled`, state: 'done' });
             }
+          } else if (payload.type === 'rag_context') {
+            addTrace({ label: 'RAG', detail: payload.content || 'Knowledge context selected', state: 'done' });
           } else if (payload.type === 'skill_start') {
             addTrace({ label: 'Skill', detail: payload.content || payload.metadata?.tool_name || 'Running skill', state: 'active' });
           } else if (payload.type === 'skill_result') {
             addTrace({ label: 'Skill', detail: payload.content || payload.metadata?.tool_name || 'Skill complete', state: payload.metadata?.success === false ? 'error' : 'done' });
           } else if (payload.type === 'tool_start') {
             addTrace({ label: 'Tool', detail: payload.content || payload.metadata?.tool_name || 'Running tool', state: 'active' });
+          } else if (payload.type === 'connector_start' || payload.type === 'mcp_tool_start') {
+            addTrace({
+              label: payload.type === 'mcp_tool_start' ? 'MCP Tool' : 'Context Connector',
+              detail: payload.content || payload.metadata?.endpoint_name || 'Calling approved context source',
+              state: 'active'
+            });
+          } else if (payload.type === 'connector_result' || payload.type === 'mcp_tool_result' || payload.type === 'connector_error') {
+            const requestShape = payload.metadata?.request_shape;
+            const latency = payload.metadata?.latency_ms ? ` · ${payload.metadata.latency_ms}ms` : '';
+            const summary = payload.metadata?.response_summary
+              ? ` · ${String(payload.metadata.response_summary).slice(0, 90)}`
+              : '';
+            addTrace({
+              label: payload.type === 'mcp_tool_result' ? 'MCP Tool' : 'Context Connector',
+              detail: payload.content
+                || `${payload.metadata?.endpoint_name || 'Connector'}${latency}${summary}`,
+              state: payload.type === 'connector_error' || payload.metadata?.success === false ? 'error' : 'done'
+            });
+            if (requestShape?.payload_keys?.length) {
+              addTrace({ label: 'Request shape', detail: `Fields: ${requestShape.payload_keys.join(', ')}`, state: 'done' });
+            }
+          } else if (payload.type === 'missing_input') {
+            addTrace({
+              label: 'Missing input',
+              detail: payload.content || 'Connector needs more user fields before it can run',
+              state: 'error'
+            });
           } else if (payload.type === 'tool_result') {
             const toolName = payload.metadata?.tool_name;
             const productCount = Array.isArray(payload.products) ? payload.products.length : 0;
@@ -262,6 +303,8 @@ export default function AgentInferenceTester({
             addTrace({ label: 'Tool', detail: payload.content || 'Tool failed', state: 'error' });
           } else if (payload.type === 'done') {
             addTrace({ label: 'Answer', detail: payload.content || 'Run complete', state: 'done' });
+          } else if (payload.type === 'final_answer') {
+            addTrace({ label: 'Answer', detail: 'Final answer assembled', state: 'done' });
           } else if (payload.type === 'metadata') {
             addTrace({ label: 'Metadata', detail: payload.content || 'Runtime metadata received', state: 'done' });
           } else if (payload.type === 'error') {
@@ -302,6 +345,14 @@ export default function AgentInferenceTester({
             addTrace({ label: 'Tool data', detail: `${payload.dealers.length} dealer result${payload.dealers.length === 1 ? '' : 's'} returned`, state: 'done' });
           }
         });
+      }
+
+      const trailingPayload = parseSsePayload(buffer);
+      if (trailingPayload?.type === 'content') {
+        setAnswer(prev => `${prev}${trailingPayload.content || ''}`);
+      } else if (trailingPayload?.type === 'error') {
+        setError(trailingPayload.content || 'Streaming error');
+        addTrace({ label: 'Error', detail: trailingPayload.content || 'Streaming error', state: 'error' });
       }
 
       addTrace({ label: 'Answer', detail: 'Streaming response complete', state: 'done' });
@@ -363,7 +414,7 @@ export default function AgentInferenceTester({
             <div className="mt-3 space-y-2">
               {products.length === 0 && dealers.length === 0 && citations.length === 0 && trace.filter(entry => entry.state !== 'waiting').length === 0 ? (
                 <div className="rounded-md border border-dashed border-gray-300 bg-white px-3 py-5 text-xs leading-5 text-gray-500">
-                  Citations, retrieved files, API results, and skill outputs will appear here during a run.
+                  Citations, retrieved files, Context Connector results, and skill outputs will appear here during a run.
                 </div>
               ) : null}
 
@@ -466,7 +517,7 @@ export default function AgentInferenceTester({
                 </span>
                 <span className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs text-gray-600">
                   <CommandLineIcon className="h-3.5 w-3.5" />
-                  API/skill trace ready
+                  Connector/skill trace ready
                 </span>
               </div>
 
@@ -505,7 +556,7 @@ export default function AgentInferenceTester({
 
           <div className="border-t border-gray-200 bg-gray-50 p-3">
             <div className="mb-3 flex flex-wrap gap-2">
-              {['What context are you using?', 'Call the configured API data source', 'Show the active skills'].map((prompt) => (
+              {['What context are you using?', 'Call the configured Context Connector', 'Show the active skills'].map((prompt) => (
                 <button
                   key={prompt}
                   type="button"

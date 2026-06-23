@@ -39,7 +39,7 @@ REQUIRED_PACKAGE_PATHS = (
 )
 SECRET_SUFFIX = "_encrypted"
 SECRET_KEY_PATTERN = re.compile(
-    r"(token|secret|password|api[_-]?key|authorization|credential)",
+    r"(token|secret|password|api[_-]?key|authorization|credential|auth[_-]?header)",
     re.IGNORECASE,
 )
 
@@ -105,6 +105,41 @@ def _placeholder_for(tool_id: str, field: str) -> str:
     return "${" + normalized.upper() + "}"
 
 
+def _legacy_api_data_source_to_connector(api_data_source: Any) -> list[dict[str, Any]]:
+    if not isinstance(api_data_source, dict):
+        return []
+    url = str(api_data_source.get("url") or "").strip()
+    if not url:
+        return []
+    auth_header = api_data_source.get("auth_header")
+    connector = {
+            "id": "legacy_api_data_source",
+            "name": api_data_source.get("name") or "Legacy API Data Source",
+            "type": "http_api",
+            "enabled": bool(api_data_source.get("enabled", True)),
+            "auth": {"type": "raw_header"},
+            "usage_policy": api_data_source.get("usage") or "",
+            "endpoints": [
+                {
+                    "id": "default",
+                    "name": api_data_source.get("name") or "Default API Lookup",
+                    "enabled": True,
+                    "method": "POST",
+                    "url_template": url,
+                    "required_user_fields": [],
+                    "response_mapping": {},
+                    "tool_description": api_data_source.get("usage") or "Call the configured API data source.",
+                }
+            ],
+        }
+    if _is_placeholder(auth_header):
+        connector["auth"]["auth_header_placeholder"] = auth_header
+        connector["auth_header_placeholder"] = auth_header
+    elif auth_header:
+        connector["auth"]["auth_header"] = auth_header
+    return [connector]
+
+
 def _strip_secretish_values(value: Any, *, placeholders: bool = False, tool_id: str = "tool") -> Any:
     if isinstance(value, list):
         return [
@@ -124,9 +159,9 @@ def _strip_secretish_values(value: Any, *, placeholders: bool = False, tool_id: 
             continue
         if SECRET_KEY_PATTERN.search(key_string):
             if placeholders and _is_placeholder(nested):
-                sanitized[key_string] = nested
+                sanitized[f"{key_string}_placeholder"] = nested
             elif placeholders:
-                sanitized[key_string] = _placeholder_for(tool_id, key_string)
+                sanitized[f"{key_string}_placeholder"] = _placeholder_for(tool_id, key_string)
             continue
         sanitized[key_string] = _strip_secretish_values(
             nested,
@@ -304,10 +339,25 @@ class AgentManifestService:
                 "data_source": config.get("data_source") or "none",
                 "data_source_policy": prompt_layers.get("data_source_policy") or {},
                 "rag": config.get("rag") or {"enabled": False},
-                "api_data_source": _strip_secretish_values(config.get("api_data_source") or {}),
+                "context_connectors": self._sanitize_context_connectors_for_export(
+                    config.get("context_connectors") or _legacy_api_data_source_to_connector(config.get("api_data_source"))
+                ),
                 "documents": config.get("documents") or [],
             }
         )
+
+    def _sanitize_context_connectors_for_export(self, connectors: Any) -> list[dict[str, Any]]:
+        if not isinstance(connectors, list):
+            return []
+        sanitized_connectors: list[dict[str, Any]] = []
+        for connector in connectors:
+            if not isinstance(connector, dict):
+                continue
+            connector_id = str(connector.get("id") or connector.get("name") or "context_connector")
+            sanitized_connectors.append(
+                _strip_secretish_values(connector, placeholders=True, tool_id=connector_id)
+            )
+        return sanitized_connectors
 
     def _build_tools_index(self, config: dict[str, Any]) -> dict[str, Any]:
         tools = deepcopy(config.get("tools") or {})
@@ -422,7 +472,9 @@ class AgentManifestService:
                 "security": runtime.get("security") or {},
                 "agent_api": runtime.get("agent_api") or {},
                 "url_context_boost": runtime.get("url_context_boost") or {},
-                "api_data_source": knowledge.get("api_data_source") or {},
+                "context_connectors": knowledge.get("context_connectors")
+                if isinstance(knowledge.get("context_connectors"), list)
+                else _legacy_api_data_source_to_connector(knowledge.get("api_data_source")),
                 "tools": self._import_tools_config(tools_index),
                 "skills": self._import_skills_config(skills_index),
                 "hooks": hooks,

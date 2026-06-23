@@ -54,6 +54,11 @@ def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
     domain = configuration.get("domain") or {}
     url_context_boost = configuration.get("url_context_boost") or {}
 
+    # 'basic' (cycling indicator) or 'advanced' (live step timeline).
+    activity_mode = widget.get("activity_mode", features.get("activity_mode", "basic"))
+    if activity_mode not in ("basic", "advanced"):
+        activity_mode = "basic"
+
     return {
         "domain": domain,
         "url_context_boost": {
@@ -64,6 +69,7 @@ def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
             "show_sources": widget.get("show_sources", features.get("show_sources", False)),
             "show_product_cards": widget.get("show_product_cards", features.get("show_product_cards", True)),
             "human_takeover": widget.get("human_takeover", features.get("human_takeover", False)),
+            "activity_mode": activity_mode,
         },
         "channels": {
             "widget": {
@@ -72,6 +78,7 @@ def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
                 "show_sources": widget.get("show_sources", features.get("show_sources", False)),
                 "show_product_cards": widget.get("show_product_cards", features.get("show_product_cards", True)),
                 "human_takeover": widget.get("human_takeover", features.get("human_takeover", False)),
+                "activity_mode": activity_mode,
             }
         },
     }

@@ -1,5 +1,67 @@
 import type { AzureOpenAIDeployment, Brand } from '../../api/client';
 
+export type ContextConnectorMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+export interface ContextConnectorEndpoint {
+  id: string;
+  name: string;
+  method: ContextConnectorMethod;
+  url: string;
+  enabled: boolean;
+  required_fields: string[];
+  description?: string;
+  headers?: Record<string, any>;
+  query_schema?: Record<string, any> | string;
+  body_schema?: Record<string, any> | string;
+  response_mapping?: Record<string, any> | string;
+  timeout_seconds?: number;
+  max_response_chars?: number;
+  retry_count?: number;
+  execution_order?: number;
+  requires_prior_endpoint?: string | null;
+  payload_mode?: 'wrapped' | 'flat_body';
+  field_mapping?: Record<string, string>;
+  runtime_required_fields?: string[];
+}
+
+export interface McpDiscoveredTool {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, any>;
+  parameters_schema?: Record<string, any>;
+}
+
+export interface ContextConnector {
+  id: string;
+  type: 'http' | 'mcp';
+  name: string;
+  enabled: boolean;
+  auth_header: string;
+  auth_header_configured: boolean;
+  usage: string;
+  tool_description: string;
+  domain_allowlist?: string[];
+  input_resolution?: {
+    resolve_known_places?: boolean;
+    confirm_understood_details?: boolean;
+    missing_input_strategy?: 'ask_follow_up' | 'strict_fields';
+  };
+  headers?: Record<string, any>;
+  timeout_seconds?: number;
+  max_response_chars?: number;
+  retry_count?: number;
+  endpoint?: string;
+  transport?: string;
+  mcp?: Record<string, any>;
+  discovered_tools?: McpDiscoveredTool[];
+  allowed_tools?: string[];
+  last_discovered_at?: string | null;
+  revoked?: boolean;
+  endpoints: ContextConnectorEndpoint[];
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface AgentStudioData {
   name: string;
   description: string;
@@ -53,12 +115,14 @@ export interface AgentStudioData {
   api_data_source_auth_header: string;
   api_data_source_auth_header_configured: boolean;
   api_data_source_usage: string;
+  context_connectors?: ContextConnector[];
   url_context_boost_enabled: boolean;
 }
 
 export interface AgentStudioCommonProps {
   data: AgentStudioData;
   onChange: (field: string, value: any) => void;
+  agentId?: string;
 }
 
 export interface AgentStudioFormProps extends AgentStudioCommonProps {

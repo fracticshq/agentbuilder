@@ -9,7 +9,8 @@ import { buildBrandTheme } from './utils/brandTheme';
 import { getConversationStorageKey, shouldAutoOpenFromSearch } from './utils/bootstrap';
 import { extractPageContext } from './utils/pageContext';
 import { trackEvent } from './utils/activityClient';
-import type { WidgetConfig } from './types';
+import { reduceActivity, finalizeActivity, EMPTY_ACTIVITY } from './utils/activityTimeline';
+import type { ActivityState, WidgetConfig } from './types';
 import './App.css';
 import './styles/responsive.css';
 
@@ -83,8 +84,15 @@ function App({ config }: AppProps) {
     removeMessage,
   } = useWidgetStore();
 
-  const [typingStatus, setTypingStatus] = React.useState<string>('');
+  const [activity, setActivity] = React.useState<ActivityState>(EMPTY_ACTIVITY);
+  const activityRef = React.useRef<ActivityState>(EMPTY_ACTIVITY);
   const controlChannelRef = React.useRef<WebSocket | null>(null);
+
+  // Keep a ref in sync so we can snapshot the final trace when the turn ends.
+  const updateActivity = React.useCallback((next: ActivityState) => {
+    activityRef.current = next;
+    setActivity(next);
+  }, []);
 
   const { isExpanded: isFullscreen, toggleExpanded, isMobile } = useFullscreen();
 
@@ -107,6 +115,9 @@ function App({ config }: AppProps) {
   const [humanTakeoverEnabled, setHumanTakeoverEnabled] = React.useState(false);
   const [showSources, setShowSources] = React.useState(config?.showSources ?? false);
   const [showProductCards, setShowProductCards] = React.useState(config?.showProductCards ?? true);
+  // 'basic' = the lightweight cycling indicator; 'advanced' = the live step
+  // timeline. Admin-configurable per agent; defaults to 'basic'.
+  const [activityMode, setActivityMode] = React.useState<'basic' | 'advanced'>('basic');
   const [unavailableMessage, setUnavailableMessage] = React.useState<string | null>(null);
   // Holds the pending conversation lifecycle event type until agentId is ready.
   const [convStartEvent, setConvStartEvent] = React.useState<'conversation_started' | 'conversation_resumed' | null>(null);
@@ -148,10 +159,13 @@ function App({ config }: AppProps) {
         const takeoverEnabled = config?.enableHumanTakeover ?? widgetChannel.human_takeover ?? features.human_takeover === true;
         const shouldShowSources = config?.showSources ?? widgetChannel.show_sources ?? features.show_sources === true;
         const shouldShowProductCards = config?.showProductCards ?? widgetChannel.show_product_cards ?? features.show_product_cards !== false;
+        const resolvedActivityMode =
+          (widgetChannel.activity_mode ?? features.activity_mode) === 'advanced' ? 'advanced' : 'basic';
         setUseWebSocket(wsEnabled);
         setHumanTakeoverEnabled(takeoverEnabled);
         setShowSources(shouldShowSources);
         setShowProductCards(shouldShowProductCards);
+        setActivityMode(resolvedActivityMode);
         if (!brandId) return;
 
         // 2. Get brand → extract colors / identity
@@ -385,6 +399,7 @@ function App({ config }: AppProps) {
       });
 
       addMessage({ id: assistantMessageId, content: '', role: 'assistant', timestamp: new Date(), citations: [] });
+      updateActivity(EMPTY_ACTIVITY);
 
       const client = useWebSocket ? wsClient : apiClient;
       const response = await client.sendMessage(
@@ -392,21 +407,31 @@ function App({ config }: AppProps) {
         currentConvId,
         agentId,
         (chunk) => {
-          if (chunk.type === 'status' && chunk.content) {
-            setTypingStatus(chunk.content);
-          } else if (chunk.type === 'content' && chunk.content) {
-            setTypingStatus('');
+          if (chunk.type === 'content' && chunk.content) {
+            // Answer started streaming — collapse any in-flight steps to done.
+            if (!streamedContent) updateActivity(finalizeActivity(activityRef.current));
             streamedContent += chunk.content;
             updateMessage(assistantMessageId, { content: streamedContent });
+          } else {
+            // Any other event is background activity — fold it into the timeline.
+            updateActivity(reduceActivity(activityRef.current, chunk));
           }
         }
       );
 
+      const finalActivity = finalizeActivity(activityRef.current);
       updateMessage(assistantMessageId, {
         content: response.content,
         citations: response.citations,
         products: response.products,
         dealers: response.dealers,
+        activitySteps: finalActivity.steps.length ? finalActivity.steps : undefined,
+        metadata: {
+          ...(response.metadata || {}),
+          ...(finalActivity.disambiguation
+            ? { place_candidates: finalActivity.disambiguation.candidates }
+            : {}),
+        },
       });
       trackEvent({
         event_type: 'message_received',
@@ -425,7 +450,7 @@ function App({ config }: AppProps) {
       });
     } finally {
       setIsTyping(false);
-      setTypingStatus('');
+      updateActivity(EMPTY_ACTIVITY);
     }
   };
 
@@ -454,7 +479,8 @@ function App({ config }: AppProps) {
           <ChatWindow
             messages={messages}
             isTyping={isTyping}
-            typingStatus={typingStatus}
+            activity={activity}
+            activityMode={activityMode}
             isExpanded={isExpanded}
             isMobile={isMobile}
             onSendMessage={handleSendMessage}

@@ -19,6 +19,7 @@ echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━�
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 API_DIR="${SCRIPT_DIR}"
+REPO_DIR="$( cd "${API_DIR}/../.." && pwd )"
 
 # Change to API directory
 cd "${API_DIR}"
@@ -43,17 +44,27 @@ else
     echo -e "${GREEN}✓ Dependencies already installed${NC}"
 fi
 
-# Check for .env file
-if [ ! -f ".env" ]; then
+# Check for .env file. app.config loads the root .env by default.
+if [ ! -f ".env" ] && [ ! -f "${REPO_DIR}/.env" ]; then
     echo -e "${RED}✗ .env file not found${NC}"
-    echo -e "${YELLOW}Please create .env file from .env.example${NC}"
+    echo -e "${YELLOW}Please create ${REPO_DIR}/.env or ${API_DIR}/.env from .env.example${NC}"
     exit 1
 else
     echo -e "${GREEN}✓ Environment configuration found${NC}"
 fi
 
-# Set PYTHONPATH
-export PYTHONPATH="${API_DIR}:${PYTHONPATH}"
+# Set PYTHONPATH for monorepo local packages. requirements.txt only installs
+# third-party dependencies; commons/llm/memory/retrieval/tools/agent_runtime
+# are local packages under the repo.
+PACKAGE_PATHS=""
+for package in commons llm memory retrieval tools agent_runtime; do
+    if [ -d "${REPO_DIR}/packages/${package}/src" ]; then
+        PACKAGE_PATHS="${PACKAGE_PATHS}:${REPO_DIR}/packages/${package}/src"
+    elif [ -d "${API_DIR}/packages/${package}/src" ]; then
+        PACKAGE_PATHS="${PACKAGE_PATHS}:${API_DIR}/packages/${package}/src"
+    fi
+done
+export PYTHONPATH="${API_DIR}${PACKAGE_PATHS}:${PYTHONPATH:-}"
 
 # Start the server
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

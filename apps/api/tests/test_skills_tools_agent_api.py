@@ -194,15 +194,22 @@ def test_api_data_source_secret_is_encrypted_masked_preserved_and_decryptable():
         runtime_settings_service=service,
     )
 
-    source = protected["api_data_source"]
-    assert "auth_header" not in source
-    assert source["auth_header_encrypted"] != "Authorization: Bearer secret-token"
+    assert "api_data_source" not in protected
+    connector = next(item for item in protected["context_connectors"] if item["id"] == "legacy_api_data_source")
+    assert connector["name"] == "Astrology API"
+    assert connector["endpoints"][0]["url_template"] == "https://api.example.com/lal-kitab"
+    assert "auth_header" not in connector["auth"]
+    assert connector["auth"]["auth_header_encrypted"] != "Authorization: Bearer secret-token"
 
     admin_agent = expose_full_agent_for_admin({"configuration": protected}, service)
-    admin_source = admin_agent["configuration"]["api_data_source"]
-    assert admin_source["auth_header_configured"] is True
-    assert "auth_header" not in admin_source
-    assert "auth_header_encrypted" not in admin_source
+    admin_connector = next(
+        item
+        for item in admin_agent["configuration"]["context_connectors"]
+        if item["id"] == "legacy_api_data_source"
+    )
+    assert admin_connector["auth"]["auth_header_configured"] is True
+    assert "auth_header" not in admin_connector["auth"]
+    assert "auth_header_encrypted" not in admin_connector["auth"]
 
     updated = protect_full_agent_configuration_secrets(
         {
@@ -218,7 +225,8 @@ def test_api_data_source_secret_is_encrypted_masked_preserved_and_decryptable():
         runtime_settings_service=service,
     )
     runtime = decrypt_full_agent_configuration_for_runtime(updated, service)
-    assert runtime["api_data_source"]["auth_header"] == "Authorization: Bearer secret-token"
+    runtime_connector = next(item for item in runtime["context_connectors"] if item["id"] == "legacy_api_data_source")
+    assert runtime_connector["auth"]["auth_header"] == "Authorization: Bearer secret-token"
 
 
 @pytest.mark.asyncio

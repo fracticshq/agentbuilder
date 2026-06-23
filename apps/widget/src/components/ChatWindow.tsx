@@ -1,7 +1,9 @@
 import React from 'react';
-import type { Message, BrandThemeTokens } from '../types';
+import type { Message, BrandThemeTokens, ActivityState } from '../types';
 import { MessageBubble } from './MessageBubble';
 import { ThinkingIndicator } from './ThinkingIndicator';
+import { ActivityTimeline } from './ActivityTimeline';
+import { EMPTY_ACTIVITY } from '../utils/activityTimeline';
 import { useWidgetStore } from '../stores/widgetStore';
 import { NOVA_LOGO } from '../utils/brandTheme';
 import { useCyclingText } from '../hooks/useCyclingText';
@@ -9,7 +11,10 @@ import { useCyclingText } from '../hooks/useCyclingText';
 interface ChatWindowProps {
   messages: Message[];
   isTyping: boolean;
-  typingStatus?: string;
+  /** Live background-activity state for the advanced timeline. */
+  activity?: ActivityState;
+  /** 'basic' = cycling indicator (default); 'advanced' = live step timeline. */
+  activityMode?: 'basic' | 'advanced';
   isExpanded?: boolean;
   isMobile?: boolean;
   onSendMessage: (text: string) => void;
@@ -129,7 +134,8 @@ const InputRow: React.FC<InputRowProps> = ({ value, onChange, onSubmit, placehol
 export const ChatWindow: React.FC<ChatWindowProps> = ({
   messages,
   isTyping,
-  typingStatus = '',
+  activity = EMPTY_ACTIVITY,
+  activityMode = 'basic',
   isExpanded = false,
   isMobile = false,
   onSendMessage,
@@ -380,28 +386,58 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   </div>
                 );
               }
+              const placeCandidates = (message.metadata?.place_candidates as { label: string; placeId?: string }[] | undefined) || [];
+              const showPlaceChips = activityMode === 'advanced' && message.role === 'assistant' && placeCandidates.length > 0;
               return (
-                <MessageBubble
-                  key={message.id}
-                  message={message}
-                  userMsgBg={tk?.userMsgBg ?? accentColor}
-                  userMsgColor={tk?.userMsgColor ?? '#fff'}
-                  assistantMsgBg={tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)'}
-                  assistantMsgColor={tk?.assistantMsgColor ?? '#fff'}
-                  onRegenerate={onRegenerate}
-                  onFeedback={onFeedback}
-                  showSources={showSources}
-                  showProductCards={showProductCards}
-                />
+                <React.Fragment key={message.id}>
+                  <MessageBubble
+                    message={message}
+                    userMsgBg={tk?.userMsgBg ?? accentColor}
+                    userMsgColor={tk?.userMsgColor ?? '#fff'}
+                    assistantMsgBg={tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)'}
+                    assistantMsgColor={tk?.assistantMsgColor ?? '#fff'}
+                    onRegenerate={onRegenerate}
+                    onFeedback={onFeedback}
+                    showSources={showSources}
+                    showProductCards={showProductCards}
+                  />
+                  {showPlaceChips && (
+                    <div className="activity-disambiguation" style={{ margin: '2px 16px 8px' }}>
+                      {placeCandidates.map((c, i) => (
+                        <button
+                          key={c.placeId || `${c.label}-${i}`}
+                          type="button"
+                          className="activity-place-chip"
+                          style={{ borderColor: accentColor, color: tk?.assistantMsgColor ?? '#fff' }}
+                          onClick={() => onSendMessage(c.label)}
+                        >
+                          {c.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </React.Fragment>
               );
             })}
 
             {showThinkingIndicator && (
-              <ThinkingIndicator
-                statusText={typingStatus}
-                dotColor={tk?.assistantMsgColor ?? 'rgba(255,255,255,0.6)'}
-                bgColor={tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)'}
-              />
+              activityMode === 'advanced' ? (
+                <ActivityTimeline
+                  state={activity}
+                  fallbackText={cyclingText || 'Working…'}
+                  fallbackVisible={cyclingVisible}
+                  accentColor={accentColor}
+                  textColor={tk?.assistantMsgColor ?? 'rgba(255,255,255,0.85)'}
+                  bgColor={tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)'}
+                  onSelectPlace={onSendMessage}
+                />
+              ) : (
+                <ThinkingIndicator
+                  statusText=""
+                  dotColor={tk?.assistantMsgColor ?? 'rgba(255,255,255,0.6)'}
+                  bgColor={tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)'}
+                />
+              )
             )}
             <div ref={messagesEndRef} />
           </div>

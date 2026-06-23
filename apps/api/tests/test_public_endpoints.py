@@ -89,13 +89,34 @@ def test_public_widget_bootstrap_endpoints_are_accessible(monkeypatch):
 
     list_response = client.get("/api/v1/public/agents")
     assert list_response.status_code == 200
+    # The endpoint sanitizes/expands raw config into a widget-safe shape.
     assert list_response.json() == [
         {
             "id": "agent-active",
             "brand_id": "brand-1",
             "name": "Essco Assistant",
             "description": "Handles shower and faucet queries",
-            "configuration": {"features": {"websockets": True}},
+            "configuration": {
+                "domain": {},
+                "url_context_boost": {"enabled": False},
+                "features": {
+                    "websockets": True,
+                    "show_sources": False,
+                    "show_product_cards": True,
+                    "human_takeover": False,
+                    "activity_mode": "basic",
+                },
+                "channels": {
+                    "widget": {
+                        "enabled": True,
+                        "preview_enabled": True,
+                        "show_sources": False,
+                        "show_product_cards": True,
+                        "human_takeover": False,
+                        "activity_mode": "basic",
+                    }
+                },
+            },
             "status": "active",
         }
     ]

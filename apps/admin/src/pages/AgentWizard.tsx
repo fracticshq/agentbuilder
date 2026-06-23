@@ -12,6 +12,7 @@ import AgentManagePanel from '../components/AgentStudio/AgentManagePanel';
 import AgentJsonModal from '../components/AgentStudio/AgentJsonModal';
 import AgentApiPanel from '../components/AgentStudio/AgentApiPanel';
 import VersionHistoryPanel from '../components/AgentStudio/VersionHistoryPanel';
+import type { ContextConnector } from '../components/AgentStudio/types';
 import {
   AZURE_OPENAI_PROVIDER,
   getDefaultDeployment,
@@ -44,6 +45,15 @@ const CAPABILITY_RESERVED_KEYS = new Set([
 
 function isPlainObject(value: any): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function safeHostname(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return null;
+  }
 }
 
 function uniqueStringArray(values: any): string[] {
@@ -117,6 +127,222 @@ function buildCapabilityConfig(existingConfig: any, selectedIds: string[], idFie
   };
 }
 
+function createVedikaLalKitabConnector(): ContextConnector {
+  const endpoints = [
+    ['lalkitab_chart', 'Lal Kitab Chart', 'Fetch calculated Lal Kitab chart context.'],
+    ['lalkitab_debts', 'Lal Kitab Debts', 'Fetch Lal Kitab debts and karmic obligation context.'],
+    ['lalkitab_houses', 'Lal Kitab Houses', 'Fetch Lal Kitab house interpretation context.'],
+    ['lalkitab_lucky', 'Lal Kitab Lucky Factors', 'Fetch lucky colors, numbers, timing, and favorable factors.'],
+    ['lalkitab_predictions', 'Lal Kitab Predictions', 'Fetch calculated Lal Kitab prediction context.'],
+    ['lalkitab_remedies', 'Lal Kitab Remedies', 'Fetch Lal Kitab remedy recommendations.'],
+    ['lalkitab_totke', 'Lal Kitab Totke', 'Fetch Lal Kitab totke/remedial action context.'],
+    ['lalkitab_varshphal', 'Lal Kitab Varshphal', 'Fetch Lal Kitab annual chart/varshphal context.'],
+  ];
+  return {
+    id: 'vedika_lal_kitab',
+    type: 'http',
+    name: 'Vedika Lal Kitab',
+    enabled: true,
+    auth_header: '',
+    auth_header_configured: false,
+    usage: 'Use only for calculated Lal Kitab astrology chart/remedy context. Build the Lal Kitab chart first, then call relevant secondary endpoints. Ask for birth date, birth time, and birth place; if geocoding is not configured, ask for latitude, longitude, and timezone.',
+    tool_description: 'Call Vedika Lal Kitab APIs for calculated chart, remedy, prediction, lucky factor, totke, debts, houses, and varshphal context.',
+    domain_allowlist: ['api.vedika.io'],
+    input_resolution: {
+      resolve_known_places: true,
+      confirm_understood_details: true,
+      missing_input_strategy: 'ask_follow_up',
+    },
+    timeout_seconds: 20,
+    max_response_chars: 12000,
+    retry_count: 1,
+    endpoints: endpoints.map(([id, name, description]) => ({
+      id,
+      name,
+      enabled: true,
+      method: 'POST',
+      url: `https://api.vedika.io/v2/astrology/lalkitab/${id.replace('lalkitab_', '')}`,
+      required_fields: ['birth_date', 'birth_time', 'birth_place'],
+      runtime_required_fields: ['datetime', 'latitude', 'longitude', 'timezone'],
+      execution_order: id === 'lalkitab_chart' ? 1 : 2,
+      requires_prior_endpoint: id === 'lalkitab_chart' ? null : 'lalkitab_chart',
+      payload_mode: 'flat_body',
+      field_mapping: {
+        birth_date: 'date',
+        birth_time: 'time',
+      },
+      description,
+      body_schema: {
+        type: 'object',
+        properties: {
+          datetime: { type: 'string', description: 'Birth datetime in ISO format, for example 1990-05-15T10:30:00.' },
+          latitude: { type: 'number', description: 'Birthplace latitude.' },
+          longitude: { type: 'number', description: 'Birthplace longitude.' },
+          timezone: { type: 'string', description: 'Timezone offset, for example +05:30.' },
+          language: { type: 'string' },
+        },
+        required: ['datetime', 'latitude', 'longitude', 'timezone'],
+      },
+      query_schema: {},
+      response_mapping: {},
+    })),
+  };
+}
+
+function normalizeLalKitabEndpointUrl(endpointId: string, url: string): string {
+  if (!endpointId.startsWith('lalkitab_')) {
+    return url;
+  }
+  const slug = endpointId.replace('lalkitab_', '');
+  if (!url || url.includes('/v1/lal-kitab/')) {
+    return `https://api.vedika.io/v2/astrology/lalkitab/${slug}`;
+  }
+  return url;
+}
+
+function legacyApiDataSourceToConnector(apiDataSource: any): ContextConnector[] {
+  if (!isPlainObject(apiDataSource) || !apiDataSource.url) {
+    return [];
+  }
+  return [{
+    id: 'legacy_api_data_source',
+    type: 'http',
+    name: apiDataSource.name || 'Legacy API Data Source',
+    enabled: Boolean(apiDataSource.enabled),
+    auth_header: apiDataSource.auth_header || '',
+    auth_header_configured: Boolean(apiDataSource.auth_header_configured),
+    usage: apiDataSource.usage || '',
+    tool_description: apiDataSource.usage || 'Call the configured API data source.',
+    domain_allowlist: safeHostname(apiDataSource.url) ? [safeHostname(apiDataSource.url) as string] : [],
+    endpoints: [{
+      id: 'default',
+      name: apiDataSource.name || 'Default API Lookup',
+      method: 'POST',
+      url: apiDataSource.url || '',
+      enabled: true,
+      required_fields: [],
+      description: apiDataSource.usage || '',
+      body_schema: {},
+      query_schema: {},
+      response_mapping: {},
+    }],
+  }];
+}
+
+function normalizeConnectorsForStudio(config: any): ContextConnector[] {
+  const connectors = Array.isArray(config?.context_connectors)
+    ? config.context_connectors
+    : legacyApiDataSourceToConnector(config?.api_data_source);
+  return connectors
+    .filter(isPlainObject)
+    .map((connector: any): ContextConnector => ({
+      id: connector.id || connector.name || 'connector',
+      type: connector.type === 'mcp' ? 'mcp' : 'http',
+      name: connector.name || connector.id || 'Context Connector',
+      enabled: Boolean(connector.enabled),
+      auth_header: connector.auth_header || connector.auth?.auth_header || '',
+      auth_header_configured: Boolean(connector.auth_header_configured || connector.auth?.auth_header_configured),
+      usage: connector.usage || connector.usage_policy || '',
+      tool_description: connector.tool_description || connector.usage_policy || connector.usage || '',
+      domain_allowlist: Array.isArray(connector.domain_allowlist) ? connector.domain_allowlist : [],
+      input_resolution: connector.input_resolution || {},
+      headers: connector.headers || {},
+      timeout_seconds: connector.timeout_seconds,
+      max_response_chars: connector.max_response_chars,
+      retry_count: connector.retry_count,
+      endpoint: connector.endpoint || connector.mcp?.endpoint || '',
+      transport: connector.transport || connector.mcp?.transport || 'http',
+      mcp: connector.mcp || {},
+      discovered_tools: Array.isArray(connector.discovered_tools) ? connector.discovered_tools : [],
+      allowed_tools: Array.isArray(connector.allowed_tools) ? connector.allowed_tools : [],
+      last_discovered_at: connector.last_discovered_at || null,
+      revoked: Boolean(connector.revoked),
+      endpoints: (Array.isArray(connector.endpoints) ? connector.endpoints : []).map((endpoint: any, index: number) => {
+        const endpointId = endpoint.id || `endpoint_${index + 1}`;
+        const isLalKitabEndpoint = String(endpointId).startsWith('lalkitab_');
+        return {
+          id: endpointId,
+          name: endpoint.name || `Endpoint ${index + 1}`,
+          method: endpoint.method || 'POST',
+          url: normalizeLalKitabEndpointUrl(String(endpointId), endpoint.url || endpoint.url_template || ''),
+          enabled: endpoint.enabled ?? true,
+          required_fields: endpoint.required_fields || endpoint.required_user_fields || [],
+          description: endpoint.description || endpoint.tool_description || '',
+          headers: endpoint.headers || {},
+          query_schema: endpoint.query_schema || {},
+          body_schema: endpoint.body_schema || {},
+          response_mapping: endpoint.response_mapping || {},
+          timeout_seconds: endpoint.timeout_seconds,
+          max_response_chars: endpoint.max_response_chars,
+          retry_count: endpoint.retry_count,
+          execution_order: endpoint.execution_order ?? (isLalKitabEndpoint ? (endpointId === 'lalkitab_chart' ? 1 : 2) : undefined),
+          requires_prior_endpoint: endpoint.requires_prior_endpoint ?? (isLalKitabEndpoint && endpointId !== 'lalkitab_chart' ? 'lalkitab_chart' : null),
+          payload_mode: endpoint.payload_mode || (isLalKitabEndpoint ? 'flat_body' : undefined),
+          field_mapping: endpoint.field_mapping || (isLalKitabEndpoint ? { birth_date: 'date', birth_time: 'time' } : {}),
+          runtime_required_fields: endpoint.runtime_required_fields || (isLalKitabEndpoint ? ['datetime', 'latitude', 'longitude', 'timezone'] : []),
+        };
+      }),
+    }));
+}
+
+function serializeContextConnectors(connectors: ContextConnector[] | undefined): any[] {
+  if (!Array.isArray(connectors)) {
+    return [];
+  }
+  return connectors
+    .filter(connector => connector && connector.name)
+    .map(connector => ({
+      id: connector.id,
+      name: connector.name,
+      type: connector.type === 'mcp' ? 'mcp' : 'http_api',
+      enabled: Boolean(connector.enabled),
+      revoked: Boolean(connector.revoked),
+      domain_allowlist: connector.domain_allowlist || [],
+      input_resolution: connector.input_resolution || {},
+      headers: connector.headers || {},
+      timeout_seconds: connector.timeout_seconds,
+      max_response_chars: connector.max_response_chars,
+      retry_count: connector.retry_count,
+      auth: connector.auth_header
+        ? { type: 'raw_header', auth_header: connector.auth_header }
+        : { type: 'raw_header', auth_header_configured: connector.auth_header_configured },
+      usage_policy: connector.usage || connector.tool_description || '',
+      ...(connector.type === 'mcp' ? {
+        endpoint: connector.endpoint,
+        transport: connector.transport || 'http',
+        mcp: { ...(connector.mcp || {}), endpoint: connector.endpoint, transport: connector.transport || connector.mcp?.transport || 'http' },
+        discovered_tools: connector.discovered_tools || [],
+        allowed_tools: connector.allowed_tools || [],
+        last_discovered_at: connector.last_discovered_at || null,
+        endpoints: [],
+      } : {
+        endpoints: (connector.endpoints || [])
+        .filter(endpoint => endpoint.url)
+        .map(endpoint => ({
+          id: endpoint.id,
+          name: endpoint.name,
+          enabled: endpoint.enabled ?? true,
+          method: endpoint.method || 'POST',
+          url_template: endpoint.url,
+          required_user_fields: endpoint.required_fields || [],
+          headers: endpoint.headers || {},
+          query_schema: endpoint.query_schema || {},
+          body_schema: endpoint.body_schema || {},
+          response_mapping: endpoint.response_mapping || {},
+          timeout_seconds: endpoint.timeout_seconds,
+          max_response_chars: endpoint.max_response_chars,
+          retry_count: endpoint.retry_count,
+          execution_order: endpoint.execution_order,
+          requires_prior_endpoint: endpoint.requires_prior_endpoint ?? null,
+          payload_mode: endpoint.payload_mode,
+          field_mapping: endpoint.field_mapping || {},
+          runtime_required_fields: endpoint.runtime_required_fields || [],
+          tool_description: endpoint.description || connector.tool_description || connector.usage || '',
+        })),
+      }),
+    }));
+}
+
 interface AgentData {
   // Basic Info
   name: string;
@@ -183,6 +409,7 @@ interface AgentData {
   api_data_source_auth_header: string;
   api_data_source_auth_header_configured: boolean;
   api_data_source_usage: string;
+  context_connectors: ContextConnector[];
   url_context_boost_enabled: boolean;
 
   // Skills, Tools, Agent API
@@ -204,6 +431,7 @@ interface AgentData {
   widget_enabled: boolean;
   show_sources: boolean;
   show_product_cards: boolean;
+  activity_mode: 'basic' | 'advanced';
   rate_limiting: boolean;
   content_filtering: boolean;
   session_timeout: number;
@@ -288,6 +516,7 @@ const initialData: AgentData = {
   api_data_source_auth_header: '',
   api_data_source_auth_header_configured: false,
   api_data_source_usage: '',
+  context_connectors: [],
   url_context_boost_enabled: true,
 
   // Skills, Tools, Agent API
@@ -309,6 +538,7 @@ const initialData: AgentData = {
   widget_enabled: true,
   show_sources: false,
   show_product_cards: true,
+  activity_mode: 'basic',
   rate_limiting: true,
   content_filtering: true,
   session_timeout: 30,
@@ -502,6 +732,7 @@ export default function AgentWizard() {
         api_data_source_auth_header: apiDataSource.auth_header || '',
         api_data_source_auth_header_configured: Boolean(apiDataSource.auth_header_configured),
         api_data_source_usage: apiDataSource.usage || '',
+        context_connectors: normalizeConnectorsForStudio(config),
         url_context_boost_enabled: config.url_context_boost?.enabled ?? true,
 
         // Skills, Tools, Agent API
@@ -555,6 +786,7 @@ export default function AgentWizard() {
         widget_enabled: widgetChannel.enabled ?? true,
         show_sources: features.show_sources ?? false,
         show_product_cards: features.show_product_cards ?? true,
+        activity_mode: (widgetChannel.activity_mode ?? features.activity_mode) === 'advanced' ? 'advanced' : 'basic',
         allowed_file_types: features.file_upload?.allowed_types || [],
         max_file_size: features.file_upload?.max_size_mb ?? 10,
 
@@ -605,10 +837,14 @@ export default function AgentWizard() {
       system_prompt: agentData.system_prompt || [
         'You are an expert LalKitab astrologer with deep knowledge of LalKitab principles, Vedic astrology fundamentals, planetary influences, houses, remedies, and practical life guidance.',
         '',
-        'Ask for missing birth date, birth time, and birth place before giving chart-specific guidance. Use the configured API Data Source when chart or remedy context is required. Do not fabricate chart placements or API results. Explain source limits clearly and keep guidance practical, respectful, and non-deterministic.',
+        'Ask for missing birth date, birth time, and birth place before giving chart-specific guidance. If geocoding is not configured, ask for latitude, longitude, and timezone. Use the configured Context Connector when chart or remedy context is required: build the Lal Kitab chart first, then use relevant secondary endpoints. Do not fabricate chart placements or API results. Explain source limits clearly and keep guidance practical, respectful, and non-deterministic.',
       ].join('\n'),
       api_data_source_enabled: true,
-      selected_skill_ids: Array.from(new Set([...(agentData.selected_skill_ids || []), 'knowledge_qa', 'api_data_lookup'])),
+      context_connectors: agentData.context_connectors?.length ? agentData.context_connectors : [createVedikaLalKitabConnector()],
+      data_source: agentData.data_source === 'shopify' ? 'shopify' : 'rag',
+      rag_enabled: true,
+      show_sources: true,
+      selected_skill_ids: Array.from(new Set([...(agentData.selected_skill_ids || []), 'knowledge_qa', 'api_data_lookup', 'conversation_summary'])),
     } : field === 'agent_template' && value === 'ecommerce_sales' ? {
       role: agentData.role || 'You are an expert ecommerce sales assistant.',
       purpose: agentData.purpose || 'Help shoppers choose products using catalog data, page context, and approved brand knowledge.',
@@ -714,13 +950,7 @@ export default function AgentWizard() {
             integration_mode: agentData.shopify_integration_mode,
             agent_profile_url: agentData.shopify_agent_profile_url,
           } : undefined,
-          api_data_source: {
-            enabled: agentData.api_data_source_enabled,
-            name: agentData.api_data_source_name,
-            url: agentData.api_data_source_url,
-            auth_header: agentData.api_data_source_auth_header,
-            usage: agentData.api_data_source_usage,
-          },
+          context_connectors: serializeContextConnectors(agentData.context_connectors),
           url_context_boost: {
             enabled: agentData.url_context_boost_enabled,
           },
@@ -756,6 +986,7 @@ export default function AgentWizard() {
               show_sources: agentData.show_sources,
               show_product_cards: agentData.show_product_cards,
               human_takeover: agentData.human_takeover,
+              activity_mode: agentData.activity_mode,
             },
           },
           features: {
@@ -902,12 +1133,7 @@ export default function AgentWizard() {
         allowed_origins: agentData.agent_api_allowed_origins,
         require_key: agentData.agent_api_require_key,
       },
-      api_data_source: {
-        enabled: agentData.api_data_source_enabled,
-        name: agentData.api_data_source_name,
-        url: agentData.api_data_source_url,
-        usage: agentData.api_data_source_usage,
-      },
+      context_connectors: serializeContextConnectors(agentData.context_connectors),
       url_context_boost: {
         enabled: agentData.url_context_boost_enabled,
       },
@@ -961,7 +1187,7 @@ export default function AgentWizard() {
             deployments={azureDeployments?.deployments || []}
           />
         )}
-        middle={<AgentCapabilityRail data={agentData} onChange={updateStepData} />}
+        middle={<AgentCapabilityRail data={agentData} onChange={updateStepData} agentId={id} />}
         right={id ? (
           <AgentManagePanel
             data={agentData}

@@ -457,6 +457,86 @@
   white-space: nowrap;
 }
 
+/* ── Live activity timeline (general, any agent) ──────────────── */
+.activity-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px;
+  border-radius: 16px;
+  border-bottom-left-radius: 4px;
+  max-width: 100%;
+  animation: panelOpen 0.25s ease;
+}
+
+.activity-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.activity-step-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
+.activity-step-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity 0.3s ease;
+}
+
+.activity-step-detail {
+  font-size: 11px;
+  opacity: 0.5;
+  font-variant-numeric: tabular-nums;
+  margin-left: 2px;
+}
+
+.activity-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(127, 127, 127, 0.25);
+  border-radius: 50%;
+  animation: activitySpin 0.7s linear infinite;
+}
+
+@keyframes activitySpin {
+  to { transform: rotate(360deg); }
+}
+
+.activity-disambiguation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.activity-place-chip {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+  padding: 6px 11px;
+  border-radius: 14px;
+  border: 1px solid currentColor;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0.85;
+  transition: opacity 0.2s ease, transform 0.1s ease;
+}
+
+.activity-place-chip:hover { opacity: 1; }
+.activity-place-chip:active { transform: scale(0.97); }
+
 /* ── Message Actions ──────────────────────────────────────────── */
 .message-bubble-wrapper {
   position: relative;

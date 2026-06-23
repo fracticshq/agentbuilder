@@ -1,0 +1,68 @@
+import { describe, it, expect } from 'vitest';
+import { reduceActivity, finalizeActivity, EMPTY_ACTIVITY } from './activityTimeline';
+import type { StreamingMessage } from '../types';
+
+function ev(type: string, content = '', metadata: Record<string, any> = {}): StreamingMessage {
+  return { type: type as StreamingMessage['type'], content, conversation_id: 'c', metadata };
+}
+
+describe('reduceActivity', () => {
+  it('ignores content/metadata/done without changing state', () => {
+    const s = reduceActivity(EMPTY_ACTIVITY, ev('content', 'hello'));
+    expect(s).toBe(EMPTY_ACTIVITY);
+  });
+
+  it('pairs context_start and context_result into one step', () => {
+    let s = reduceActivity(EMPTY_ACTIVITY, ev('context_start'));
+    expect(s.steps).toHaveLength(1);
+    expect(s.steps[0].status).toBe('running');
+    s = reduceActivity(s, ev('context_result'));
+    expect(s.steps).toHaveLength(1);
+    expect(s.steps[0].status).toBe('done');
+  });
+
+  it('keys connector steps by endpoint_id so start/result update the same row', () => {
+    let s = reduceActivity(EMPTY_ACTIVITY, ev('connector_start', 'Calling chart', { endpoint_id: 'lalkitab_chart' }));
+    s = reduceActivity(s, ev('connector_result', '', { endpoint_id: 'lalkitab_chart', success: true, latency_ms: 1636 }));
+    expect(s.steps).toHaveLength(1);
+    expect(s.steps[0].label).toBe('Casting the Lal Kitab chart');
+    expect(s.steps[0].status).toBe('done');
+    expect(s.steps[0].detail).toBe('1.6s');
+  });
+
+  it('marks connector_error as error', () => {
+    let s = reduceActivity(EMPTY_ACTIVITY, ev('connector_start', 'x', { endpoint_id: 'lalkitab_remedies' }));
+    s = reduceActivity(s, ev('connector_error', 'failed', { endpoint_id: 'lalkitab_remedies', success: false }));
+    expect(s.steps[0].status).toBe('error');
+  });
+
+  it('works generically for any agent via tool/skill/status events', () => {
+    let s = reduceActivity(EMPTY_ACTIVITY, ev('tool_start', 'Searching catalog', { tool_id: 'catalog' }));
+    s = reduceActivity(s, ev('tool_result', 'Found 3 products', { tool_id: 'catalog' }));
+    s = reduceActivity(s, ev('status', 'Synthesizing…'));
+    expect(s.steps.map((x) => x.status)).toEqual(['done', 'running']);
+    expect(s.steps[0].label).toBe('Found 3 products');
+  });
+
+  it('captures place_disambiguation candidates', () => {
+    const s = reduceActivity(
+      EMPTY_ACTIVITY,
+      ev('place_disambiguation', 'Which one?', {
+        candidates: [
+          { placeId: 'IN', label: 'Hyderabad, Telangana, India' },
+          { placeId: 'PK', label: 'Hyderabad, Sindh, Pakistan' },
+        ],
+      }),
+    );
+    expect(s.disambiguation?.candidates).toHaveLength(2);
+    expect(s.disambiguation?.question).toBe('Which one?');
+  });
+});
+
+describe('finalizeActivity', () => {
+  it('flips running steps to done', () => {
+    let s = reduceActivity(EMPTY_ACTIVITY, ev('connector_start', 'x', { endpoint_id: 'lalkitab_chart' }));
+    s = finalizeActivity(s);
+    expect(s.steps[0].status).toBe('done');
+  });
+});

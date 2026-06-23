@@ -91,6 +91,34 @@ def _safe_admin_agent(agent: dict, runtime_settings_service: RuntimeSettingsServ
     return _json_safe(expose_full_agent_for_admin(agent, runtime_settings_service))
 
 
+def _connector_summaries(config: dict) -> list[dict]:
+    summaries = []
+    for connector in config.get("context_connectors") or []:
+        if not isinstance(connector, dict):
+            continue
+        endpoints = [
+            {
+                "id": endpoint.get("id"),
+                "name": endpoint.get("name"),
+                "enabled": bool(endpoint.get("enabled", True)) and not bool(endpoint.get("revoked")),
+                "method": endpoint.get("method"),
+            }
+            for endpoint in (connector.get("endpoints") or [])
+            if isinstance(endpoint, dict)
+        ]
+        summaries.append(
+            {
+                "id": connector.get("id"),
+                "name": connector.get("name"),
+                "type": connector.get("type"),
+                "enabled": bool(connector.get("enabled")) and not bool(connector.get("revoked")),
+                "endpoint_count": len(endpoints),
+                "endpoints": endpoints,
+            }
+        )
+    return summaries
+
+
 async def _get_console_agent_or_404(agent_id: str, user: Optional[User]) -> dict:
     _ensure_console_access(user)
     agent = await _agents_collection().find_one({"id": agent_id})
@@ -138,6 +166,7 @@ async def get_console_agent(
                 "enabled": bool((config.get("api_data_source") or {}).get("enabled")),
                 "name": (config.get("api_data_source") or {}).get("name"),
             },
+            "context_connectors": _connector_summaries(config),
         },
     }
 

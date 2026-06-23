@@ -363,6 +363,78 @@ export interface ToolDefinition {
   [key: string]: any;
 }
 
+export type ContextConnectorMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+export interface ContextConnectorEndpoint {
+  id?: string;
+  name: string;
+  method: ContextConnectorMethod;
+  url: string;
+  enabled: boolean;
+  required_fields: string[];
+  description?: string;
+  headers?: Record<string, any>;
+  query_schema?: Record<string, any> | string;
+  body_schema?: Record<string, any> | string;
+  response_mapping?: Record<string, any> | string;
+  timeout_seconds?: number;
+  max_response_chars?: number;
+  retry_count?: number;
+}
+
+export interface ContextConnector {
+  id?: string;
+  type: 'http' | 'mcp';
+  name: string;
+  enabled: boolean;
+  auth_header?: string;
+  auth_header_configured?: boolean;
+  usage?: string;
+  tool_description?: string;
+  domain_allowlist?: string[];
+  headers?: Record<string, any>;
+  timeout_seconds?: number;
+  max_response_chars?: number;
+  retry_count?: number;
+  endpoint?: string;
+  transport?: string;
+  mcp?: Record<string, any>;
+  discovered_tools?: Array<Record<string, any>>;
+  allowed_tools?: string[];
+  last_discovered_at?: string | null;
+  revoked?: boolean;
+  endpoints: ContextConnectorEndpoint[];
+  created_at?: string;
+  updated_at?: string;
+  [key: string]: any;
+}
+
+export interface ContextConnectorTestRequest {
+  endpoint_id?: string;
+  query?: string;
+  payload?: Record<string, any>;
+}
+
+export interface ContextConnectorTestResponse {
+  success: boolean;
+  status?: number;
+  message?: string;
+  data?: any;
+  error?: string;
+}
+
+export interface ContextConnectorDiscoverRequest {
+  url: string;
+  auth_header?: string;
+}
+
+export interface ContextConnectorDiscoverResponse {
+  endpoints?: ContextConnectorEndpoint[];
+  discovered_tools?: Array<Record<string, any>>;
+  connector?: Partial<ContextConnector>;
+  [key: string]: any;
+}
+
 export interface AgentApiKey {
   id: string;
   key_id?: string;
@@ -594,6 +666,42 @@ export const adminCapabilitiesApi = {
   },
 };
 
+export const agentConnectorsApi = {
+  list: async (agentId: string): Promise<ContextConnector[]> => {
+    const response = await apiClient.get(`/api/v1/admin/agents/${agentId}/connectors`);
+    return normalizeAdminList<ContextConnector>(response.data, ['connectors', 'items', 'data']);
+  },
+  upsert: async (agentId: string, connector: ContextConnector): Promise<ContextConnector> => {
+    const response = await apiClient.put(`/api/v1/admin/agents/${agentId}/connectors`, connector);
+    return response.data?.connector || response.data;
+  },
+  delete: async (agentId: string, connectorId: string): Promise<void> => {
+    await apiClient.delete(`/api/v1/admin/agents/${agentId}/connectors/${connectorId}`);
+  },
+  toggle: async (agentId: string, connectorId: string, enabled: boolean): Promise<ContextConnector> => {
+    const response = await apiClient.post(`/api/v1/admin/agents/${agentId}/connectors/${connectorId}/toggle`, { enabled });
+    return response.data?.connector || response.data;
+  },
+  test: async (
+    agentId: string,
+    connectorId: string,
+    payload?: ContextConnectorTestRequest,
+  ): Promise<ContextConnectorTestResponse> => {
+    const response = await apiClient.post(
+      `/api/v1/admin/agents/${agentId}/connectors/${connectorId}/test`,
+      payload || {},
+    );
+    return response.data;
+  },
+  discover: async (
+    agentId: string,
+    payload: ContextConnectorDiscoverRequest,
+  ): Promise<ContextConnectorDiscoverResponse> => {
+    const response = await apiClient.post(`/api/v1/admin/agents/${agentId}/connectors/discover`, payload);
+    return response.data;
+  },
+};
+
 export const runtimeSettingsApi = {
   get: () => apiClient.get<RuntimeSettingsResponse>('/api/v1/admin/settings/runtime'),
   update: (updates: Record<string, string | null>) =>
@@ -759,6 +867,12 @@ export const api = {
   getAgentApiKeys: adminCapabilitiesApi.getAgentApiKeys,
   createAgentApiKey: adminCapabilitiesApi.createAgentApiKey,
   revokeAgentApiKey: adminCapabilitiesApi.revokeAgentApiKey,
+  listAgentConnectors: agentConnectorsApi.list,
+  upsertAgentConnector: agentConnectorsApi.upsert,
+  deleteAgentConnector: agentConnectorsApi.delete,
+  toggleAgentConnector: agentConnectorsApi.toggle,
+  testAgentConnector: agentConnectorsApi.test,
+  discoverAgentConnectors: agentConnectorsApi.discover,
   getConsoleAgents: consoleApi.listAgents,
   getConsoleAgent: consoleApi.getAgent,
   getConsoleRuns: consoleApi.listRuns,

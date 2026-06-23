@@ -28,12 +28,12 @@ class ConnectionManager:
     async def connect_mongodb(self) -> None:
         """Initialize MongoDB connection and system database."""
         try:
-            mongodb_uri = os.getenv("MONGODB_URI")
+            mongodb_uri = os.getenv("MONGODB_URI") or settings.MONGODB_URI
             if not mongodb_uri:
                 logger.warning("MONGODB_URI not set, MongoDB features will be unavailable")
                 return
             
-            system_db_name = os.getenv("MONGO_SYSTEM_DB", "system")
+            system_db_name = os.getenv("MONGO_SYSTEM_DB") or settings.MONGO_SYSTEM_DB or "system"
             
             self.mongodb_client = AsyncIOMotorClient(
                 mongodb_uri,

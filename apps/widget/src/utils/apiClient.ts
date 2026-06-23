@@ -196,21 +196,15 @@ export class APIClient {
                 if (chunk.type === 'content') {
                   fullMessage += chunk.content || '';
                   onStream(chunk);
-                } else if (
-                  chunk.type === 'status' ||
-                  chunk.type === 'context_start' ||
-                  chunk.type === 'context_result' ||
-                  chunk.type === 'skill_start' ||
-                  chunk.type === 'skill_result' ||
-                  chunk.type === 'tool_start' ||
-                  chunk.type === 'tool_result' ||
-                  chunk.type === 'tool_error' ||
-                  chunk.type === 'citation'
-                ) {
-                  onStream(chunk);
                 } else if (chunk.type === 'error') {
                   reject(new Error(chunk.content || 'Streaming error'));
                   return;
+                } else {
+                  // Everything else is background activity for any agent
+                  // (status, *_start, *_result, connector_*, geocode_*,
+                  // rag_context, place_disambiguation, metadata, …). The SSE
+                  // stream end resolves the message; just forward to the UI.
+                  onStream(chunk);
                 }
               } catch (parseError) {
                 console.error('[APIClient] Error parsing stream chunk:', parseError, 'Data:', line);

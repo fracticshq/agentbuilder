@@ -33,7 +33,13 @@ def _mongo_id_filter(value: str | ObjectId) -> dict:
 
 async def get_db() -> AsyncIOMotorDatabase:
     """Get database connection."""
-    return connection_manager.get_mongodb_db()
+    try:
+        return connection_manager.get_mongodb_db()
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
 
 
 async def get_current_user(

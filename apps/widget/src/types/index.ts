@@ -79,6 +79,30 @@ export interface Message {
   dealers?: DealerData[];    // Phase 5: Dealer cards
   metadata?: Record<string, any>;
   feedback?: 'up' | 'down';
+  activitySteps?: ActivityStep[];  // Live "what happened in the background" trace
+}
+
+/** A single line in the live background-activity timeline. */
+export interface ActivityStep {
+  id: string;
+  label: string;
+  detail?: string;
+  status: 'running' | 'done' | 'error';
+}
+
+/** A candidate birthplace offered when a place name is ambiguous. */
+export interface PlaceCandidate {
+  placeId?: string;
+  label: string;
+  name?: string;
+  adminRegion?: string;
+  country?: string;
+}
+
+/** Resolved activity-timeline state derived from the streaming events. */
+export interface ActivityState {
+  steps: ActivityStep[];
+  disambiguation?: { question: string; candidates: PlaceCandidate[] };
 }
 
 export interface Citation {
@@ -126,8 +150,33 @@ export interface PageContext {
   metadata?: Record<string, any>;
 }
 
+export type StreamingMessageType =
+  | 'status'
+  | 'context_start'
+  | 'context_result'
+  | 'skill_start'
+  | 'skill_result'
+  | 'tool_start'
+  | 'tool_result'
+  | 'tool_error'
+  | 'connector_start'
+  | 'connector_result'
+  | 'connector_error'
+  | 'geocode_start'
+  | 'geocode_result'
+  | 'place_disambiguation'
+  | 'api_context'
+  | 'rag_context'
+  | 'missing_input'
+  | 'citation'
+  | 'content'
+  | 'final_answer'
+  | 'metadata'
+  | 'done'
+  | 'error';
+
 export interface StreamingMessage {
-  type: 'status' | 'context_start' | 'context_result' | 'skill_start' | 'skill_result' | 'tool_start' | 'tool_result' | 'tool_error' | 'citation' | 'content' | 'metadata' | 'done' | 'error';
+  type: StreamingMessageType;
   content: string;
   conversation_id: string;
   citations?: Citation[];

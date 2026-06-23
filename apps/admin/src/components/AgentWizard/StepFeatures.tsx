@@ -10,6 +10,7 @@ interface StepFeaturesProps {
     response_streaming: boolean;
     show_sources: boolean;
     show_product_cards: boolean;
+    activity_mode: 'basic' | 'advanced';
     rate_limiting: boolean;
     content_filtering: boolean;
     session_timeout: number;
@@ -182,6 +183,27 @@ export default function StepFeatures({ data, onChange }: StepFeaturesProps) {
               onChange={(e) => onChange('show_product_cards', e.target.checked)}
               className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
             />
+          </div>
+
+          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+            <div>
+              <label htmlFor="activity_mode" className="text-sm font-medium text-gray-900">
+                Activity Display
+              </label>
+              <p className="text-xs text-gray-500">
+                Basic shows a simple typing indicator. Advanced shows a live, step-by-step
+                timeline of what the agent is doing in the background (retrieval, API calls, etc.).
+              </p>
+            </div>
+            <select
+              id="activity_mode"
+              value={data.activity_mode}
+              onChange={(e) => onChange('activity_mode', e.target.value)}
+              className="text-sm border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+            >
+              <option value="basic">Basic indicator</option>
+              <option value="advanced">Advanced timeline</option>
+            </select>
           </div>
         </div>
       </div>

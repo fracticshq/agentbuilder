@@ -10,10 +10,12 @@ from .tools import router as tools_router
 from .agent_api_keys import router as agent_api_keys_router
 from .agent_manifests import router as agent_manifests_router
 from .console import router as console_router
+from .connectors import router as connectors_router
 
 router = APIRouter()
 
 router.include_router(brands_router, prefix="/brands", tags=["brands"])
+router.include_router(connectors_router, prefix="/agents", tags=["agent-connectors"])
 router.include_router(agents_router, prefix="/agents", tags=["agents"])
 router.include_router(llm_router, prefix="/llm", tags=["llm"])
 router.include_router(settings_router, prefix="/settings", tags=["settings"])

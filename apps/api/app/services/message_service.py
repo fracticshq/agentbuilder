@@ -30,6 +30,7 @@ from llm.factory import LLMFactory, create_provider_from_env
 # Phase 6: SOTA Agentic Orchestrator (package imports)
 from tools.registry import ToolRegistry
 from tools.builtin.retrieval_tool import RetrievalTool
+from tools.types import ToolResult
 from agent_runtime.orchestrator import Orchestrator, AgentResult
 from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
 
@@ -44,7 +45,8 @@ from .capability_firewall import CapabilityDecision, CapabilityFirewall
 from .observability_service import ObservabilityService
 from .prompt_assembler import PromptAssembler
 from .skill_registry import BuiltInSkillRegistry
-from .tool_registry import ApiDataSourceTool, ToolRegistryService
+from .lalkitab_runtime import build_lalkitab_runtime_context
+from .tool_registry import ToolRegistryService
 
 logger = structlog.get_logger(__name__)
 
@@ -332,6 +334,264 @@ class MessageService:
             },
         }
 
+    def _context_connector_runtime_metadata(self) -> list[dict]:
+        connectors = (self.agent_config or {}).get("context_connectors") or []
+        if not isinstance(connectors, list):
+            connectors = []
+        summaries: list[dict] = []
+        for connector in connectors:
+            if not isinstance(connector, dict):
+                continue
+            endpoints = [
+                {
+                    "id": endpoint.get("id"),
+                    "name": endpoint.get("name"),
+                    "enabled": bool(endpoint.get("enabled", True)) and not bool(endpoint.get("revoked")),
+                    "method": endpoint.get("method") or "POST",
+                    "required_user_fields": endpoint.get("required_user_fields")
+                    or endpoint.get("required_fields")
+                    or [],
+                    "runtime_required_fields": endpoint.get("runtime_required_fields") or [],
+                    "execution_order": endpoint.get("execution_order"),
+                    "requires_prior_endpoint": endpoint.get("requires_prior_endpoint"),
+                    "payload_mode": endpoint.get("payload_mode"),
+                }
+                for endpoint in (connector.get("endpoints") or [])
+                if isinstance(endpoint, dict)
+            ]
+            summaries.append(
+                {
+                    "id": connector.get("id"),
+                    "name": connector.get("name"),
+                    "type": connector.get("type"),
+                    "enabled": bool(connector.get("enabled")) and not bool(connector.get("revoked")),
+                    "endpoint_count": len(endpoints),
+                    "endpoints": endpoints,
+                }
+            )
+        return summaries
+
+    def _connector_missing_inputs_for_message(self, message: str) -> list[dict]:
+        """Best-effort preflight for connector endpoints with required user fields."""
+        config = self.agent_config or {}
+        connectors = config.get("context_connectors") or []
+        if not isinstance(connectors, list):
+            return []
+
+        message_text = (message or "").lower()
+        connector_intent_terms = {
+            "chart",
+            "birth",
+            "kundli",
+            "horoscope",
+            "prediction",
+            "predictions",
+            "remedy",
+            "remedies",
+            "totke",
+            "varshphal",
+            "lucky",
+            "house",
+            "houses",
+            "debt",
+            "debts",
+            "api",
+            "calculate",
+        }
+        if not any(term in message_text for term in connector_intent_terms):
+            return []
+
+        field_patterns = {
+            "birth_date": [r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", r"\b\d{4}-\d{1,2}-\d{1,2}\b", r"\bbirth\s*date\b"],
+            "date_of_birth": [r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", r"\b\d{4}-\d{1,2}-\d{1,2}\b", r"\bdate\s*of\s*birth\b"],
+            "dob": [r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", r"\b\d{4}-\d{1,2}-\d{1,2}\b", r"\bdob\b"],
+            "birth_time": [r"\b\d{1,2}:\d{2}\b", r"\b\d{1,2}\s*(am|pm)\b", r"\bbirth\s*time\b"],
+            "time_of_birth": [r"\b\d{1,2}:\d{2}\b", r"\b\d{1,2}\s*(am|pm)\b", r"\btime\s*of\s*birth\b"],
+            "birth_place": [r"\bbirth\s*place\b", r"\bborn\s+in\s+[a-z]", r"\bplace\s*of\s*birth\b"],
+            "place_of_birth": [r"\bbirth\s*place\b", r"\bborn\s+in\s+[a-z]", r"\bplace\s*of\s*birth\b"],
+        }
+
+        missing_groups: list[dict] = []
+        for connector in connectors:
+            if not isinstance(connector, dict) or not connector.get("enabled") or connector.get("revoked"):
+                continue
+            for endpoint in connector.get("endpoints") or []:
+                if not isinstance(endpoint, dict) or not endpoint.get("enabled", True) or endpoint.get("revoked"):
+                    continue
+                required_fields = [
+                    str(field)
+                    for field in (endpoint.get("required_user_fields") or endpoint.get("required_fields") or [])
+                    if field
+                ]
+                if not required_fields:
+                    continue
+                missing = []
+                for field in required_fields:
+                    patterns = field_patterns.get(field.lower())
+                    if patterns and any(re.search(pattern, message_text, re.IGNORECASE) for pattern in patterns):
+                        continue
+                    if field.lower() not in field_patterns and field.lower() in message_text:
+                        continue
+                    missing.append(field)
+                if missing:
+                    missing_groups.append(
+                        {
+                            "connector_id": connector.get("id"),
+                            "connector_name": connector.get("name"),
+                            "endpoint_id": endpoint.get("id"),
+                            "endpoint_name": endpoint.get("name"),
+                            "missing_input": missing,
+                        }
+                    )
+        return missing_groups
+
+    async def _load_lalkitab_pending_state(self, conversation_id: str) -> dict:
+        """Return the pending Lal Kitab birth-input/disambiguation state from the
+        most recent assistant turn, so multi-turn input collection can resume."""
+        if not self.short_term:
+            return {}
+        try:
+            recent = await self.short_term.get_recent_messages(conversation_id=conversation_id, limit=4)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("lalkitab_pending_state_load_failed", error=str(exc))
+            return {}
+        for msg in reversed(recent):
+            role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
+            if role != "assistant":
+                continue
+            pending = (msg.metadata or {}).get("lalkitab_pending")
+            if isinstance(pending, dict) and pending:
+                return pending
+            break
+        return {}
+
+    async def _retrieve_lalkitab_rag_context(self, message: str, request: MessageRequest) -> tuple[dict, ToolResult | None]:
+        """Retrieve RAG context for Lal Kitab synthesis without persisting API data."""
+        if not self.retrieval_pipeline or not self._rag_enabled():
+            return {}, None
+        try:
+            page_context = (
+                request.page_context.model_dump()
+                if hasattr(request.page_context, "model_dump")
+                else request.page_context or {}
+            )
+            context = await self.retrieval_pipeline.retrieve(
+                query=message,
+                page_context=page_context,
+                filters={},
+                max_chunks=5,
+            )
+            chunks = []
+            for chunk in (context.chunks or [])[:5]:
+                chunks.append(
+                    {
+                        "doc_id": getattr(chunk, "doc_id", None),
+                        "source": getattr(chunk, "source", None),
+                        "content": (getattr(chunk, "text", "") or getattr(chunk, "content", ""))[:1200],
+                        "score": getattr(chunk, "score", None),
+                    }
+                )
+            data = "Knowledge/RAG Context:\n" + "\n\n".join(
+                f"[{index + 1}] {chunk.get('doc_id')}\n{chunk.get('content')}"
+                for index, chunk in enumerate(chunks)
+            )
+            rag_context = {
+                "chunks": chunks,
+                "sources": context.sources,
+                "confidence": context.confidence,
+            }
+            return rag_context, ToolResult(
+                success=True,
+                data=data,
+                metadata={
+                    "tool_id": "knowledge_search",
+                    "sources": context.sources,
+                    "chunks_count": len(chunks),
+                    "confidence": context.confidence,
+                    "rag_chunks": chunks,
+                },
+            )
+        except Exception as exc:
+            logger.warning("lalkitab_rag_context_failed", error=str(exc))
+            return {}, ToolResult(
+                success=False,
+                data=None,
+                error=str(exc),
+                metadata={"tool_id": "knowledge_search", "sources": [], "chunks_count": 0},
+            )
+
+    async def _generate_lalkitab_agent_result(
+        self,
+        *,
+        message: str,
+        chat_history: list[dict],
+        lalkitab_plan,
+        rag_context: dict,
+        rag_tool_result: ToolResult | None,
+    ) -> AgentResult:
+        """Generate a Lal Kitab answer grounded in chart-first API context plus RAG."""
+        api_context = lalkitab_plan.api_context or {}
+        input_resolution = api_context.get("input_resolution") if isinstance(api_context.get("input_resolution"), dict) else {}
+        confirmation_rule = (
+            "- Start by briefly confirming the birth details you used. If a detail was inferred from a known place, say so naturally."
+            if input_resolution.get("confirm_understood_details", True) is not False
+            else "- Do not add a separate birth-detail confirmation unless the user asks."
+        )
+        prompt = f"""
+{self.system_prompt}
+
+You are answering a Lal Kitab / Vedic Jyotish question for the user.
+
+Rules:
+- Use "Calculated API Context" as the source for chart/calculation facts.
+- Use "Knowledge/RAG Context" for interpretation policy, tone, explanations, FAQs, and Lal Kitab reference context.
+{confirmation_rule}
+- Never invent chart placements, debts, remedies, predictions, totke, lucky factors, houses, or varshphal data.
+- If the API context is incomplete or an endpoint failed, say which calculated context was unavailable.
+- Distinguish calculated facts from interpretation in clear language.
+- Do not claim certainty beyond the provided sources.
+
+User Query:
+{message}
+
+Recent Conversation:
+{json.dumps(chat_history[-6:], default=str, indent=2)}
+
+Calculated API Context:
+{json.dumps(_sanitize_for_json(api_context), default=str, indent=2)}
+
+Knowledge/RAG Context:
+{json.dumps(_sanitize_for_json(rag_context), default=str, indent=2)}
+
+Answer the user directly and cite what context you used in natural language.
+"""
+        response = await self.llm_provider.generate(prompt)
+        tool_results = dict(lalkitab_plan.tool_results or {})
+        if rag_tool_result:
+            tool_results["knowledge_search"] = rag_tool_result
+        return AgentResult(
+            answer=response.content,
+            metadata={
+                "tool_results": tool_results,
+                "steps_executed": len(tool_results),
+                "validation_passed": True,
+                "validation_confidence": 0.92,
+                "lalkitab_runtime": True,
+                "api_context": {
+                    "normalized_birth_input": api_context.get("normalized_birth_input"),
+                    "chart_available": bool(api_context.get("chart_context")),
+                    "secondary_endpoint_ids": sorted((api_context.get("secondary_endpoint_results") or {}).keys()),
+                    "source_provenance": api_context.get("source_provenance") or [],
+                },
+                "selected_connector_endpoint_ids": lalkitab_plan.selected_endpoint_ids,
+                "rag_context": {
+                    "chunks_count": len(rag_context.get("chunks") or []),
+                    "sources": rag_context.get("sources") or [],
+                    "confidence": rag_context.get("confidence"),
+                },
+            },
+        )
+
     def _evaluate_capability_scope(self, message: str) -> CapabilityDecision:
         contract = self.capability_firewall.build_contract(
             brand_slug=self.brand_id,
@@ -571,15 +831,10 @@ class MessageService:
             self.tool_registry.register(external_tool)
             registered_tools.append(external_tool.name)
 
-        api_data_source = config.get("api_data_source") or {}
-        if (
-            isinstance(api_data_source, dict)
-            and api_data_source.get("enabled")
-            and str(api_data_source.get("url") or "").strip()
-        ):
-            api_tool = ApiDataSourceTool(api_data_source)
-            self.tool_registry.register(api_tool)
-            registered_tools.append(api_tool.name)
+        if config.get("data_source") != "shopify":
+            for connector_tool in self.external_tool_registry.enabled_context_connector_tools(config):
+                self.tool_registry.register(connector_tool)
+                registered_tools.append(connector_tool.name)
 
         if registered_skills or registered_tools:
             logger.info(
@@ -1255,9 +1510,127 @@ class MessageService:
                         "enabled": bool((self.agent_config or {}).get("api_data_source", {}).get("enabled")),
                         "name": (self.agent_config or {}).get("api_data_source", {}).get("name"),
                     },
+                    "context_connectors": self._context_connector_runtime_metadata(),
                     "memory": self._memory_runtime_metadata(),
                 },
             )
+
+            lalkitab_pending = (
+                await self._load_lalkitab_pending_state(conversation_id)
+                if short_term_enabled else {}
+            )
+            lalkitab_plan = await build_lalkitab_runtime_context(
+                self.agent_config or {}, runtime_message, pending_state=lalkitab_pending
+            )
+
+            # Surface real runtime activity (geocoding, connector calls) as it happens.
+            if lalkitab_plan.handled:
+                for event in lalkitab_plan.events:
+                    yield StreamingMessageResponse(
+                        type=event.get("type") or "status",
+                        content=event.get("content") or "",
+                        conversation_id=conversation_id,
+                        metadata=event.get("metadata") or {},
+                    )
+
+            # Birthplace disambiguation: pause and ask the user to pick a place.
+            if lalkitab_plan.handled and lalkitab_plan.awaiting_place_choice:
+                disambiguation_metadata = {
+                    "connector_id": "vedika_lal_kitab",
+                    "connector_name": "Vedika Lal Kitab",
+                    "endpoint_id": "geocode_search",
+                    "endpoint_name": "Vedika Geocode Search",
+                    "candidates": lalkitab_plan.place_candidates,
+                    "normalized_birth_input": lalkitab_plan.normalized_birth_input,
+                }
+                yield StreamingMessageResponse(
+                    type="place_disambiguation",
+                    content=lalkitab_plan.clarification,
+                    conversation_id=conversation_id,
+                    metadata=disambiguation_metadata,
+                )
+                yield StreamingMessageResponse(type="content", content=lalkitab_plan.clarification, conversation_id=conversation_id)
+                if short_term_enabled:
+                    await self.short_term.add_message(
+                        conversation_id=conversation_id,
+                        role=MessageRole.ASSISTANT,
+                        content=lalkitab_plan.clarification,
+                        metadata={"user_id": user_id, "lalkitab_pending": lalkitab_plan.pending_state},
+                    )
+                yield StreamingMessageResponse(
+                    type="done",
+                    content="Awaiting birthplace selection.",
+                    conversation_id=conversation_id,
+                    metadata={"awaiting_place_choice": True},
+                )
+                return
+
+            if lalkitab_plan.handled and lalkitab_plan.missing_input:
+                missing_metadata = {
+                    "connector_id": "vedika_lal_kitab",
+                    "connector_name": "Vedika Lal Kitab",
+                    "endpoint_id": "lalkitab_chart",
+                    "endpoint_name": "Lal Kitab Chart",
+                    "missing_input": lalkitab_plan.missing_input,
+                    "normalized_birth_input": lalkitab_plan.normalized_birth_input,
+                }
+                yield StreamingMessageResponse(
+                    type="missing_input",
+                    content=lalkitab_plan.clarification,
+                    conversation_id=conversation_id,
+                    metadata=missing_metadata,
+                )
+                yield StreamingMessageResponse(type="content", content=lalkitab_plan.clarification, conversation_id=conversation_id)
+                if short_term_enabled:
+                    await self.short_term.add_message(
+                        conversation_id=conversation_id,
+                        role=MessageRole.ASSISTANT,
+                        content=lalkitab_plan.clarification,
+                        metadata={"user_id": user_id, "lalkitab_pending": lalkitab_plan.pending_state},
+                    )
+                yield StreamingMessageResponse(
+                    type="done",
+                    content="Missing Lal Kitab input required.",
+                    conversation_id=conversation_id,
+                    metadata={"missing_input": missing_metadata},
+                )
+                return
+
+            connector_preflight = [] if lalkitab_plan.handled else self._connector_missing_inputs_for_message(runtime_message)
+            if connector_preflight:
+                first_missing = connector_preflight[0]
+                yield StreamingMessageResponse(
+                    type="missing_input",
+                    content=(
+                        f"{first_missing.get('endpoint_name') or 'Connector'} needs: "
+                        f"{', '.join(first_missing.get('missing_input') or [])}."
+                    ),
+                    conversation_id=conversation_id,
+                    metadata=first_missing,
+                )
+                clarification = (
+                    "I need a little more information before I can call the configured source: "
+                    f"{', '.join(first_missing.get('missing_input') or [])}."
+                )
+                yield StreamingMessageResponse(type="content", content=clarification, conversation_id=conversation_id)
+                yield StreamingMessageResponse(
+                    type="done",
+                    content="Missing input required.",
+                    conversation_id=conversation_id,
+                    metadata={"missing_input": first_missing},
+                )
+                return
+
+            if not lalkitab_plan.handled and ((self.agent_config or {}).get("rag", {}).get("enabled") or (self.agent_config or {}).get("data_source") == "rag"):
+                yield StreamingMessageResponse(
+                    type="rag_context",
+                    content="Knowledge retrieval is enabled for this run.",
+                    conversation_id=conversation_id,
+                    metadata={
+                        "rag": (self.agent_config or {}).get("rag") or {},
+                        "context_connectors": self._context_connector_runtime_metadata(),
+                    },
+                )
 
             # Retrieve recent history for context (last 6 messages)
             recent_messages = []
@@ -1298,10 +1671,33 @@ class MessageService:
                 "prompt_metadata": self.prompt_metadata,
                 "capability_scope": capability_scope,
             }
+            if lalkitab_plan.handled and lalkitab_plan.api_context:
+                prompt_context["prompt_runtime"]["calculated_api_context"] = {
+                    "normalized_birth_input": lalkitab_plan.api_context.get("normalized_birth_input"),
+                    "chart_available": bool(lalkitab_plan.api_context.get("chart_context")),
+                    "secondary_endpoint_ids": sorted((lalkitab_plan.api_context.get("secondary_endpoint_results") or {}).keys()),
+                    "source_provenance": lalkitab_plan.api_context.get("source_provenance") or [],
+                }
 
             from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
 
-            if isinstance(self.orchestrator, ShopifyOrchestrator):
+            if lalkitab_plan.handled:
+                rag_context, rag_tool_result = await self._retrieve_lalkitab_rag_context(runtime_message, request)
+                if rag_context:
+                    yield StreamingMessageResponse(
+                        type="rag_context",
+                        content=f"Retrieved {len(rag_context.get('chunks') or [])} knowledge chunk(s) for Lal Kitab context.",
+                        conversation_id=conversation_id,
+                        metadata=rag_context,
+                    )
+                agent_result = await self._generate_lalkitab_agent_result(
+                    message=runtime_message,
+                    chat_history=chat_history,
+                    lalkitab_plan=lalkitab_plan,
+                    rag_context=rag_context,
+                    rag_tool_result=rag_tool_result,
+                )
+            elif isinstance(self.orchestrator, ShopifyOrchestrator):
                 # Define a queue to capture status updates from the orchestrator
                 status_queue = asyncio.Queue()
 
@@ -1387,6 +1783,24 @@ class MessageService:
                 if not hasattr(tool_result, "metadata") or not tool_result.metadata:
                     continue
                 tool_metadata = tool_result.metadata or {}
+                connector_metadata = {
+                    key: tool_metadata.get(key)
+                    for key in (
+                        "connector_id",
+                        "connector_name",
+                        "endpoint_id",
+                        "endpoint_name",
+                        "url",
+                        "latency_ms",
+                        "missing_input",
+                        "request_shape",
+                        "response_summary",
+                        "blocked_reason",
+                    )
+                    if tool_metadata.get(key) is not None
+                }
+                if agent_metadata.get("lalkitab_runtime") and connector_metadata.get("connector_id"):
+                    continue
                 products = [_sanitize_for_json(product) for product in (tool_metadata.get("products") or [])]
                 dealers = [_sanitize_for_json(dealer) for dealer in (tool_metadata.get("dealers") or [])]
                 sources = tool_metadata.get("sources") or []
@@ -1399,8 +1813,39 @@ class MessageService:
                     summary_parts.append(f"{len(sources)} source{'s' if len(sources) != 1 else ''}")
                 if tool_metadata.get("cart"):
                     summary_parts.append("cart context")
+                if connector_metadata.get("connector_name"):
+                    summary_parts.append(f"{connector_metadata.get('connector_name')} context")
+                if connector_metadata.get("missing_input"):
+                    yield StreamingMessageResponse(
+                        type="missing_input",
+                        content=(
+                            f"{connector_metadata.get('endpoint_name') or tool_name} needs: "
+                            f"{', '.join(connector_metadata.get('missing_input') or [])}."
+                        ),
+                        conversation_id=conversation_id,
+                        metadata=connector_metadata,
+                    )
+                if connector_metadata.get("connector_id"):
+                    event_type = "mcp_tool_start" if tool_metadata.get("tool_id") == "context_connector_mcp" else "connector_start"
+                    yield StreamingMessageResponse(
+                        type=event_type,
+                        content=(
+                            f"Calling {connector_metadata.get('connector_name') or 'connector'}"
+                            f" · {connector_metadata.get('endpoint_name') or tool_name}."
+                        ),
+                        conversation_id=conversation_id,
+                        metadata={
+                            "tool_name": str(tool_name),
+                            **connector_metadata,
+                        },
+                    )
+                result_type = "tool_result"
+                if connector_metadata.get("connector_id"):
+                    result_type = "mcp_tool_result" if tool_metadata.get("tool_id") == "context_connector_mcp" else "connector_result"
+                    if getattr(tool_result, "success", True) is False:
+                        result_type = "connector_error"
                 yield StreamingMessageResponse(
-                    type="tool_result",
+                    type=result_type,
                     content=(
                         f"{tool_name} returned {', '.join(summary_parts)}."
                         if summary_parts
@@ -1418,6 +1863,7 @@ class MessageService:
                         "original_query": tool_metadata.get("original_query"),
                         "search_query": tool_metadata.get("search_query"),
                         "rerank_results": _sanitize_for_json(tool_metadata.get("rerank_results") or []) if tool_metadata.get("rerank_results") else None,
+                        **connector_metadata,
                     },
                     products=products,
                     dealers=dealers,
@@ -1435,6 +1881,18 @@ class MessageService:
                 )
                 # Small artificial delay to keep UI smooth
                 await asyncio.sleep(0.02)
+
+            yield StreamingMessageResponse(
+                type="final_answer",
+                content=full_response,
+                conversation_id=conversation_id,
+                metadata={
+                    "context_used": len(tool_results),
+                    "validation_confidence": agent_metadata.get("validation_confidence"),
+                    "api_context": _sanitize_for_json(agent_metadata.get("api_context") or {}),
+                    "rag_context": _sanitize_for_json(agent_metadata.get("rag_context") or {}),
+                },
+            )
 
             # Phase 4: Validate streaming response
             # Orchestrator already ran the Critic loop and self-correction
@@ -1554,6 +2012,8 @@ class MessageService:
                     "search_query": agent_metadata.get("search_query") or agent_metadata.get("last_search_query"),
                     "rerank_results": _sanitize_for_json(agent_metadata.get("rerank_results") or []),
                     "resolved_reference": _sanitize_for_json(agent_metadata.get("resolved_reference") or {}),
+                    "api_context": _sanitize_for_json(agent_metadata.get("api_context") or {}),
+                    "rag_context": _sanitize_for_json(agent_metadata.get("rag_context") or {}),
                     "cart": _sanitize_for_json({
                         "cart_id": saved_cart_id,
                         "checkout_url": agent_metadata.get("checkout_url"),
