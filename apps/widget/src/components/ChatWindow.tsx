@@ -15,6 +15,8 @@ interface ChatWindowProps {
   activity?: ActivityState;
   /** 'basic' = cycling indicator (default); 'advanced' = live step timeline. */
   activityMode?: 'basic' | 'advanced';
+  /** In advanced mode: 'persistent' keeps the trace on each finished answer. */
+  activityPersistence?: 'temporary' | 'persistent';
   isExpanded?: boolean;
   isMobile?: boolean;
   onSendMessage: (text: string) => void;
@@ -136,6 +138,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   isTyping,
   activity = EMPTY_ACTIVITY,
   activityMode = 'basic',
+  activityPersistence = 'temporary',
   isExpanded = false,
   isMobile = false,
   onSendMessage,
@@ -388,8 +391,25 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               }
               const placeCandidates = (message.metadata?.place_candidates as { label: string; placeId?: string }[] | undefined) || [];
               const showPlaceChips = activityMode === 'advanced' && message.role === 'assistant' && placeCandidates.length > 0;
+              const persistedSteps = message.activitySteps || [];
+              const showPersistedActivity =
+                activityMode === 'advanced' &&
+                activityPersistence === 'persistent' &&
+                message.role === 'assistant' &&
+                persistedSteps.length > 0;
               return (
                 <React.Fragment key={message.id}>
+                  {showPersistedActivity && (
+                    <div style={{ margin: '0 16px' }}>
+                      <ActivityTimeline
+                        persisted
+                        state={{ steps: persistedSteps, disambiguation: undefined }}
+                        accentColor={accentColor}
+                        textColor={tk?.assistantMsgColor ?? 'rgba(255,255,255,0.85)'}
+                        bgColor={tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)'}
+                      />
+                    </div>
+                  )}
                   <MessageBubble
                     message={message}
                     userMsgBg={tk?.userMsgBg ?? accentColor}

@@ -6,11 +6,14 @@ interface StepFeaturesProps {
     file_upload: boolean;
     human_takeover: boolean;
     conversation_memory: boolean;
+    auto_compaction: boolean;
+    context_window_messages: number;
     typing_indicators: boolean;
     response_streaming: boolean;
     show_sources: boolean;
     show_product_cards: boolean;
     activity_mode: 'basic' | 'advanced';
+    activity_persistence: 'temporary' | 'persistent';
     rate_limiting: boolean;
     content_filtering: boolean;
     session_timeout: number;
@@ -126,6 +129,50 @@ export default function StepFeatures({ data, onChange }: StepFeaturesProps) {
             />
           </div>
 
+          {data.conversation_memory && (
+            <>
+              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                <div>
+                  <label htmlFor="auto_compaction" className="text-sm font-medium text-gray-900">
+                    Auto-compaction
+                  </label>
+                  <p className="text-xs text-gray-500">
+                    Summarize older turns into a running memory when the conversation grows, so
+                    long conversations keep their context (Claude-style). Recommended on.
+                  </p>
+                </div>
+                <input
+                  id="auto_compaction"
+                  type="checkbox"
+                  checked={data.auto_compaction}
+                  onChange={(e) => onChange('auto_compaction', e.target.checked)}
+                  className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                />
+              </div>
+
+              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                <div>
+                  <label htmlFor="context_window_messages" className="text-sm font-medium text-gray-900">
+                    Context Window (messages)
+                  </label>
+                  <p className="text-xs text-gray-500">
+                    How many recent messages to keep verbatim in the prompt. Older ones are folded
+                    into the running memory.
+                  </p>
+                </div>
+                <input
+                  id="context_window_messages"
+                  type="number"
+                  min={4}
+                  max={40}
+                  value={data.context_window_messages}
+                  onChange={(e) => onChange('context_window_messages', Number(e.target.value))}
+                  className="w-20 text-sm border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                />
+              </div>
+            </>
+          )}
+
           <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div>
               <label htmlFor="typing_indicators" className="text-sm font-medium text-gray-900">
@@ -205,6 +252,29 @@ export default function StepFeatures({ data, onChange }: StepFeaturesProps) {
               <option value="advanced">Advanced timeline</option>
             </select>
           </div>
+
+          {data.activity_mode === 'advanced' && (
+            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+              <div>
+                <label htmlFor="activity_persistence" className="text-sm font-medium text-gray-900">
+                  Timeline Persistence
+                </label>
+                <p className="text-xs text-gray-500">
+                  Temporary: the timeline disappears once the answer arrives. Persistent: it stays
+                  attached to each answer (Claude/ChatGPT style) so users can see what ran.
+                </p>
+              </div>
+              <select
+                id="activity_persistence"
+                value={data.activity_persistence}
+                onChange={(e) => onChange('activity_persistence', e.target.value)}
+                className="text-sm border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+              >
+                <option value="temporary">Temporary</option>
+                <option value="persistent">Persistent</option>
+              </select>
+            </div>
+          )}
         </div>
       </div>
 

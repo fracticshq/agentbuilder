@@ -446,24 +446,159 @@ class MessageService:
         return missing_groups
 
     async def _load_lalkitab_pending_state(self, conversation_id: str) -> dict:
-        """Return the pending Lal Kitab birth-input/disambiguation state from the
-        most recent assistant turn, so multi-turn input collection can resume."""
+        """Resume Lal Kitab context across turns: merges any in-flight pending
+        flow (missing input / disambiguation) with the birth details remembered
+        from an earlier successful reading, so follow-ups never re-ask."""
         if not self.short_term:
             return {}
         try:
-            recent = await self.short_term.get_recent_messages(conversation_id=conversation_id, limit=4)
+            recent = await self.short_term.get_recent_messages(conversation_id=conversation_id, limit=8)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("lalkitab_pending_state_load_failed", error=str(exc))
             return {}
+        pending: dict = {}
+        remembered: dict = {}
         for msg in reversed(recent):
             role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
             if role != "assistant":
                 continue
-            pending = (msg.metadata or {}).get("lalkitab_pending")
-            if isinstance(pending, dict) and pending:
-                return pending
-            break
-        return {}
+            meta = msg.metadata or {}
+            if not pending and isinstance(meta.get("lalkitab_pending"), dict) and meta["lalkitab_pending"]:
+                pending = dict(meta["lalkitab_pending"])
+            if not remembered and isinstance(meta.get("connector_inputs"), dict) and meta["connector_inputs"]:
+                remembered = dict(meta["connector_inputs"])
+            if pending and remembered:
+                break
+        if not pending and not remembered:
+            return {}
+        normalized: dict = {}
+        normalized.update(remembered)
+        normalized.update(pending.get("normalized_birth_input") or {})
+        result: dict = {"normalized_birth_input": normalized}
+        if pending.get("awaiting_place_choice"):
+            result["awaiting_place_choice"] = True
+            result["place_candidates"] = pending.get("place_candidates") or []
+        return result
+
+    def _apply_remembered_connector_inputs(self, remembered_inputs: dict) -> None:
+        """Push conversation-remembered inputs onto registered connector tools so
+        follow-up tool calls auto-fill required fields (universal: any connector)."""
+        registry = getattr(self, "tool_registry", None)
+        if not remembered_inputs or registry is None:
+            return
+        cleaned = {k: v for k, v in remembered_inputs.items() if v not in (None, "")}
+        try:
+            tools = registry.list_tools()
+        except Exception:  # pragma: no cover - defensive
+            return
+        for tool in tools:
+            existing = getattr(tool, "remembered_inputs", None)
+            if isinstance(existing, dict):
+                tool.remembered_inputs = {**existing, **cleaned}
+
+    def _collect_connector_inputs(self, session_state: dict, lalkitab_plan, agent_metadata: dict) -> dict:
+        """Accumulate resolved connector inputs for this turn so later turns can
+        reuse them (birth details, location, account id, …)."""
+        inputs: dict = dict(session_state.get("connector_inputs") or {})
+        if getattr(lalkitab_plan, "handled", False):
+            for key, value in (getattr(lalkitab_plan, "normalized_birth_input", None) or {}).items():
+                if value not in (None, ""):
+                    inputs[key] = value
+        for tool_result in (agent_metadata.get("tool_results") or {}).values():
+            meta = getattr(tool_result, "metadata", None) or {}
+            resolved = meta.get("resolved_inputs")
+            if isinstance(resolved, dict):
+                for key, value in resolved.items():
+                    if value not in (None, ""):
+                        inputs[key] = value
+        return inputs
+
+    def _memory_short_term_settings(self) -> dict:
+        mem = (self.agent_config or {}).get("memory") if isinstance((self.agent_config or {}).get("memory"), dict) else {}
+        st = mem.get("short_term") if isinstance(mem.get("short_term"), dict) else {}
+        return st
+
+    def _context_window_messages(self) -> int:
+        try:
+            return max(2, int(self._memory_short_term_settings().get("window_messages") or 12))
+        except (TypeError, ValueError):
+            return 12
+
+    def _auto_compaction_enabled(self) -> bool:
+        # Default on whenever short-term memory is enabled.
+        return self._short_term_memory_enabled() and self._memory_short_term_settings().get("auto_compaction", True) is not False
+
+    def _compaction_threshold(self) -> int:
+        floor = self._context_window_messages() + 4
+        try:
+            return max(floor, int(self._memory_short_term_settings().get("compaction_threshold") or 20))
+        except (TypeError, ValueError):
+            return max(floor, 20)
+
+    async def _summarize_conversation_segment(self, messages: list, prior_summary: str) -> str:
+        """Fold a batch of older messages into the rolling conversation memory,
+        preserving concrete facts verbatim (universal for any agent)."""
+        if not self.llm_provider or not messages:
+            return prior_summary or ""
+        transcript = "\n".join(
+            f"{(m.role.value if hasattr(m.role, 'value') else m.role)}: {m.content}" for m in messages
+        )[:8000]
+        prompt = f"""You maintain a running memory of a chat conversation so the assistant never loses context across a long conversation.
+
+Update the memory below. Rules:
+- Preserve concrete facts VERBATIM: names, dates, times, places, IDs, numbers, birth details, decisions, stated preferences.
+- Keep a short "Open threads:" list of unresolved questions or things the user is still waiting on.
+- Be concise but lossless on facts. No preamble, just the updated memory.
+
+Existing memory:
+{prior_summary or '(none yet)'}
+
+New conversation turns to fold in:
+{transcript}
+
+Updated memory:"""
+        try:
+            response = await self.llm_provider.generate(prompt, max_tokens=1200)
+            return (response.content or prior_summary or "").strip()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("conversation_summary_failed", error=str(exc))
+            return prior_summary or ""
+
+    async def _build_conversation_context(self, conversation_id: str) -> dict:
+        """Return {summary, recent}: a rolling summary of older turns plus the
+        most-recent window of messages. Universal across all agents."""
+        window = self._context_window_messages()
+        if not self.short_term:
+            return {"summary": "", "recent": []}
+        try:
+            recent = await self.short_term.get_recent_messages(conversation_id=conversation_id, limit=window)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("conversation_context_failed", error=str(exc))
+            recent = []
+        if not isinstance(recent, list):
+            recent = []
+
+        summary_text = ""
+        try:
+            total = await self.short_term.get_message_count(conversation_id) if self._auto_compaction_enabled() else 0
+            if isinstance(total, int) and total > self._compaction_threshold():
+                older_count = max(0, total - window)
+                last = await self.short_term.get_latest_summary(conversation_id)
+                last_covered = last.turn_count if last else 0
+                summary_text = last.summary if last else ""
+                # Fold newly aged-out messages into the rolling summary (throttled).
+                if isinstance(last_covered, int) and older_count - last_covered >= 4:
+                    older = await self.short_term.get_earliest_messages(conversation_id, older_count)
+                    segment = older[last_covered:older_count] if isinstance(older, list) else []
+                    if segment:
+                        summary_text = await self._summarize_conversation_segment(segment, summary_text)
+                        await self.short_term.save_summary(
+                            conversation_id, summary_text, older_count,
+                            segment[0].timestamp, segment[-1].timestamp,
+                        )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("conversation_compaction_failed", error=str(exc))
+        return {"summary": summary_text, "recent": recent}
 
     async def _retrieve_lalkitab_rag_context(self, message: str, request: MessageRequest) -> tuple[dict, ToolResult | None]:
         """Retrieve RAG context for Lal Kitab synthesis without persisting API data."""
@@ -554,8 +689,8 @@ Rules:
 User Query:
 {message}
 
-Recent Conversation:
-{json.dumps(chat_history[-6:], default=str, indent=2)}
+Conversation (rolling memory + recent turns):
+{json.dumps(chat_history, default=str, indent=2)}
 
 Calculated API Context:
 {json.dumps(_sanitize_for_json(api_context), default=str, indent=2)}
@@ -1166,18 +1301,25 @@ Answer the user directly and cite what context you used in natural language.
                 escalations=escalations,
             )
 
-            # Retrieve recent history for context (last 6 messages)
+            # Retrieve recent history + rolling memory (auto-compaction).
             recent_messages = []
+            conversation_summary = ""
             if short_term_enabled:
-                recent_messages = await self.short_term.get_recent_messages(
-                    conversation_id=conversation_id,
-                    limit=6
-                )
+                conv_ctx = await self._build_conversation_context(conversation_id)
+                recent_messages = conv_ctx["recent"]
+                conversation_summary = conv_ctx["summary"]
 
             # Build chat history AND extract session state (e.g. cart_id) from
             # previous assistant message metadata so the agent can reuse the cart.
             chat_history = []
             session_state: dict = {}
+            if conversation_summary:
+                # Lead with the rolling memory so older context survives compaction.
+                chat_history.append({
+                    "role": "system",
+                    "content": f"Conversation memory so far (earlier turns):\n{conversation_summary}",
+                    "metadata": {"memory_summary": True},
+                })
             for msg in recent_messages:
                 role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
                 chat_history.append({
@@ -1632,18 +1774,25 @@ Answer the user directly and cite what context you used in natural language.
                     },
                 )
 
-            # Retrieve recent history for context (last 6 messages)
+            # Retrieve recent history + rolling memory (auto-compaction).
             recent_messages = []
+            conversation_summary = ""
             if short_term_enabled:
-                recent_messages = await self.short_term.get_recent_messages(
-                    conversation_id=conversation_id,
-                    limit=6
-                )
+                conv_ctx = await self._build_conversation_context(conversation_id)
+                recent_messages = conv_ctx["recent"]
+                conversation_summary = conv_ctx["summary"]
 
             # Build chat history AND extract session state (e.g. cart_id) from
             # previous assistant message metadata so the agent can reuse the cart.
             chat_history = []
             session_state: dict = {}
+            if conversation_summary:
+                # Lead with the rolling memory so older context survives compaction.
+                chat_history.append({
+                    "role": "system",
+                    "content": f"Conversation memory so far (earlier turns):\n{conversation_summary}",
+                    "metadata": {"memory_summary": True},
+                })
             for msg in recent_messages:
                 role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
                 chat_history.append({
@@ -1664,6 +1813,16 @@ Answer the user directly and cite what context you used in natural language.
                         session_state["captured_ids"] = meta.get("captured_ids", {})
                     if "last_searched" in meta:
                         session_state["last_searched"] = meta.get("last_searched", {})
+                    # Remembered connector inputs (birthplace, location, account
+                    # id, …) so follow-up tool calls reuse them automatically.
+                    if isinstance(meta.get("connector_inputs"), dict) and meta["connector_inputs"]:
+                        session_state["connector_inputs"] = {**session_state.get("connector_inputs", {}), **meta["connector_inputs"]}
+
+            # Make remembered inputs available to any connector tool the
+            # orchestrator may call this turn (universal for connector agents).
+            remembered_inputs = session_state.get("connector_inputs") or {}
+            if remembered_inputs:
+                self._apply_remembered_connector_inputs(remembered_inputs)
 
             prompt_context = {
                 "session_state": session_state,
@@ -1869,18 +2028,23 @@ Answer the user directly and cite what context you used in natural language.
                     dealers=dealers,
                 )
 
-            # Stream the result word by word (to maintain UI experience)
+            # Stream the result in small word batches for a smooth UI. The full
+            # answer is already generated, so we flush it quickly: a per-word
+            # artificial delay here only adds latency and — on long answers —
+            # keeps the socket busy long enough to hit the client pong timeout
+            # and drop the connection mid-stream (truncating the answer).
             words = full_response.split(' ')
-            for i, word in enumerate(words):
-                # Add space back if not the last word
-                display_word = word + (" " if i < len(words) - 1 else "")
+            BATCH = 12
+            for i in range(0, len(words), BATCH):
+                chunk_words = words[i:i + BATCH]
+                chunk_text = ' '.join(chunk_words)
+                if i + BATCH < len(words):
+                    chunk_text += ' '
                 yield StreamingMessageResponse(
                     type="content",
-                    content=display_word,
-                    conversation_id=conversation_id
+                    content=chunk_text,
+                    conversation_id=conversation_id,
                 )
-                # Small artificial delay to keep UI smooth
-                await asyncio.sleep(0.02)
 
             yield StreamingMessageResponse(
                 type="final_answer",
@@ -1948,6 +2112,8 @@ Answer the user directly and cite what context you used in natural language.
                         "last_constraints": agent_metadata.get("last_constraints"),
                         "rerank_results": agent_metadata.get("rerank_results"),
                         "resolved_reference": agent_metadata.get("resolved_reference"),
+                        # Remembered connector inputs so follow-ups reuse them.
+                        "connector_inputs": self._collect_connector_inputs(session_state, lalkitab_plan, agent_metadata) or None,
                     }
                 )
 

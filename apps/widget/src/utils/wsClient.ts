@@ -1,7 +1,9 @@
 import type { Message, StreamingMessage, PageContext } from '../types';
 
 const DEFAULT_HEARTBEAT_INTERVAL = 30_000;
-const DEFAULT_PONG_TIMEOUT = 5_000;
+// Generous so a server busy generating/streaming a long answer is not treated
+// as a dead connection (which would close the socket and truncate the reply).
+const DEFAULT_PONG_TIMEOUT = 20_000;
 const DEFAULT_RECONNECT_BASE_DELAY = 1_000;
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
 
@@ -104,8 +106,11 @@ export class WebSocketClient {
         metadata: meta.metadata,
       });
     } else if (chunk.type === 'final_answer') {
-      // The full answer is already accumulated from `content` events; surface
-      // the event for any listeners but don't double-count the text.
+      // Authoritative full answer. Replace the accumulated text so the resolved
+      // message is complete even if some `content` chunks were dropped.
+      if (typeof chunk.content === 'string' && chunk.content.length >= this.accumulatedContent.length) {
+        this.accumulatedContent = chunk.content;
+      }
       this.pendingCallback?.(chunk);
     } else if (chunk.type === 'error') {
       const reject = this.pendingReject;

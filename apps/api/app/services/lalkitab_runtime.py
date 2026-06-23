@@ -173,8 +173,12 @@ def _normalize_timezone(value: str) -> str:
 
 
 def _clean_birth_place(value: str) -> str:
+    # Stop the place capture at the next field label or the start of the question
+    # (e.g. "Delhi, India. TOB: 1526" → "Delhi, India"). Also cut on an arrow.
     cleaned = re.split(
-        r"\b(?:question|query|ask|will|should|can|dob|date\s+of\s+birth|time\s+of\s+birth|birth\s+time)\b",
+        r"(?:->|→|\|)|"
+        r"\b(?:question|query|ask|will|should|can|dob|tob|pob|"
+        r"date\s+of\s+birth|time\s+of\s+birth|birth\s+time|place\s+of\s+birth)\b",
         value,
         maxsplit=1,
         flags=re.IGNORECASE,
@@ -257,7 +261,7 @@ def extract_lalkitab_birth_input(
         normalized["timezone"] = "+05:30"
 
     place_match = re.search(
-        r"\b(?:birth\s*place|birthplace|place\s*of\s*birth|born\s+in|place|city)\s*[:=]?\s*([A-Za-z][A-Za-z\s,.-]{1,120})",
+        r"\b(?:birth\s*place|birthplace|place\s*of\s*birth|pob|p\.?o\.?b\.?|born\s+in|place|city)\s*[:=]?\s*([A-Za-z][A-Za-z\s,.-]{1,120})",
         text,
         re.IGNORECASE,
     )

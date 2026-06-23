@@ -514,6 +514,45 @@
   to { transform: rotate(360deg); }
 }
 
+/* Persisted (collapsed) trace attached to a finished answer */
+.activity-persisted {
+  margin: 2px 0 8px;
+  padding: 6px 10px;
+}
+
+.activity-persisted-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 0;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.activity-persisted-header:hover { opacity: 1; }
+
+.activity-persisted-summary { flex: 1; text-align: left; }
+
+.activity-chevron {
+  font-size: 10px;
+  transition: transform 0.18s ease;
+  opacity: 0.6;
+}
+.activity-chevron.open { transform: rotate(90deg); }
+
+.activity-persisted-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 7px;
+  padding-left: 2px;
+}
+
 .activity-disambiguation {
   display: flex;
   flex-wrap: wrap;

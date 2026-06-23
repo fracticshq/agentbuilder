@@ -209,8 +209,12 @@ class ToolRegistryService:
                 runtime_tools.append(ConfiguredExternalTool(definition, entry))
         return runtime_tools
 
-    def enabled_context_connector_tools(self, agent_config: dict[str, Any] | None) -> list[BaseTool]:
-        """Generate runtime tools from enabled context connector HTTP endpoints."""
+    def enabled_context_connector_tools(self, agent_config: dict[str, Any] | None, remembered_inputs: dict[str, Any] | None = None) -> list[BaseTool]:
+        """Generate runtime tools from enabled context connector HTTP endpoints.
+
+        `remembered_inputs` are conversation-remembered required-field values so
+        follow-up turns reuse earlier inputs (universal for any connector agent).
+        """
         config = agent_config or {}
         connectors = config.get("context_connectors") if isinstance(config.get("context_connectors"), list) else []
 
@@ -291,7 +295,7 @@ class ToolRegistryService:
                     continue
                 if not _effective_domain_allowlist(connector, url_template):
                     continue
-                runtime_tools.append(ContextConnectorTool(connector, endpoint))
+                runtime_tools.append(ContextConnectorTool(connector, endpoint, remembered_inputs=remembered_inputs))
         return runtime_tools
 
 
@@ -668,9 +672,13 @@ class ApiDataSourceTool(BaseTool):
 class ContextConnectorTool(BaseTool):
     """Runtime HTTP executor generated from an agent-scoped context connector endpoint."""
 
-    def __init__(self, connector: dict[str, Any], endpoint: dict[str, Any]):
+    def __init__(self, connector: dict[str, Any], endpoint: dict[str, Any], remembered_inputs: dict[str, Any] | None = None):
         self.connector = deepcopy(connector or {})
         self.endpoint = deepcopy(endpoint or {})
+        # Conversation-remembered values for this connector's required fields, so
+        # a follow-up turn does not have to re-supply them (universal for any
+        # connector agent: birthplace, location, account id, etc.).
+        self.remembered_inputs = {k: v for k, v in (remembered_inputs or {}).items() if v not in (None, "")}
         connector_id = self.connector.get("id") or self.connector.get("name") or "connector"
         endpoint_id = self.endpoint.get("id") or self.endpoint.get("name") or "endpoint"
         self.name = f"tool_context_{_safe_tool_part(connector_id)}_{_safe_tool_part(endpoint_id)}"
@@ -701,8 +709,13 @@ class ContextConnectorTool(BaseTool):
         }
 
     async def run(self, query: str, payload: dict[str, Any] | None = None, **kwargs) -> ToolResult:
-        payload = payload or {}
+        payload = dict(payload or {})
         required_fields = _connector_required_fields(self.endpoint)
+        # Fill any required field the caller omitted from conversation memory, so
+        # follow-up turns reuse earlier-resolved inputs instead of failing.
+        for field in required_fields:
+            if payload.get(field) in (None, "") and self.remembered_inputs.get(field) not in (None, ""):
+                payload[field] = self.remembered_inputs[field]
         missing = [field for field in required_fields if not payload.get(field)]
         connector_name = self.connector.get("name") or self.connector.get("id") or "Context Connector"
         endpoint_name = self.endpoint.get("name") or self.endpoint.get("id") or "Endpoint"
@@ -864,6 +877,9 @@ class ContextConnectorTool(BaseTool):
                 "endpoint_name": endpoint_name,
                 "url": _redacted_url(url),
                 "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+                # The required-field values actually used — persisted into
+                # conversation memory so later turns can reuse them.
+                "resolved_inputs": {field: payload.get(field) for field in required_fields if payload.get(field) not in (None, "")},
                 "request_shape": {
                     "method": method,
                     "required_user_fields": required_fields,
