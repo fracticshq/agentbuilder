@@ -44,6 +44,42 @@ describe('reduceActivity', () => {
     expect(s.steps[0].label).toBe('Found 3 products');
   });
 
+  it('renders generic public activity envelopes and controls', () => {
+    const s = reduceActivity(
+      EMPTY_ACTIVITY,
+      ev('activity', 'Need a few details', {
+        activity: {
+          activity_id: 'input:missing',
+          kind: 'user_input_request',
+          status: 'waiting_for_user',
+          visibility: 'public',
+          label: 'Need a few details',
+          summary: 'Please share your budget.',
+          controls: [{ type: 'number', id: 'budget', label: 'Budget' }],
+        },
+      }),
+    );
+    expect(s.steps[0].label).toBe('Need a few details');
+    expect(s.steps[0].status).toBe('running');
+    expect(s.prompt?.controls[0].id).toBe('budget');
+  });
+
+  it('ignores console-only activity envelopes in the public widget', () => {
+    const s = reduceActivity(
+      EMPTY_ACTIVITY,
+      ev('activity', 'Connector called', {
+        activity: {
+          activity_id: 'console:connector',
+          kind: 'connector_call',
+          status: 'completed',
+          visibility: 'console',
+          label: 'Vedika API call',
+        },
+      }),
+    );
+    expect(s).toBe(EMPTY_ACTIVITY);
+  });
+
   it('captures place_disambiguation candidates', () => {
     const s = reduceActivity(
       EMPTY_ACTIVITY,

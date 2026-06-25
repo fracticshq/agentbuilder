@@ -847,10 +847,11 @@ class ContextConnectorTool(BaseTool):
                         if attempt >= retry_count:
                             raise
         except httpx.HTTPError as exc:
+            error_message = str(exc) or type(exc).__name__
             return ToolResult(
                 success=False,
                 data=None,
-                error=str(exc),
+                error=error_message,
                 metadata={
                     "tool_id": "context_connector",
                     "connector_id": self.connector.get("id"),
@@ -859,6 +860,7 @@ class ContextConnectorTool(BaseTool):
                     "endpoint_name": endpoint_name,
                     "url": _redacted_url(url),
                     "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+                    "error_type": type(exc).__name__,
                 },
             )
 

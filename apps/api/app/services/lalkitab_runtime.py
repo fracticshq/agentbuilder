@@ -62,6 +62,9 @@ class LalKitabPlanResult:
     place_candidates: list[dict[str, Any]] = field(default_factory=list)
     # Accumulated state to carry across turns (merged birth input + pending place).
     pending_state: dict[str, Any] = field(default_factory=dict)
+    # True when this turn can answer from previously calculated chart/API
+    # context without calling Vedika again.
+    used_cached_context: bool = False
 
 
 def is_lalkitab_agent(config: dict[str, Any] | None) -> bool:
@@ -105,6 +108,43 @@ def message_requires_lalkitab_api(message: str) -> bool:
         "complete reading",
     )
     return any(term in text for term in intent_terms)
+
+
+def message_is_lalkitab_followup(message: str) -> bool:
+    """Detect contextual follow-ups that should reuse prior chart context.
+
+    This deliberately excludes greetings so "hi" on a fresh or existing chat
+    stays conversational and does not trigger astrology/RAG work.
+    """
+    text = re.sub(r"\s+", " ", (message or "").strip().lower())
+    if not text:
+        return False
+    if text in {"hi", "hello", "hey", "namaste", "namaskar", "thanks", "thank you"}:
+        return False
+    if len(text.split()) <= 2 and re.fullmatch(r"(hi|hello|hey|thanks|ok|okay|yes|no)[.!?]*", text):
+        return False
+    followup_terms = (
+        "what about",
+        "tell me more",
+        "explain",
+        "continue",
+        "go on",
+        "more detail",
+        "why",
+        "how so",
+        "what does that mean",
+        "is that",
+        "does that",
+        "can you elaborate",
+        "elaborate",
+        "same chart",
+        "from this chart",
+        "based on this",
+        "based on that",
+        "that mean",
+        "this mean",
+    )
+    return any(term in text for term in followup_terms)
 
 
 def _normalize_date(value: str) -> str | None:
@@ -387,6 +427,9 @@ def normalize_lalkitab_endpoint(endpoint: dict[str, Any]) -> dict[str, Any]:
             },
             "required": ["datetime", "latitude", "longitude", "timezone"],
         }
+    normalized.setdefault("timeout_seconds", 45)
+    normalized.setdefault("retry_count", 1)
+    normalized.setdefault("max_response_chars", 50000)
     normalized.setdefault("execution_order", 1 if endpoint_id == LAL_KITAB_CHART_ENDPOINT else 2)
     if endpoint_id != LAL_KITAB_CHART_ENDPOINT:
         normalized.setdefault("requires_prior_endpoint", LAL_KITAB_CHART_ENDPOINT)
@@ -707,12 +750,23 @@ async def build_lalkitab_runtime_context(
 ) -> LalKitabPlanResult:
     if not is_lalkitab_agent(config):
         return LalKitabPlanResult(handled=False)
+    pending_state = pending_state or {}
+    previous_api_context = (
+        pending_state.get("api_context")
+        if isinstance(pending_state.get("api_context"), dict)
+        else {}
+    )
+    has_previous_chart = bool(previous_api_context.get("chart_context"))
+    requires_api = message_requires_lalkitab_api(message)
     # A bare follow-up ("Illinois", "10:30 AM") won't trip the intent keywords,
-    # so continue any in-flight birth-input / disambiguation collection.
-    resuming = bool(pending_state and (
-        pending_state.get("awaiting_place_choice") or pending_state.get("normalized_birth_input")
-    ))
-    if not message_requires_lalkitab_api(message) and not resuming:
+    # so continue any in-flight birth-input / disambiguation collection. Once a
+    # chart exists, remembered birth input alone is not enough to rerun Vedika.
+    resuming_input_collection = bool(
+        pending_state.get("awaiting_place_choice")
+        or (pending_state.get("normalized_birth_input") and not has_previous_chart)
+    )
+    contextual_followup = has_previous_chart and message_is_lalkitab_followup(message)
+    if not requires_api and not resuming_input_collection and not contextual_followup:
         return LalKitabPlanResult(handled=False)
 
     connector = find_lalkitab_connector(config)
@@ -720,18 +774,36 @@ async def build_lalkitab_runtime_context(
         return LalKitabPlanResult(handled=False)
 
     input_resolution = connector.get("input_resolution") if isinstance(connector.get("input_resolution"), dict) else {}
-    pending_state = pending_state or {}
     extracted, _ = extract_lalkitab_birth_input(
         message,
         resolve_known_places=input_resolution.get("resolve_known_places", True) is not False,
     )
+    has_new_birth_input = any(
+        key in extracted
+        for key in (
+            "date",
+            "birth_date",
+            "time",
+            "birth_time",
+            "birth_place",
+            "latitude",
+            "longitude",
+            "timezone",
+        )
+    )
     # Merge previously collected birth input (so a follow-up that only adds the
     # missing time does not discard the earlier date/place) with this turn.
     normalized_birth_input: dict[str, Any] = {"language": "en"}
+    if isinstance(previous_api_context.get("normalized_birth_input"), dict):
+        normalized_birth_input.update(previous_api_context.get("normalized_birth_input") or {})
     normalized_birth_input.update(pending_state.get("normalized_birth_input") or {})
     normalized_birth_input.update({k: v for k, v in extracted.items() if v not in (None, "")})
 
-    selected_endpoint_ids = select_lalkitab_endpoint_ids(message)
+    selected_endpoint_ids = (
+        select_lalkitab_endpoint_ids(message)
+        if requires_api or has_new_birth_input or not has_previous_chart
+        else []
+    )
     result = LalKitabPlanResult(
         handled=True,
         normalized_birth_input=normalized_birth_input,
@@ -835,19 +907,33 @@ async def build_lalkitab_runtime_context(
         for endpoint in (connector.get("endpoints") or [])
         if isinstance(endpoint, dict) and endpoint.get("enabled", True) and not endpoint.get("revoked")
     }
-    api_context = {
-        "normalized_birth_input": normalized_birth_input,
-        "input_resolution": {
-            "resolve_known_places": input_resolution.get("resolve_known_places", True) is not False,
-            "confirm_understood_details": input_resolution.get("confirm_understood_details", True) is not False,
-            "missing_input_strategy": input_resolution.get("missing_input_strategy") or "ask_follow_up",
-        },
-        "chart_context": None,
-        "secondary_endpoint_results": {},
-        "source_provenance": [],
+    api_context = deepcopy(previous_api_context) if previous_api_context else {}
+    api_context.setdefault("chart_context", None)
+    api_context.setdefault("secondary_endpoint_results", {})
+    api_context.setdefault("source_provenance", [])
+    api_context["normalized_birth_input"] = normalized_birth_input
+    api_context["input_resolution"] = {
+        "resolve_known_places": input_resolution.get("resolve_known_places", True) is not False,
+        "confirm_understood_details": input_resolution.get("confirm_understood_details", True) is not False,
+        "missing_input_strategy": input_resolution.get("missing_input_strategy") or "ask_follow_up",
     }
 
+    if has_new_birth_input and previous_api_context:
+        # A new birth profile invalidates any cached calculated evidence.
+        api_context["chart_context"] = None
+        api_context["secondary_endpoint_results"] = {}
+        api_context["source_provenance"] = []
+
+    endpoints_to_call: list[str] = []
+    existing_secondaries = api_context.get("secondary_endpoint_results") or {}
     for endpoint_id in selected_endpoint_ids:
+        if endpoint_id == LAL_KITAB_CHART_ENDPOINT and api_context.get("chart_context"):
+            continue
+        if endpoint_id != LAL_KITAB_CHART_ENDPOINT and endpoint_id in existing_secondaries:
+            continue
+        endpoints_to_call.append(endpoint_id)
+
+    for endpoint_id in endpoints_to_call:
         endpoint = endpoints_by_id.get(endpoint_id)
         if not endpoint:
             continue
@@ -907,17 +993,19 @@ async def build_lalkitab_runtime_context(
         )
 
     result.api_context = api_context
-    result.events.append(
-        {
-            "type": "api_context",
-            "content": "Calculated Lal Kitab API context is ready.",
-            "metadata": {
-                "normalized_birth_input": normalized_birth_input,
-                "selected_endpoint_ids": selected_endpoint_ids,
-                "chart_available": bool(api_context.get("chart_context")),
-                "secondary_endpoint_ids": sorted((api_context.get("secondary_endpoint_results") or {}).keys()),
-                "source_provenance": api_context.get("source_provenance") or [],
-            },
-        }
-    )
+    result.used_cached_context = bool(previous_api_context and not endpoints_to_call)
+    if endpoints_to_call:
+        result.events.append(
+            {
+                "type": "api_context",
+                "content": "Calculated Lal Kitab API context is ready.",
+                "metadata": {
+                    "normalized_birth_input": normalized_birth_input,
+                    "selected_endpoint_ids": selected_endpoint_ids,
+                    "chart_available": bool(api_context.get("chart_context")),
+                    "secondary_endpoint_ids": sorted((api_context.get("secondary_endpoint_results") or {}).keys()),
+                    "source_provenance": api_context.get("source_provenance") or [],
+                },
+            }
+        )
     return result

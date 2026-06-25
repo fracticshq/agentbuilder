@@ -296,6 +296,9 @@ def test_vedika_lal_kitab_pack_uses_v2_flat_chart_first_schema():
     assert chart["execution_order"] == 1
     assert chart["payload_mode"] == "flat_body"
     assert chart["runtime_required_fields"] == ["datetime", "latitude", "longitude", "timezone"]
+    assert chart["timeout_seconds"] == 45
+    assert chart["retry_count"] == 1
+    assert chart["max_response_chars"] == 50000
     assert endpoints["lalkitab_remedies"]["requires_prior_endpoint"] == "lalkitab_chart"
 
 
@@ -415,6 +418,89 @@ async def test_lalkitab_runtime_calls_chart_before_secondary_endpoints(monkeypat
     assert result.api_context["chart_context"]["endpoint"] == "lalkitab_chart"
     assert sorted(result.api_context["secondary_endpoint_results"]) == ["lalkitab_remedies", "lalkitab_totke"]
     assert any(event["type"] == "api_context" for event in result.events)
+
+
+@pytest.mark.asyncio
+async def test_lalkitab_greeting_does_not_load_cached_context_or_call_connectors(monkeypatch):
+    pack = get_connector_pack("vedika_lal_kitab")
+    calls: list[str] = []
+
+    async def fake_run(self, query, payload=None, **kwargs):
+        calls.append(self.endpoint["id"])
+        return ToolResult(success=True, data={"endpoint": self.endpoint["id"]}, metadata={})
+
+    monkeypatch.setattr("app.services.lalkitab_runtime.ContextConnectorTool.run", fake_run)
+
+    result = await build_lalkitab_runtime_context(
+        {
+            "domain": {"template": "astrology_lalkitab"},
+            "context_connectors": [pack],
+        },
+        "hi",
+        pending_state={
+            "normalized_birth_input": {
+                "date": "1987-07-16",
+                "time": "15:26:00",
+                "latitude": 28.6139,
+                "longitude": 77.209,
+                "timezone": "+05:30",
+            },
+            "api_context": {
+                "normalized_birth_input": {
+                    "date": "1987-07-16",
+                    "time": "15:26:00",
+                    "latitude": 28.6139,
+                    "longitude": 77.209,
+                    "timezone": "+05:30",
+                },
+                "chart_context": {"chart": "cached"},
+                "secondary_endpoint_results": {"lalkitab_remedies": {"remedies": "cached"}},
+            },
+        },
+    )
+
+    assert result.handled is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_lalkitab_followup_reuses_cached_context_without_connector_calls(monkeypatch):
+    pack = get_connector_pack("vedika_lal_kitab")
+    calls: list[str] = []
+
+    async def fake_run(self, query, payload=None, **kwargs):
+        calls.append(self.endpoint["id"])
+        return ToolResult(success=True, data={"endpoint": self.endpoint["id"]}, metadata={})
+
+    monkeypatch.setattr("app.services.lalkitab_runtime.ContextConnectorTool.run", fake_run)
+
+    result = await build_lalkitab_runtime_context(
+        {
+            "domain": {"template": "astrology_lalkitab"},
+            "context_connectors": [pack],
+        },
+        "what does that mean for me?",
+        pending_state={
+            "api_context": {
+                "normalized_birth_input": {
+                    "date": "1987-07-16",
+                    "time": "15:26:00",
+                    "latitude": 28.6139,
+                    "longitude": 77.209,
+                    "timezone": "+05:30",
+                },
+                "chart_context": {"chart": "cached"},
+                "secondary_endpoint_results": {"lalkitab_predictions": {"prediction": "cached"}},
+                "source_provenance": [{"endpoint_id": "lalkitab_chart"}],
+            },
+        },
+    )
+
+    assert result.handled is True
+    assert result.used_cached_context is True
+    assert result.api_context["chart_context"] == {"chart": "cached"}
+    assert result.api_context["secondary_endpoint_results"] == {"lalkitab_predictions": {"prediction": "cached"}}
+    assert calls == []
 
 
 def test_connector_routes_enforce_role_and_brand_scope(monkeypatch):

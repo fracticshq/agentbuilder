@@ -6,7 +6,7 @@ import { useFullscreen } from './hooks/useFullscreen';
 import { APIClient } from './utils/apiClient';
 import { WebSocketClient } from './utils/wsClient';
 import { buildBrandTheme } from './utils/brandTheme';
-import { getConversationStorageKey, shouldAutoOpenFromSearch } from './utils/bootstrap';
+import { shouldAutoOpenFromSearch } from './utils/bootstrap';
 import { extractPageContext } from './utils/pageContext';
 import { trackEvent } from './utils/activityClient';
 import { reduceActivity, finalizeActivity, EMPTY_ACTIVITY } from './utils/activityTimeline';
@@ -37,10 +37,6 @@ function createSecureClientId(prefix: string): string {
   window.crypto.getRandomValues(bytes);
   const value = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
   return `${prefix}_${value}`;
-}
-
-function getSessionStorageKey(agentId: string): string {
-  return `agent_widget_session_${agentId}`;
 }
 
 function getControlSecretStorageKey(conversationId: string): string {
@@ -100,15 +96,9 @@ function App({ config }: AppProps) {
     setExpanded(isFullscreen);
   }, [isFullscreen, setExpanded]);
 
-  // user_id is now issued by the server via the signed widget session below.
-  // Keep a local fallback only for the brief window before the session resolves.
-  const [userId, setUserId] = React.useState(() => {
-    const stored = localStorage.getItem('agent_widget_user_id');
-    if (stored) return stored;
-    const newId = createSecureClientId('user');
-    localStorage.setItem('agent_widget_user_id', newId);
-    return newId;
-  });
+  // user_id is issued by the server via the signed widget session below. Keep
+  // only an in-memory fallback so every page load/new visitor starts clean.
+  const [userId, setUserId] = React.useState(() => createSecureClientId('user'));
 
   const [agentId, setAgentId] = React.useState<string | null>(null);
   const [useWebSocket, setUseWebSocket] = React.useState(true);
@@ -298,28 +288,23 @@ function App({ config }: AppProps) {
   }, [conversationId, agentId, humanTakeoverEnabled, setHumanInControl]);
 
   // ── Establish a server-issued, signed session ─────────────────
-  // The server mints conversation_id + user_id bound to a signed token. We can
-  // no longer fabricate ids client-side; doing so is exactly the hijacking
-  // vector this closes. A stored token (valid 7d) resumes the same conversation.
+  // The server mints conversation_id + user_id bound to a signed token. The
+  // token stays in memory only; a reload/new visit starts a fresh conversation
+  // so public widget usage cannot inherit another visitor's context.
   React.useEffect(() => {
     if (!isOpen || conversationId || !agentId) return;
 
     let cancelled = false;
-    const storageKey = getSessionStorageKey(agentId);
-    const priorToken = localStorage.getItem(storageKey) || undefined;
-    const resuming = Boolean(priorToken);
 
     (async () => {
       try {
-        const session = await apiClient.startSession(agentId, priorToken);
+        const session = await apiClient.startSession(agentId);
         if (cancelled) return;
-        localStorage.setItem(storageKey, session.sessionToken);
         apiClient.setSessionToken(session.sessionToken);
         wsClient.setSessionToken(session.sessionToken);
         setUserId(session.userId);
         setConversationId(session.conversationId);
-        sessionStorage.setItem(getConversationStorageKey(agentId), session.conversationId);
-        setConvStartEvent(resuming ? 'conversation_resumed' : 'conversation_started');
+        setConvStartEvent('conversation_started');
       } catch (err) {
         if (!cancelled) {
           console.error('Failed to establish widget session:', err);
@@ -384,15 +369,12 @@ function App({ config }: AppProps) {
       let currentConvId = conversationId;
       let currentUserId = userId;
       if (!currentConvId) {
-        const storageKey = getSessionStorageKey(agentId);
-        const session = await apiClient.startSession(agentId, localStorage.getItem(storageKey) || undefined);
-        localStorage.setItem(storageKey, session.sessionToken);
+        const session = await apiClient.startSession(agentId);
         wsClient.setSessionToken(session.sessionToken);
         currentConvId = session.conversationId;
         currentUserId = session.userId;
         setUserId(session.userId);
         setConversationId(session.conversationId);
-        sessionStorage.setItem(getConversationStorageKey(agentId), session.conversationId);
       }
 
       trackEvent({
@@ -405,7 +387,9 @@ function App({ config }: AppProps) {
       });
 
       addMessage({ id: assistantMessageId, content: '', role: 'assistant', timestamp: new Date(), citations: [] });
-      updateActivity(EMPTY_ACTIVITY);
+      updateActivity({
+        steps: [{ id: 'local:working', label: 'Reading your message', detail: 'I’m checking what is needed before answering.', status: 'running' }],
+      });
 
       const client = useWebSocket ? wsClient : apiClient;
       const response = await client.sendMessage(

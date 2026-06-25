@@ -1,5 +1,5 @@
 import React from 'react';
-import type { ActivityState, ActivityStep, PlaceCandidate } from '../types';
+import type { ActivityControl, ActivityState, ActivityStep, PlaceCandidate } from '../types';
 
 interface ActivityTimelineProps {
   state: ActivityState;
@@ -11,6 +11,8 @@ interface ActivityTimelineProps {
   bgColor?: string;
   /** Invoked when a user picks a candidate in a disambiguation prompt. */
   onSelectPlace?: (label: string) => void;
+  /** Invoked when a generic adaptive control is selected. */
+  onSelectControl?: (value: string) => void;
   /** Render as a collapsed, persistent trace attached to a finished answer. */
   persisted?: boolean;
 }
@@ -51,9 +53,10 @@ export const ActivityTimeline: React.FC<ActivityTimelineProps> = ({
   textColor = 'rgba(255,255,255,0.85)',
   bgColor = 'rgba(255,255,255,0.06)',
   onSelectPlace,
+  onSelectControl,
   persisted = false,
 }) => {
-  const { steps, disambiguation } = state;
+  const { steps, disambiguation, prompt } = state;
   const hasSteps = steps.length > 0;
   const hasError = steps.some((s) => s.status === 'error');
   const [expanded, setExpanded] = React.useState(false);
@@ -93,7 +96,7 @@ export const ActivityTimeline: React.FC<ActivityTimelineProps> = ({
   }
 
   // No real events yet — show the lightweight dots + fallback text.
-  if (!hasSteps && !disambiguation) {
+  if (!hasSteps && !disambiguation && !prompt) {
     return (
       <div className="typing-indicator">
         <div className="typing-dots" style={{ background: bgColor, display: 'flex', alignItems: 'center', gap: 8, paddingRight: 12 }}>
@@ -149,6 +152,26 @@ export const ActivityTimeline: React.FC<ActivityTimelineProps> = ({
               {c.label}
             </button>
           ))}
+        </div>
+      )}
+
+      {prompt && (
+        <div className="activity-disambiguation">
+          {prompt.controls.map((control: ActivityControl, i) => {
+            const value = control.value || control.label;
+            const buttonLabel = control.label || control.id || `Option ${i + 1}`;
+            return (
+              <button
+                key={control.id || `${buttonLabel}-${i}`}
+                type="button"
+                className="activity-place-chip"
+                style={{ borderColor: accentColor, color: textColor }}
+                onClick={() => onSelectControl?.(value)}
+              >
+                {buttonLabel}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>

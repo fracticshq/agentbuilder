@@ -1,4 +1,4 @@
-import type { ActivityState, ActivityStep, PlaceCandidate, StreamingMessage } from '../types';
+import type { ActivityControl, ActivityState, ActivityStep, PlaceCandidate, StreamingMessage } from '../types';
 
 // This timeline is a GENERAL capability for every agent in the builder. It maps
 // the standard streaming events that any agent emits (context_*, tool_*,
@@ -6,7 +6,7 @@ import type { ActivityState, ActivityStep, PlaceCandidate, StreamingMessage } fr
 // specific to one agent template — labels fall back to whatever the backend
 // sends, so a brand-new agent surfaces its real activity with zero extra config.
 
-export const EMPTY_ACTIVITY: ActivityState = { steps: [], disambiguation: undefined };
+export const EMPTY_ACTIVITY: ActivityState = { steps: [], disambiguation: undefined, prompt: undefined };
 
 // Optional cosmetic nice-ups: friendlier verbs for a few well-known endpoint ids.
 // Purely additive — any endpoint not listed uses the backend-supplied name.
@@ -63,6 +63,12 @@ function upsert(steps: ActivityStep[], id: string, patch: Partial<ActivityStep>)
   return next;
 }
 
+function activityStatus(status: string | undefined): ActivityStep['status'] {
+  if (status === 'completed') return 'done';
+  if (status === 'failed') return 'error';
+  return 'running';
+}
+
 /**
  * Fold one streaming event into the activity-timeline state. Pure and
  * deterministic so it can be unit-tested and replayed. Returns the same
@@ -74,6 +80,31 @@ export function reduceActivity(state: ActivityState, chunk: StreamingMessage): A
   let steps = state.steps;
 
   switch (chunk.type) {
+    case 'activity': {
+      const activity = meta.activity || meta;
+      if (activity.visibility && activity.visibility !== 'public') {
+        return state;
+      }
+      const id = String(activity.activity_id || activity.id || activity.kind || content || 'activity');
+      const controls: ActivityControl[] = Array.isArray(activity.controls) ? activity.controls : [];
+      steps = upsert(steps, id, {
+        label: activity.label || content || 'Working',
+        detail: activity.summary || undefined,
+        status: activityStatus(activity.status),
+      });
+      if (activity.kind === 'user_input_request' && controls.length) {
+        return {
+          steps,
+          disambiguation: state.disambiguation,
+          prompt: {
+            question: activity.summary || activity.label || content || 'Please choose an option.',
+            controls,
+          },
+        };
+      }
+      break;
+    }
+
     case 'context_start':
       steps = upsert(steps, 'context', { label: 'Loading agent context', status: 'running' });
       break;
@@ -150,14 +181,14 @@ export function reduceActivity(state: ActivityState, chunk: StreamingMessage): A
         adminRegion: c.adminRegion,
         country: c.country,
       }));
-      return { steps, disambiguation: { question: content, candidates } };
+      return { steps, disambiguation: { question: content, candidates }, prompt: state.prompt };
     }
 
     default:
       return state; // content / final_answer / metadata / done / error / missing_input
   }
 
-  return { steps, disambiguation: state.disambiguation };
+  return { steps, disambiguation: state.disambiguation, prompt: state.prompt };
 }
 
 /** Mark every still-running step as done — used when the answer starts streaming. */

@@ -127,6 +127,32 @@ function buildCapabilityConfig(existingConfig: any, selectedIds: string[], idFie
   };
 }
 
+function requiredInputsToText(inputs: any): string {
+  if (!Array.isArray(inputs)) return '';
+  return inputs
+    .filter(item => item && typeof item === 'object')
+    .map(item => [item.id, item.label, item.type].filter(Boolean).join(':'))
+    .join('\n');
+}
+
+function parseRequiredInputsText(value: string) {
+  return (value || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const [id, label, type] = line.split(':').map(part => part.trim());
+      return {
+        id,
+        label: label || id.replace(/_/g, ' '),
+        type: type || 'text',
+        required: true,
+        aliases: [],
+      };
+    })
+    .filter(item => item.id);
+}
+
 function createVedikaLalKitabConnector(): ContextConnector {
   const endpoints = [
     ['lalkitab_chart', 'Lal Kitab Chart', 'Fetch calculated Lal Kitab chart context.'],
@@ -435,6 +461,13 @@ interface AgentData {
   show_product_cards: boolean;
   activity_mode: 'basic' | 'advanced';
   activity_persistence: 'temporary' | 'persistent';
+  conversation_policy_goal: string;
+  conversation_required_inputs: string;
+  conversation_question_required: boolean;
+  conversation_hide_internal_sources: boolean;
+  conversation_answer_style: string;
+  context_cache_enabled: boolean;
+  context_invalidation_fields: string;
   rate_limiting: boolean;
   content_filtering: boolean;
   session_timeout: number;
@@ -545,6 +578,13 @@ const initialData: AgentData = {
   show_product_cards: true,
   activity_mode: 'basic',
   activity_persistence: 'temporary',
+  conversation_policy_goal: '',
+  conversation_required_inputs: '',
+  conversation_question_required: false,
+  conversation_hide_internal_sources: true,
+  conversation_answer_style: 'helpful',
+  context_cache_enabled: true,
+  context_invalidation_fields: '',
   rate_limiting: true,
   content_filtering: true,
   session_timeout: 30,
@@ -700,6 +740,7 @@ export default function AgentWizard() {
       const promptLayers = config.prompt_layers || {};
       const agentApiConfig = config.agent_api || {};
       const apiDataSource = config.api_data_source || {};
+      const conversationPolicy = config.conversation_policy || {};
       const selectedSkillIds = extractSelectedCapabilityIds(config.skills, 'skill_id');
       const selectedToolIds = extractSelectedCapabilityIds(config.tools, 'tool_id');
 
@@ -796,6 +837,15 @@ export default function AgentWizard() {
         show_product_cards: features.show_product_cards ?? true,
         activity_mode: (widgetChannel.activity_mode ?? features.activity_mode) === 'advanced' ? 'advanced' : 'basic',
         activity_persistence: (widgetChannel.activity_persistence ?? features.activity_persistence) === 'persistent' ? 'persistent' : 'temporary',
+        conversation_policy_goal: conversationPolicy.goal || '',
+        conversation_required_inputs: requiredInputsToText(conversationPolicy.required_inputs),
+        conversation_question_required: conversationPolicy.question_required ?? false,
+        conversation_hide_internal_sources: conversationPolicy.hide_internal_sources ?? true,
+        conversation_answer_style: conversationPolicy.answer_style || 'helpful',
+        context_cache_enabled: conversationPolicy.memory_policy?.cache_evidence ?? true,
+        context_invalidation_fields: Array.isArray(conversationPolicy.memory_policy?.invalidation_fields)
+          ? conversationPolicy.memory_policy.invalidation_fields.join(', ')
+          : '',
         allowed_file_types: features.file_upload?.allowed_types || [],
         max_file_size: features.file_upload?.max_size_mb ?? 10,
 
@@ -853,6 +903,17 @@ export default function AgentWizard() {
       data_source: agentData.data_source === 'shopify' ? 'shopify' : 'rag',
       rag_enabled: true,
       show_sources: true,
+      conversation_policy_goal: agentData.conversation_policy_goal || 'Provide human, practical Lal Kitab and Vedic astrology guidance.',
+      conversation_required_inputs: agentData.conversation_required_inputs || [
+        'birth_date:birth date:date',
+        'birth_time:birth time:time',
+        'birth_place:birth place:place',
+      ].join('\n'),
+      conversation_question_required: true,
+      conversation_hide_internal_sources: true,
+      conversation_answer_style: 'human_astrologer',
+      context_cache_enabled: true,
+      context_invalidation_fields: 'birth_date, birth_time, birth_place',
       selected_skill_ids: Array.from(new Set([...(agentData.selected_skill_ids || []), 'knowledge_qa', 'api_data_lookup', 'conversation_summary'])),
     } : field === 'agent_template' && value === 'ecommerce_sales' ? {
       role: agentData.role || 'You are an expert ecommerce sales assistant.',
@@ -960,6 +1021,36 @@ export default function AgentWizard() {
             agent_profile_url: agentData.shopify_agent_profile_url,
           } : undefined,
           context_connectors: serializeContextConnectors(agentData.context_connectors),
+          conversation_policy: {
+            goal: agentData.conversation_policy_goal || agentData.purpose || agentData.description,
+            required_inputs: parseRequiredInputsText(agentData.conversation_required_inputs),
+            question_required: agentData.conversation_question_required,
+            input_extraction_hints: {
+              infer_unlabeled_values: true,
+            },
+            answer_style: agentData.conversation_answer_style || 'helpful',
+            public_progress_style: {
+              initial_label: 'Reading your message',
+              initial_summary: 'I’m checking what is needed before answering.',
+            },
+            hide_internal_sources: agentData.conversation_hide_internal_sources,
+            context_policy: {
+              lazy_context: true,
+              use_knowledge_when_needed: agentData.rag_enabled,
+              use_connectors_when_needed: (agentData.context_connectors || []).some(connector => connector.enabled && !connector.revoked),
+            },
+            memory_policy: {
+              cache_evidence: agentData.context_cache_enabled,
+              invalidation_fields: agentData.context_invalidation_fields
+                .split(',')
+                .map(field => field.trim())
+                .filter(Boolean),
+            },
+            allowed_capabilities: [
+              ...(agentData.selected_skill_ids || []),
+              ...(agentData.selected_tool_ids || []),
+            ],
+          },
           url_context_boost: {
             enabled: agentData.url_context_boost_enabled,
           },
@@ -1146,6 +1237,36 @@ export default function AgentWizard() {
         require_key: agentData.agent_api_require_key,
       },
       context_connectors: serializeContextConnectors(agentData.context_connectors),
+      conversation_policy: {
+        goal: agentData.conversation_policy_goal || agentData.purpose || agentData.description,
+        required_inputs: parseRequiredInputsText(agentData.conversation_required_inputs),
+        question_required: agentData.conversation_question_required,
+        input_extraction_hints: {
+          infer_unlabeled_values: true,
+        },
+        answer_style: agentData.conversation_answer_style || 'helpful',
+        public_progress_style: {
+          initial_label: 'Reading your message',
+          initial_summary: 'I’m checking what is needed before answering.',
+        },
+        hide_internal_sources: agentData.conversation_hide_internal_sources,
+        context_policy: {
+          lazy_context: true,
+          use_knowledge_when_needed: agentData.rag_enabled,
+          use_connectors_when_needed: (agentData.context_connectors || []).some(connector => connector.enabled && !connector.revoked),
+        },
+        memory_policy: {
+          cache_evidence: agentData.context_cache_enabled,
+          invalidation_fields: agentData.context_invalidation_fields
+            .split(',')
+            .map(field => field.trim())
+            .filter(Boolean),
+        },
+        allowed_capabilities: [
+          ...(agentData.selected_skill_ids || []),
+          ...(agentData.selected_tool_ids || []),
+        ],
+      },
       url_context_boost: {
         enabled: agentData.url_context_boost_enabled,
       },

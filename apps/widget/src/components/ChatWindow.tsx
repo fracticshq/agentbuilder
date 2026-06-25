@@ -450,6 +450,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   textColor={tk?.assistantMsgColor ?? 'rgba(255,255,255,0.85)'}
                   bgColor={tk?.assistantMsgBg ?? 'rgba(255,255,255,0.08)'}
                   onSelectPlace={onSendMessage}
+                  onSelectControl={onSendMessage}
                 />
               ) : (
                 <ThinkingIndicator

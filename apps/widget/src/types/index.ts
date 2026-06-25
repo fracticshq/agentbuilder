@@ -90,6 +90,14 @@ export interface ActivityStep {
   status: 'running' | 'done' | 'error';
 }
 
+export interface ActivityControl {
+  type: 'choice' | 'multi_choice' | 'text' | 'date' | 'time' | 'place' | 'number' | 'form' | 'confirmation' | string;
+  id: string;
+  label: string;
+  value?: string;
+  options?: Array<{ label: string; value?: string }>;
+}
+
 /** A candidate birthplace offered when a place name is ambiguous. */
 export interface PlaceCandidate {
   placeId?: string;
@@ -103,6 +111,7 @@ export interface PlaceCandidate {
 export interface ActivityState {
   steps: ActivityStep[];
   disambiguation?: { question: string; candidates: PlaceCandidate[] };
+  prompt?: { question: string; controls: ActivityControl[] };
 }
 
 export interface Citation {
@@ -151,6 +160,7 @@ export interface PageContext {
 }
 
 export type StreamingMessageType =
+  | 'activity'
   | 'status'
   | 'context_start'
   | 'context_result'

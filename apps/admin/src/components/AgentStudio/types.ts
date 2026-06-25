@@ -97,6 +97,13 @@ export interface AgentStudioData {
   widget_enabled: boolean;
   show_sources: boolean;
   show_product_cards: boolean;
+  conversation_policy_goal?: string;
+  conversation_required_inputs?: string;
+  conversation_question_required?: boolean;
+  conversation_hide_internal_sources?: boolean;
+  conversation_answer_style?: string;
+  context_cache_enabled?: boolean;
+  context_invalidation_fields?: string;
   rate_limiting: boolean;
   content_filtering: boolean;
   session_timeout: number;

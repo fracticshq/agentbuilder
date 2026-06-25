@@ -384,6 +384,83 @@ export default function AgentConfigForm({
           </p>
         </div>
       )}
+
+      <div className="rounded-md border border-gray-200 bg-white p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">Conversation Behavior</h3>
+            <p className="mt-1 text-xs leading-5 text-gray-500">
+              Define what NOVA should collect before answering and how much internal runtime detail should be shown to users.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <Field label="Goal">
+            <input
+              className={inputClass}
+              value={data.conversation_policy_goal || ''}
+              onChange={(event) => onChange('conversation_policy_goal', event.target.value)}
+              placeholder="Help users choose the right product, answer support questions, or give astrology guidance"
+            />
+          </Field>
+
+          <Field label="Answer style">
+            <input
+              className={inputClass}
+              value={data.conversation_answer_style || 'helpful'}
+              onChange={(event) => onChange('conversation_answer_style', event.target.value)}
+              placeholder="helpful, human_astrologer, consultative_sales"
+            />
+          </Field>
+        </div>
+
+        <div className="mt-3">
+          <Field
+            label="Required inputs"
+            hint="One per line as id:label:type. Example: birth_date:birth date:date"
+          >
+            <textarea
+              className={`${inputClass} min-h-[92px]`}
+              value={data.conversation_required_inputs || ''}
+              onChange={(event) => onChange('conversation_required_inputs', event.target.value)}
+              placeholder={'budget:budget:number\nuse_case:use case:text'}
+            />
+          </Field>
+        </div>
+
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <Switch
+            checked={Boolean(data.conversation_question_required)}
+            onChange={() => onChange('conversation_question_required', !data.conversation_question_required)}
+            label="Require a user question"
+            description="If users only share details, the agent confirms them and asks what they want to know."
+          />
+          <Switch
+            checked={data.conversation_hide_internal_sources !== false}
+            onChange={() => onChange('conversation_hide_internal_sources', data.conversation_hide_internal_sources === false)}
+            label="Hide internal runtime details"
+            description="Keep API, RAG, connector, and tool details out of public answers. Agent Console still shows trace."
+          />
+        </div>
+
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <Switch
+            checked={data.context_cache_enabled !== false}
+            onChange={() => onChange('context_cache_enabled', data.context_cache_enabled === false)}
+            label="Cache evidence in conversation"
+            description="Reuse expensive lookup/retrieval results for follow-up questions in the same session."
+          />
+          <Field label="Cache invalidation fields">
+            <input
+              className={inputClass}
+              value={data.context_invalidation_fields || ''}
+              onChange={(event) => onChange('context_invalidation_fields', event.target.value)}
+              placeholder="birth_date, birth_time, birth_place"
+            />
+          </Field>
+        </div>
+      </div>
     </div>
   );
 }

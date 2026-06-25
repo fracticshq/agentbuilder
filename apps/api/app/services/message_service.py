@@ -46,6 +46,11 @@ from .observability_service import ObservabilityService
 from .prompt_assembler import PromptAssembler
 from .skill_registry import BuiltInSkillRegistry
 from .lalkitab_runtime import build_lalkitab_runtime_context
+from .conversation_policy import (
+    activity_stream_response_kwargs,
+    normalize_conversation_policy,
+    plan_conversation_turn,
+)
 from .tool_registry import ToolRegistryService
 
 logger = structlog.get_logger(__name__)
@@ -458,6 +463,8 @@ class MessageService:
             return {}
         pending: dict = {}
         remembered: dict = {}
+        api_context: dict = {}
+        rag_context: dict = {}
         for msg in reversed(recent):
             role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
             if role != "assistant":
@@ -467,18 +474,77 @@ class MessageService:
                 pending = dict(meta["lalkitab_pending"])
             if not remembered and isinstance(meta.get("connector_inputs"), dict) and meta["connector_inputs"]:
                 remembered = dict(meta["connector_inputs"])
-            if pending and remembered:
+            if not api_context and isinstance(meta.get("lalkitab_api_context"), dict) and meta["lalkitab_api_context"]:
+                api_context = dict(meta["lalkitab_api_context"])
+            if not rag_context and isinstance(meta.get("lalkitab_rag_context"), dict) and meta["lalkitab_rag_context"]:
+                rag_context = dict(meta["lalkitab_rag_context"])
+            if pending and remembered and api_context and rag_context:
                 break
-        if not pending and not remembered:
+        if not pending and not remembered and not api_context and not rag_context:
             return {}
         normalized: dict = {}
         normalized.update(remembered)
         normalized.update(pending.get("normalized_birth_input") or {})
         result: dict = {"normalized_birth_input": normalized}
+        if api_context:
+            result["api_context"] = api_context
+            if isinstance(api_context.get("normalized_birth_input"), dict):
+                result["normalized_birth_input"] = {
+                    **(api_context.get("normalized_birth_input") or {}),
+                    **normalized,
+                }
+        if rag_context:
+            result["rag_context"] = rag_context
         if pending.get("awaiting_place_choice"):
             result["awaiting_place_choice"] = True
             result["place_candidates"] = pending.get("place_candidates") or []
         return result
+
+    async def _load_conversation_policy_state(self, conversation_id: str) -> dict:
+        """Load generic policy-guided conversation state from recent assistant turns."""
+        if not self.short_term:
+            return {}
+        try:
+            recent = await self.short_term.get_recent_messages(conversation_id=conversation_id, limit=8)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("conversation_policy_state_load_failed", error=str(exc))
+            return {}
+        state: dict = {"resolved_inputs": {}, "pending_inputs": [], "cached_evidence": {}, "context_decisions": []}
+        for msg in reversed(recent or []):
+            role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
+            if role != "assistant":
+                continue
+            meta = msg.metadata or {}
+            if isinstance(meta.get("resolved_inputs"), dict) and meta["resolved_inputs"]:
+                state["resolved_inputs"] = {**meta["resolved_inputs"], **state.get("resolved_inputs", {})}
+            if not state.get("pending_inputs") and isinstance(meta.get("pending_inputs"), list):
+                state["pending_inputs"] = meta["pending_inputs"]
+            if not state.get("cached_evidence") and isinstance(meta.get("cached_evidence"), dict):
+                state["cached_evidence"] = meta["cached_evidence"]
+            if isinstance(meta.get("context_decision"), dict):
+                state.setdefault("context_decisions", []).append(meta["context_decision"])
+            if state.get("resolved_inputs") and state.get("cached_evidence"):
+                break
+        return state
+
+    def _lalkitab_pending_from_policy(self, policy_state: dict, turn_plan) -> dict:
+        """Bridge generic resolved inputs into the existing chart-first adapter."""
+        resolved = {
+            **(policy_state.get("resolved_inputs") if isinstance(policy_state.get("resolved_inputs"), dict) else {}),
+            **(getattr(turn_plan, "resolved_inputs", None) or {}),
+        }
+        normalized: dict = {}
+        if resolved.get("birth_date"):
+            normalized["date"] = resolved["birth_date"]
+            normalized["birth_date"] = resolved["birth_date"]
+        if resolved.get("birth_time"):
+            normalized["time"] = resolved["birth_time"]
+            normalized["birth_time"] = resolved["birth_time"]
+        if resolved.get("birth_place"):
+            normalized["birth_place"] = resolved["birth_place"]
+        if normalized.get("date") and normalized.get("time"):
+            normalized["datetime"] = f"{normalized['date']}T{normalized['time']}"
+        return {"normalized_birth_input": normalized} if normalized else {}
 
     def _apply_remembered_connector_inputs(self, remembered_inputs: dict) -> None:
         """Push conversation-remembered inputs onto registered connector tools so
@@ -672,18 +738,25 @@ Updated memory:"""
             if input_resolution.get("confirm_understood_details", True) is not False
             else "- Do not add a separate birth-detail confirmation unless the user asks."
         )
+        hide_internal_sources = bool((self.agent_config or {}).get("conversation_policy", {}).get("hide_internal_sources", True))
+        source_rule = (
+            "- Do not mention APIs, RAG, chunks, connectors, tools, endpoint names, source provenance, or internal context handling in the user-facing answer."
+            if hide_internal_sources
+            else "- You may briefly describe the evidence used if it helps the user."
+        )
         prompt = f"""
 {self.system_prompt}
 
 You are answering a Lal Kitab / Vedic Jyotish question for the user.
 
 Rules:
-- Use "Calculated API Context" as the source for chart/calculation facts.
-- Use "Knowledge/RAG Context" for interpretation policy, tone, explanations, FAQs, and Lal Kitab reference context.
+- Use the calculated context internally for chart/calculation facts.
+- Use the knowledge context internally for interpretation policy, tone, explanations, FAQs, and Lal Kitab reference context.
 {confirmation_rule}
 - Never invent chart placements, debts, remedies, predictions, totke, lucky factors, houses, or varshphal data.
-- If the API context is incomplete or an endpoint failed, say which calculated context was unavailable.
-- Distinguish calculated facts from interpretation in clear language.
+- If calculated context is incomplete, ask for the missing detail or say that you cannot verify that part.
+- Speak like a human advisor helping the user, not like a system explaining its architecture.
+{source_rule}
 - Do not claim certainty beyond the provided sources.
 
 User Query:
@@ -695,10 +768,10 @@ Conversation (rolling memory + recent turns):
 Calculated API Context:
 {json.dumps(_sanitize_for_json(api_context), default=str, indent=2)}
 
-Knowledge/RAG Context:
+Knowledge Context:
 {json.dumps(_sanitize_for_json(rag_context), default=str, indent=2)}
 
-Answer the user directly and cite what context you used in natural language.
+Answer the user directly.
 """
         response = await self.llm_provider.generate(prompt)
         tool_results = dict(lalkitab_plan.tool_results or {})
@@ -719,6 +792,9 @@ Answer the user directly and cite what context you used in natural language.
                     "source_provenance": api_context.get("source_provenance") or [],
                 },
                 "selected_connector_endpoint_ids": lalkitab_plan.selected_endpoint_ids,
+                "used_cached_context": bool(getattr(lalkitab_plan, "used_cached_context", False)),
+                "lalkitab_api_context_full": _sanitize_for_json(api_context),
+                "lalkitab_rag_context_full": _sanitize_for_json(rag_context),
                 "rag_context": {
                     "chunks_count": len(rag_context.get("chunks") or []),
                     "sources": rag_context.get("sources") or [],
@@ -1293,6 +1369,65 @@ Answer the user directly and cite what context you used in natural language.
                     metadata=user_metadata,
                 )
 
+            conversation_policy = normalize_conversation_policy(self.agent_config or {})
+            policy_state = (
+                await self._load_conversation_policy_state(conversation_id)
+                if short_term_enabled else {}
+            )
+            turn_plan = plan_conversation_turn(
+                message=runtime_message,
+                policy=conversation_policy,
+                previous_state=policy_state,
+            )
+
+            if turn_plan.should_short_circuit:
+                response_text = turn_plan.response_text
+                duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
+                metadata = {
+                    "user_id": user_id,
+                    "resolved_inputs": _sanitize_for_json(turn_plan.resolved_inputs),
+                    "pending_inputs": turn_plan.pending_inputs,
+                    "context_decision": turn_plan.context_decision,
+                    "validation_passed": True,
+                }
+                if short_term_enabled:
+                    await self.short_term.add_message(
+                        conversation_id=conversation_id,
+                        role=MessageRole.ASSISTANT,
+                        content=response_text,
+                        metadata=metadata,
+                    )
+                self.strapi.sync_conversation(
+                    conversation_id=conversation_id,
+                    user_message=request.message,
+                    assistant_message=response_text,
+                    brand_slug=self.brand_id,
+                    agent_id=agent_id,
+                )
+                await self.observability.track_event(
+                    event_type="message_processed",
+                    brand_slug=self.brand_id,
+                    agent_id=agent_id,
+                    conversation_id=conversation_id,
+                    payload={
+                        "mode": "sync",
+                        "status": f"policy_{turn_plan.action}",
+                        "latency_ms": duration_ms,
+                        "context_used": 0,
+                        "context_decision": turn_plan.context_decision,
+                    },
+                )
+                MESSAGE_COUNT.labels(status=f"policy_{turn_plan.action}").inc()
+                MESSAGE_DURATION.labels(mode="sync", status=f"policy_{turn_plan.action}").observe(duration_ms / 1000)
+                return MessageResponse(
+                    message=response_text,
+                    conversation_id=conversation_id,
+                    citations=[],
+                    context_used=0,
+                    confidence_score=1.0,
+                    processing_time_ms=duration_ms,
+                )
+
             # 3. Build context for the agent (pass safe context)
             memory_context = await self._build_memory_context(
                 conversation_id=conversation_id,
@@ -1429,6 +1564,9 @@ Answer the user directly and cite what context you used in natural language.
                         "last_constraints": agent_metadata.get("last_constraints"),
                         "rerank_results": agent_metadata.get("rerank_results"),
                         "resolved_reference": agent_metadata.get("resolved_reference"),
+                        "resolved_inputs": _sanitize_for_json(turn_plan.resolved_inputs),
+                        "pending_inputs": turn_plan.pending_inputs,
+                        "context_decision": turn_plan.context_decision,
                     }
                 )
 
@@ -1556,12 +1694,6 @@ Answer the user directly and cite what context you used in natural language.
             user_id = request.user_id or "anonymous"
             self._bind_request_page_context_to_retrieval(request)
 
-            yield StreamingMessageResponse(
-                type="context_start",
-                content="Loading agent configuration, memory, and runtime capabilities...",
-                conversation_id=conversation_id
-            )
-
             escalations = []
             if self.memory_config.ENABLE_GRAPH_RULES and self.graph:
                 escalations = await self.graph.check_escalation(request.message)
@@ -1636,31 +1768,92 @@ Answer the user directly and cite what context you used in natural language.
                     metadata=user_metadata,
                 )
 
-            # Phase 6: Use SOTA Orchestrator for Planning, Execution, and Critic loop
-            yield StreamingMessageResponse(
-                type="context_result",
-                content="Runtime context loaded.",
-                conversation_id=conversation_id,
-                metadata={
-                    "capabilities": self.prompt_metadata.get("capabilities", {}),
-                    "page_context": (
-                        request.page_context.model_dump()
-                        if hasattr(request.page_context, "model_dump")
-                        else request.page_context or {}
-                    ),
-                    "api_data_source": {
-                        "enabled": bool((self.agent_config or {}).get("api_data_source", {}).get("enabled")),
-                        "name": (self.agent_config or {}).get("api_data_source", {}).get("name"),
-                    },
-                    "context_connectors": self._context_connector_runtime_metadata(),
-                    "memory": self._memory_runtime_metadata(),
-                },
+            conversation_policy = normalize_conversation_policy(self.agent_config or {})
+            policy_state = (
+                await self._load_conversation_policy_state(conversation_id)
+                if short_term_enabled else {}
             )
+            turn_plan = plan_conversation_turn(
+                message=runtime_message,
+                policy=conversation_policy,
+                previous_state=policy_state,
+            )
+            for activity in turn_plan.activities:
+                if activity.get("visibility") != "hidden":
+                    yield StreamingMessageResponse(**activity_stream_response_kwargs(activity, conversation_id))
 
+            if turn_plan.should_short_circuit:
+                response_text = turn_plan.response_text
+                yield StreamingMessageResponse(
+                    type="content",
+                    content=response_text,
+                    conversation_id=conversation_id,
+                )
+                yield StreamingMessageResponse(
+                    type="final_answer",
+                    content=response_text,
+                    conversation_id=conversation_id,
+                    metadata={
+                        "resolved_inputs": _sanitize_for_json(turn_plan.resolved_inputs),
+                        "pending_inputs": turn_plan.pending_inputs,
+                        "context_decision": turn_plan.context_decision,
+                    },
+                )
+                if short_term_enabled:
+                    await self.short_term.add_message(
+                        conversation_id=conversation_id,
+                        role=MessageRole.ASSISTANT,
+                        content=response_text,
+                        metadata={
+                            "user_id": user_id,
+                            "resolved_inputs": _sanitize_for_json(turn_plan.resolved_inputs),
+                            "pending_inputs": turn_plan.pending_inputs,
+                            "context_decision": turn_plan.context_decision,
+                            "validation_passed": True,
+                        },
+                    )
+                self.strapi.sync_conversation(
+                    conversation_id=conversation_id,
+                    user_message=request.message,
+                    assistant_message=response_text,
+                    brand_slug=self.brand_id,
+                    agent_id=agent_id,
+                )
+                yield StreamingMessageResponse(
+                    type="metadata",
+                    content="",
+                    conversation_id=conversation_id,
+                    context_used=0,
+                    confidence_score=1.0,
+                    metadata={
+                        "resolved_inputs": _sanitize_for_json(turn_plan.resolved_inputs),
+                        "pending_inputs": turn_plan.pending_inputs,
+                        "context_decision": turn_plan.context_decision,
+                    },
+                )
+                yield StreamingMessageResponse(
+                    type="done",
+                    content="Run complete.",
+                    conversation_id=conversation_id,
+                    metadata={
+                        "latency_ms": int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000),
+                        "context_used": 0,
+                    },
+                )
+                return
+
+            # Phase 6: Use SOTA Orchestrator for Planning, Execution, and Critic loop.
+            # Do not emit generic context events here. Public widget traffic often
+            # starts with greetings, and timeline events should represent actual
+            # retrieval/tool work rather than configuration loading.
             lalkitab_pending = (
                 await self._load_lalkitab_pending_state(conversation_id)
                 if short_term_enabled else {}
             )
+            lalkitab_pending = {
+                **lalkitab_pending,
+                **self._lalkitab_pending_from_policy(policy_state, turn_plan),
+            }
             lalkitab_plan = await build_lalkitab_runtime_context(
                 self.agent_config or {}, runtime_message, pending_state=lalkitab_pending
             )
@@ -1763,17 +1956,6 @@ Answer the user directly and cite what context you used in natural language.
                 )
                 return
 
-            if not lalkitab_plan.handled and ((self.agent_config or {}).get("rag", {}).get("enabled") or (self.agent_config or {}).get("data_source") == "rag"):
-                yield StreamingMessageResponse(
-                    type="rag_context",
-                    content="Knowledge retrieval is enabled for this run.",
-                    conversation_id=conversation_id,
-                    metadata={
-                        "rag": (self.agent_config or {}).get("rag") or {},
-                        "context_connectors": self._context_connector_runtime_metadata(),
-                    },
-                )
-
             # Retrieve recent history + rolling memory (auto-compaction).
             recent_messages = []
             conversation_summary = ""
@@ -1841,8 +2023,32 @@ Answer the user directly and cite what context you used in natural language.
             from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
 
             if lalkitab_plan.handled:
-                rag_context, rag_tool_result = await self._retrieve_lalkitab_rag_context(runtime_message, request)
-                if rag_context:
+                cached_rag_context = (
+                    lalkitab_pending.get("rag_context")
+                    if isinstance(lalkitab_pending.get("rag_context"), dict)
+                    else {}
+                )
+                if getattr(lalkitab_plan, "used_cached_context", False) and cached_rag_context:
+                    rag_context = cached_rag_context
+                    rag_tool_result = ToolResult(
+                        success=True,
+                        data="Cached Knowledge/RAG Context:\n" + "\n\n".join(
+                            f"[{index + 1}] {chunk.get('doc_id')}\n{chunk.get('content')}"
+                            for index, chunk in enumerate((rag_context.get("chunks") or [])[:5])
+                            if isinstance(chunk, dict)
+                        ),
+                        metadata={
+                            "tool_id": "knowledge_search",
+                            "sources": rag_context.get("sources") or [],
+                            "chunks_count": len(rag_context.get("chunks") or []),
+                            "confidence": rag_context.get("confidence"),
+                            "rag_chunks": rag_context.get("chunks") or [],
+                            "cached": True,
+                        },
+                    )
+                else:
+                    rag_context, rag_tool_result = await self._retrieve_lalkitab_rag_context(runtime_message, request)
+                if rag_context and not getattr(lalkitab_plan, "used_cached_context", False):
                     yield StreamingMessageResponse(
                         type="rag_context",
                         content=f"Retrieved {len(rag_context.get('chunks') or [])} knowledge chunk(s) for Lal Kitab context.",
@@ -2112,6 +2318,15 @@ Answer the user directly and cite what context you used in natural language.
                         "last_constraints": agent_metadata.get("last_constraints"),
                         "rerank_results": agent_metadata.get("rerank_results"),
                         "resolved_reference": agent_metadata.get("resolved_reference"),
+                        "resolved_inputs": _sanitize_for_json(turn_plan.resolved_inputs),
+                        "pending_inputs": turn_plan.pending_inputs,
+                        "context_decision": turn_plan.context_decision,
+                        "cached_evidence": _sanitize_for_json({
+                            "api_context": agent_metadata.get("lalkitab_api_context_full"),
+                            "rag_context": agent_metadata.get("lalkitab_rag_context_full"),
+                        }) if agent_metadata.get("lalkitab_runtime") else None,
+                        "lalkitab_api_context": agent_metadata.get("lalkitab_api_context_full"),
+                        "lalkitab_rag_context": agent_metadata.get("lalkitab_rag_context_full"),
                         # Remembered connector inputs so follow-ups reuse them.
                         "connector_inputs": self._collect_connector_inputs(session_state, lalkitab_plan, agent_metadata) or None,
                     }

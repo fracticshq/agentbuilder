@@ -238,6 +238,22 @@ export default function AgentInferenceTester({
 
           if (payload.type === 'content') {
             setAnswer(prev => `${prev}${payload.content || ''}`);
+          } else if (payload.type === 'activity') {
+            const activity = payload.metadata?.activity || payload.metadata || {};
+            const state = activity.status === 'failed'
+              ? 'error'
+              : activity.status === 'completed'
+                ? 'done'
+                : 'active';
+            addTrace({
+              label: activity.label || activity.kind || 'Activity',
+              detail: [
+                activity.summary || payload.content,
+                activity.visibility ? `visibility: ${activity.visibility}` : '',
+                activity.kind ? `kind: ${activity.kind}` : '',
+              ].filter(Boolean).join(' · '),
+              state,
+            });
           } else if (payload.type === 'status') {
             addTrace({ label: 'Working', detail: payload.content || 'Agent is working', state: 'active' });
           } else if (payload.type === 'context_start') {
