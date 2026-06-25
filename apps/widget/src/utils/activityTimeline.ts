@@ -8,18 +8,9 @@ import type { ActivityControl, ActivityState, ActivityStep, PlaceCandidate, Stre
 
 export const EMPTY_ACTIVITY: ActivityState = { steps: [], disambiguation: undefined, prompt: undefined };
 
-// Optional cosmetic nice-ups: friendlier verbs for a few well-known endpoint ids.
-// Purely additive — any endpoint not listed uses the backend-supplied name.
-const ENDPOINT_LABELS: Record<string, string> = {
-  lalkitab_chart: 'Casting the Lal Kitab chart',
-  lalkitab_remedies: 'Gathering remedies',
-  lalkitab_totke: 'Gathering totke',
-  lalkitab_predictions: 'Reading predictions',
-  lalkitab_varshphal: 'Computing the varshphal',
-  lalkitab_debts: 'Checking karmic debts',
-  lalkitab_houses: 'Analysing the houses',
-  lalkitab_lucky: 'Finding lucky factors',
-};
+// Keep the widget generic. Humanized labels should come from backend activity
+// envelopes, not template-specific frontend mappings.
+const ENDPOINT_LABELS: Record<string, string> = {};
 
 function connectorLabel(meta: Record<string, any>, fallback: string): string {
   const id = String(meta.endpoint_id || '');

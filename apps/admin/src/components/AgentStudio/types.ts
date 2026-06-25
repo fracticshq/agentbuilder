@@ -98,7 +98,9 @@ export interface AgentStudioData {
   show_sources: boolean;
   show_product_cards: boolean;
   conversation_policy_goal?: string;
+  conversation_planner_model?: string;
   conversation_required_inputs?: string;
+  conversation_tool_recipes?: string;
   conversation_question_required?: boolean;
   conversation_hide_internal_sources?: boolean;
   conversation_answer_style?: string;
@@ -114,7 +116,7 @@ export interface AgentStudioData {
   shopify_client_secret_configured: boolean;
   shopify_sync_enabled: boolean;
   shopify_mcp_enabled: boolean;
-  shopify_integration_mode: 'storefront_ucp_mcp' | 'admin_catalog_sync';
+  shopify_integration_mode: 'hybrid_catalog_rag_mcp' | 'storefront_ucp_mcp' | 'admin_catalog_sync';
   shopify_agent_profile_url: string;
   api_data_source_enabled: boolean;
   api_data_source_name: string;

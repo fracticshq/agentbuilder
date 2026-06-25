@@ -464,6 +464,50 @@ async def test_lalkitab_greeting_does_not_load_cached_context_or_call_connectors
 
 
 @pytest.mark.asyncio
+async def test_lalkitab_known_place_resolves_before_external_geocode(monkeypatch):
+    pack = get_connector_pack("vedika_lal_kitab")
+    geocode_calls: list[str] = []
+    connector_calls: list[str] = []
+
+    async def fake_geocode(connector, endpoint_id, payload, message):
+        geocode_calls.append(endpoint_id)
+        return ToolResult(success=False, data=None, error="should not call geocode for Delhi")
+
+    async def fake_run(self, query, payload=None, **kwargs):
+        connector_calls.append(self.endpoint["id"])
+        return ToolResult(
+            success=True,
+            data={"endpoint": self.endpoint["id"], "payload": payload},
+            metadata={"endpoint_id": self.endpoint["id"], "endpoint_name": self.endpoint.get("name")},
+        )
+
+    monkeypatch.setattr("app.services.lalkitab_runtime._call_geocode_endpoint", fake_geocode)
+    monkeypatch.setattr("app.services.lalkitab_runtime.ContextConnectorTool.run", fake_run)
+
+    result = await build_lalkitab_runtime_context(
+        {
+            "domain": {"template": "astrology_lalkitab"},
+            "context_connectors": [pack],
+        },
+        "Will career improve?",
+        pending_state={
+            "normalized_birth_input": {
+                "date": "1987-07-16",
+                "time": "15:26:00",
+                "birth_place": "delhi",
+            }
+        },
+    )
+
+    assert result.missing_input == []
+    assert result.normalized_birth_input["latitude"] == 28.6139
+    assert result.normalized_birth_input["longitude"] == 77.209
+    assert result.normalized_birth_input["timezone"] == "+05:30"
+    assert geocode_calls == []
+    assert connector_calls[0] == "lalkitab_chart"
+
+
+@pytest.mark.asyncio
 async def test_lalkitab_followup_reuses_cached_context_without_connector_calls(monkeypatch):
     pack = get_connector_pack("vedika_lal_kitab")
     calls: list[str] = []

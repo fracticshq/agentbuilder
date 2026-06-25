@@ -137,6 +137,7 @@ async def import_shopify(
         req.store_url,
         req.access_token,
         job_id,
+        req.brand_id,
     )
 
     # Persist sync config for this brand so resync works later
@@ -314,6 +315,7 @@ async def manual_sync(
             config["source_url"],
             config.get("access_token"),
             job_id,
+            brand_id,
         )
         return {"job_id": job_id, "status": "processing"}
 

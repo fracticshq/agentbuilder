@@ -150,3 +150,38 @@ async def test_missing_input_accumulates_across_turns(monkeypatch):
     assert a2.handled is True
     assert not a2.awaiting_place_choice
     assert a2.normalized_birth_input["latitude"] == 39.8
+
+
+@pytest.mark.asyncio
+async def test_place_only_followup_completes_pending_known_place(monkeypatch):
+    connector_calls: list[str] = []
+
+    async def fail_geocoder(connector, endpoint_id, payload, message):
+        raise AssertionError("Delhi should resolve from known place cache")
+
+    async def fake_run(self, query, payload=None, **kwargs):
+        connector_calls.append(self.endpoint["id"])
+        return ToolResult(success=True, data={"endpoint": self.endpoint["id"], "payload": payload})
+
+    monkeypatch.setattr(lk, "_call_geocode_endpoint", fail_geocoder)
+    monkeypatch.setattr(lk.ContextConnectorTool, "run", fake_run)
+    pack = get_connector_pack("vedika_lal_kitab")
+    pack["auth"] = {"type": "bearer", "token": "test"}
+    cfg = {"domain": {"template": "astrology_lalkitab"}, "context_connectors": [pack]}
+
+    out = await lk.build_lalkitab_runtime_context(
+        cfg,
+        "delhi, india.",
+        pending_state={
+            "normalized_birth_input": {
+                "date": "1987-07-16",
+                "time": "15:26:00",
+            }
+        },
+    )
+
+    assert out.missing_input == []
+    assert out.normalized_birth_input["birth_place"].lower() == "delhi, india"
+    assert out.normalized_birth_input["timezone"] == "+05:30"
+    assert out.normalized_birth_input["latitude"] == 28.6139
+    assert connector_calls[0] == "lalkitab_chart"

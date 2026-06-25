@@ -153,6 +153,16 @@ function parseRequiredInputsText(value: string) {
     .filter(item => item.id);
 }
 
+function toolRecipesToText(recipes: any): string {
+  if (!Array.isArray(recipes) || recipes.length === 0) return '';
+  return JSON.stringify(recipes, null, 2);
+}
+
+function parseToolRecipesText(value: string) {
+  const parsed = parseStructuredField(value, []);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
 function createVedikaLalKitabConnector(): ContextConnector {
   const endpoints = [
     ['lalkitab_chart', 'Lal Kitab Chart', 'Fetch calculated Lal Kitab chart context.'],
@@ -427,7 +437,7 @@ interface AgentData {
   shopify_client_secret_configured: boolean;
   shopify_sync_enabled: boolean;
   shopify_mcp_enabled: boolean;
-  shopify_integration_mode: 'storefront_ucp_mcp' | 'admin_catalog_sync';
+  shopify_integration_mode: 'hybrid_catalog_rag_mcp' | 'storefront_ucp_mcp' | 'admin_catalog_sync';
   shopify_agent_profile_url: string;
   api_data_source_enabled: boolean;
   api_data_source_name: string;
@@ -462,7 +472,9 @@ interface AgentData {
   activity_mode: 'basic' | 'advanced';
   activity_persistence: 'temporary' | 'persistent';
   conversation_policy_goal: string;
+  conversation_planner_model: string;
   conversation_required_inputs: string;
+  conversation_tool_recipes: string;
   conversation_question_required: boolean;
   conversation_hide_internal_sources: boolean;
   conversation_answer_style: string;
@@ -544,7 +556,7 @@ const initialData: AgentData = {
   shopify_client_secret_configured: false,
   shopify_sync_enabled: true,
   shopify_mcp_enabled: false,
-  shopify_integration_mode: 'storefront_ucp_mcp',
+  shopify_integration_mode: 'hybrid_catalog_rag_mcp',
   shopify_agent_profile_url: '',
   api_data_source_enabled: false,
   api_data_source_name: '',
@@ -579,7 +591,9 @@ const initialData: AgentData = {
   activity_mode: 'basic',
   activity_persistence: 'temporary',
   conversation_policy_goal: '',
+  conversation_planner_model: '',
   conversation_required_inputs: '',
+  conversation_tool_recipes: '',
   conversation_question_required: false,
   conversation_hide_internal_sources: true,
   conversation_answer_style: 'helpful',
@@ -771,7 +785,7 @@ export default function AgentWizard() {
         shopify_client_secret_configured: Boolean(config.shopify?.client_secret_configured),
         shopify_sync_enabled: config.shopify?.sync_enabled ?? true,
         shopify_mcp_enabled: config.shopify?.mcp_enabled ?? false,
-        shopify_integration_mode: config.shopify?.integration_mode || 'storefront_ucp_mcp',
+        shopify_integration_mode: config.shopify?.integration_mode || 'hybrid_catalog_rag_mcp',
         shopify_agent_profile_url: config.shopify?.agent_profile_url || '',
         api_data_source_enabled: apiDataSource.enabled ?? false,
         api_data_source_name: apiDataSource.name || '',
@@ -838,7 +852,9 @@ export default function AgentWizard() {
         activity_mode: (widgetChannel.activity_mode ?? features.activity_mode) === 'advanced' ? 'advanced' : 'basic',
         activity_persistence: (widgetChannel.activity_persistence ?? features.activity_persistence) === 'persistent' ? 'persistent' : 'temporary',
         conversation_policy_goal: conversationPolicy.goal || '',
+        conversation_planner_model: conversationPolicy.planner_model || '',
         conversation_required_inputs: requiredInputsToText(conversationPolicy.required_inputs),
+        conversation_tool_recipes: toolRecipesToText(conversationPolicy.tool_recipes),
         conversation_question_required: conversationPolicy.question_required ?? false,
         conversation_hide_internal_sources: conversationPolicy.hide_internal_sources ?? true,
         conversation_answer_style: conversationPolicy.answer_style || 'helpful',
@@ -904,11 +920,24 @@ export default function AgentWizard() {
       rag_enabled: true,
       show_sources: true,
       conversation_policy_goal: agentData.conversation_policy_goal || 'Provide human, practical Lal Kitab and Vedic astrology guidance.',
+      conversation_planner_model: agentData.conversation_planner_model || 'gpt-5.5-low',
       conversation_required_inputs: agentData.conversation_required_inputs || [
         'birth_date:birth date:date',
         'birth_time:birth time:time',
         'birth_place:birth place:place',
       ].join('\n'),
+      conversation_tool_recipes: agentData.conversation_tool_recipes || JSON.stringify([
+        {
+          id: 'vedika_lal_kitab_chart_first',
+          description: 'Build the Lal Kitab chart first, then call only the secondary Vedika endpoints relevant to the user question.',
+          steps: [
+            { tool_id: 'lalkitab_chart', order: 1, required: true },
+            { tool_id: 'lalkitab_predictions', order: 2, depends_on: 'lalkitab_chart', when: 'future, career, timing, relocation, relationship, broad life questions' },
+            { tool_id: 'lalkitab_remedies', order: 2, depends_on: 'lalkitab_chart', when: 'remedies, upay, problem solving' },
+            { tool_id: 'lalkitab_totke', order: 2, depends_on: 'lalkitab_chart', when: 'totke or practical remedial actions' },
+          ],
+        },
+      ], null, 2),
       conversation_question_required: true,
       conversation_hide_internal_sources: true,
       conversation_answer_style: 'human_astrologer',
@@ -987,7 +1016,7 @@ export default function AgentWizard() {
               : (agentData.agent_template === 'astrology_lalkitab' ? 'astrology' : 'generic'),
             template: agentData.agent_template || 'generic',
           },
-          rag: agentData.data_source === 'rag' ? {
+          rag: (agentData.data_source === 'rag' || (agentData.data_source === 'shopify' && agentData.shopify_integration_mode !== 'storefront_ucp_mcp')) ? {
             enabled: true,
             embedding: {
               provider: agentData.embedding_provider,
@@ -1023,6 +1052,7 @@ export default function AgentWizard() {
           context_connectors: serializeContextConnectors(agentData.context_connectors),
           conversation_policy: {
             goal: agentData.conversation_policy_goal || agentData.purpose || agentData.description,
+            planner_model: agentData.conversation_planner_model || undefined,
             required_inputs: parseRequiredInputsText(agentData.conversation_required_inputs),
             question_required: agentData.conversation_question_required,
             input_extraction_hints: {
@@ -1033,6 +1063,7 @@ export default function AgentWizard() {
               initial_label: 'Reading your message',
               initial_summary: 'I’m checking what is needed before answering.',
             },
+            tool_recipes: parseToolRecipesText(agentData.conversation_tool_recipes),
             hide_internal_sources: agentData.conversation_hide_internal_sources,
             context_policy: {
               lazy_context: true,
@@ -1239,6 +1270,7 @@ export default function AgentWizard() {
       context_connectors: serializeContextConnectors(agentData.context_connectors),
       conversation_policy: {
         goal: agentData.conversation_policy_goal || agentData.purpose || agentData.description,
+        planner_model: agentData.conversation_planner_model || undefined,
         required_inputs: parseRequiredInputsText(agentData.conversation_required_inputs),
         question_required: agentData.conversation_question_required,
         input_extraction_hints: {
@@ -1249,6 +1281,7 @@ export default function AgentWizard() {
           initial_label: 'Reading your message',
           initial_summary: 'I’m checking what is needed before answering.',
         },
+        tool_recipes: parseToolRecipesText(agentData.conversation_tool_recipes),
         hide_internal_sources: agentData.conversation_hide_internal_sources,
         context_policy: {
           lazy_context: true,

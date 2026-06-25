@@ -33,6 +33,7 @@ class AgentCreate(AgentBase):
 
 
 class AgentUpdate(BaseModel):
+    brand_id: Optional[str] = None
     name: Optional[str] = None
     description: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -86,6 +87,8 @@ async def get_brand_for_sync(brand_id: str) -> dict | None:
 def should_sync_agent_dashboard(existing_agent: dict | None, updated_agent: dict) -> bool:
     new_status = updated_agent.get("status")
     previous_status = existing_agent.get("status") if existing_agent else None
+    if existing_agent and existing_agent.get("brand_id") != updated_agent.get("brand_id"):
+        return True
     if new_status == "active":
         return True
     if previous_status == "active" and new_status != "active":
@@ -229,7 +232,21 @@ async def update_agent(
             raise HTTPException(status_code=404, detail="Agent not found")
 
         update_data = agent_update.dict(exclude_unset=True)
+        target_brand = None
+        if "brand_id" in update_data and update_data["brand_id"] != existing_agent.get("brand_id"):
+            target_brand = await get_brand_or_404(update_data["brand_id"])
+            brand_slug = target_brand.get("slug")
+            if not brand_slug:
+                raise HTTPException(status_code=400, detail=f"Brand {update_data['brand_id']} has no slug")
+            update_data["brand_slug"] = brand_slug
+
         if "configuration" in update_data:
+            if "brand_id" in update_data:
+                prompt_layers = update_data["configuration"].get("prompt_layers")
+                if isinstance(prompt_layers, dict):
+                    duties = prompt_layers.get("duties")
+                    if isinstance(duties, dict):
+                        duties["brand_id"] = update_data["brand_id"]
             update_data["configuration"] = protect_full_agent_configuration_secrets(
                 update_data["configuration"],
                 existing_config=existing_agent.get("configuration") or {},
@@ -242,7 +259,7 @@ async def update_agent(
         await collection.update_one({"id": agent_id}, {"$set": update_data})
         updated_agent = await collection.find_one({"id": agent_id})
         if should_sync_agent_dashboard(existing_agent, updated_agent):
-            brand_doc = await get_brand_for_sync(updated_agent["brand_id"])
+            brand_doc = target_brand or await get_brand_for_sync(updated_agent["brand_id"])
             background_tasks.add_task(
                 sync_agent_to_strapi_best_effort,
                 runtime_settings_service,

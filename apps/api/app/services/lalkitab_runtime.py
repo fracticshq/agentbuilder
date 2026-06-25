@@ -223,6 +223,8 @@ def _clean_birth_place(value: str) -> str:
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0]
+    cleaned = re.sub(r"\b(?:born|birthplace)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned)
     cleaned = cleaned.strip(" .,-")
     return cleaned
 
@@ -241,6 +243,31 @@ def _resolve_place(place: str) -> dict[str, Any] | None:
     return None
 
 
+def _extract_place_only_reply(text: str) -> str | None:
+    cleaned = _clean_birth_place(text or "")
+    if not cleaned:
+        return None
+    if re.search(r"\d", cleaned) or _looks_like_question_or_intent(cleaned):
+        return None
+    words = [word for word in re.split(r"[\s,]+", cleaned) if word]
+    if not 1 <= len(words) <= 6:
+        return None
+    return cleaned
+
+
+def _looks_like_question_or_intent(text: str) -> bool:
+    lowered = (text or "").lower()
+    if "?" in lowered:
+        return True
+    return bool(
+        re.search(
+            r"\b(what|why|how|when|where|which|who|will|should|can|could|would|"
+            r"career|marriage|finance|relationship|health|remedy|prediction|question|query)\b",
+            lowered,
+        )
+    )
+
+
 def extract_lalkitab_birth_input(
     message: str,
     *,
@@ -252,13 +279,19 @@ def extract_lalkitab_birth_input(
     date_patterns = [
         r"\b\d{4}-\d{1,2}-\d{1,2}\b",
         r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
-        r"\b\d{1,2}\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+\d{4}\b",
+        r"\b\d{1,2}\s*(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+\d{4}\b",
         r"\b(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+\d{1,2}\s+\d{4}\b",
     ]
     for pattern in date_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            parsed = _normalize_date(match.group(0))
+            raw_date = re.sub(
+                r"^(\d{1,2})(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b",
+                r"\1 \2",
+                match.group(0),
+                flags=re.IGNORECASE,
+            )
+            parsed = _normalize_date(raw_date)
             if parsed:
                 normalized["date"] = parsed
                 normalized["birth_date"] = parsed
@@ -305,8 +338,16 @@ def extract_lalkitab_birth_input(
         text,
         re.IGNORECASE,
     )
+    if not place_match:
+        place_match = re.search(
+            r"\b([A-Za-z][A-Za-z\s,.-]{1,80})\s+(?:born|birthplace)\b",
+            text,
+            re.IGNORECASE,
+        )
     if place_match:
-        normalized["birth_place"] = _clean_birth_place(place_match.group(1))
+        birth_place = _clean_birth_place(place_match.group(1))
+        parts = [part.strip() for part in re.split(r"[.;\n]+", birth_place) if part.strip()]
+        normalized["birth_place"] = parts[-1] if parts else birth_place
         resolved_place = _resolve_place(normalized["birth_place"]) if resolve_known_places else None
         if resolved_place:
             normalized.setdefault("latitude", resolved_place["latitude"])
@@ -798,6 +839,14 @@ async def build_lalkitab_runtime_context(
         normalized_birth_input.update(previous_api_context.get("normalized_birth_input") or {})
     normalized_birth_input.update(pending_state.get("normalized_birth_input") or {})
     normalized_birth_input.update({k: v for k, v in extracted.items() if v not in (None, "")})
+    if (
+        not normalized_birth_input.get("birth_place")
+        and normalized_birth_input.get("date")
+        and normalized_birth_input.get("time")
+    ):
+        followup_place = _extract_place_only_reply(message)
+        if followup_place:
+            normalized_birth_input["birth_place"] = followup_place
 
     selected_endpoint_ids = (
         select_lalkitab_endpoint_ids(message)
@@ -821,6 +870,36 @@ async def build_lalkitab_runtime_context(
             normalized_birth_input["datetime"] = f"{normalized_birth_input['date']}T{normalized_birth_input['time']}"
 
     _refresh_datetime()
+
+    # Resolve common or previously cached city names before hitting external
+    # geocoding. This keeps normal users from ever needing to know lat/lon for
+    # places such as Delhi, while still allowing connector-backed geocoding for
+    # new or ambiguous places below.
+    if (
+        not _has_coords()
+        and normalized_birth_input.get("birth_place")
+        and input_resolution.get("resolve_known_places", True) is not False
+    ):
+        resolved_place = _resolve_place(str(normalized_birth_input["birth_place"]))
+        if resolved_place:
+            normalized_birth_input["latitude"] = resolved_place["latitude"]
+            normalized_birth_input["longitude"] = resolved_place["longitude"]
+            normalized_birth_input["timezone"] = resolved_place["timezone"]
+            normalized_birth_input["birth_place_resolved"] = resolved_place["label"]
+            result.events.append(
+                {
+                    "type": "geocode_result",
+                    "content": f"Birthplace resolved to {resolved_place['label']}.",
+                    "metadata": {
+                        "success": True,
+                        "label": resolved_place["label"],
+                        "latitude": resolved_place["latitude"],
+                        "longitude": resolved_place["longitude"],
+                        "timezone": resolved_place["timezone"],
+                        "source": "known_place_cache",
+                    },
+                }
+            )
 
     # A follow-up answer to a pending birthplace disambiguation.
     pending_candidates = pending_state.get("place_candidates") or []

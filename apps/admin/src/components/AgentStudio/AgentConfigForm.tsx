@@ -249,7 +249,7 @@ export default function AgentConfigForm({
             <div>
               <h3 className="text-sm font-semibold text-gray-900">Shopify Commerce Layer</h3>
               <p className="mt-1 text-xs leading-5 text-gray-500">
-                Configure this agent for a specific store using Shopify Storefront MCP and UCP. Admin catalog sync is optional cache support.
+                Configure this agent for a specific store. Hybrid mode uses NOVA catalog RAG for product discovery and Shopify MCP/UCP for cart and live commerce actions.
               </p>
             </div>
             <span className={`shrink-0 rounded px-2 py-1 text-xs font-medium ${data.data_source === 'shopify' ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-200 text-gray-700'}`}>
@@ -261,12 +261,31 @@ export default function AgentConfigForm({
             <Switch
               checked={data.data_source === 'shopify'}
               onChange={() => onChange('data_source', data.data_source === 'shopify' ? 'none' : 'shopify')}
-              label="Use Shopify MCP / UCP"
-              description="Turns on the commerce-layer path: Agent -> MCP/UCP -> Shopify -> Store."
+              label="Use Shopify commerce"
+              description="Turns on the commerce path: Agent -> NOVA catalog/RAG + MCP/UCP -> Shopify -> Store."
             />
           </div>
 
-          <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            <label className={`rounded-md border px-3 py-3 ${data.shopify_integration_mode === 'hybrid_catalog_rag_mcp' ? 'border-gray-950 bg-white' : 'border-gray-200 bg-white'}`}>
+              <div className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  checked={data.shopify_integration_mode === 'hybrid_catalog_rag_mcp'}
+                  onChange={() => {
+                    onChange('shopify_integration_mode', 'hybrid_catalog_rag_mcp');
+                    onChange('shopify_sync_enabled', true);
+                    onChange('shopify_mcp_enabled', true);
+                    onChange('data_source', 'shopify');
+                  }}
+                  className="mt-1"
+                />
+                <div>
+                  <p className="text-sm font-semibold text-gray-900">Hybrid catalog + MCP</p>
+                  <p className="mt-1 text-xs leading-5 text-gray-500">Recommended. NOVA understands catalog nuance; Shopify handles cart, checkout, and live commerce actions.</p>
+                </div>
+              </div>
+            </label>
             <label className={`rounded-md border px-3 py-3 ${data.shopify_integration_mode === 'storefront_ucp_mcp' ? 'border-gray-950 bg-white' : 'border-gray-200 bg-white'}`}>
               <div className="flex items-start gap-2">
                 <input
@@ -280,8 +299,8 @@ export default function AgentConfigForm({
                   className="mt-1"
                 />
                 <div>
-                  <p className="text-sm font-semibold text-gray-900">Storefront MCP / UCP</p>
-                  <p className="mt-1 text-xs leading-5 text-gray-500">Preferred for single-store agents. Uses Shopify's agent-ready commerce endpoints.</p>
+                  <p className="text-sm font-semibold text-gray-900">MCP / UCP only</p>
+                  <p className="mt-1 text-xs leading-5 text-gray-500">Use only Shopify's agent-ready endpoints. Best for actions, weaker for broad product discovery.</p>
                 </div>
               </div>
             </label>
@@ -298,8 +317,8 @@ export default function AgentConfigForm({
                   className="mt-1"
                 />
                 <div>
-                  <p className="text-sm font-semibold text-gray-900">Cached catalog boost</p>
-                  <p className="mt-1 text-xs leading-5 text-gray-500">Optional cache layer. For current Shopify apps, this should use app client credentials, not legacy pasted tokens.</p>
+                  <p className="text-sm font-semibold text-gray-900">Catalog RAG only</p>
+                  <p className="mt-1 text-xs leading-5 text-gray-500">Use synced product knowledge for recommendations without live cart actions.</p>
                 </div>
               </div>
             </label>
@@ -413,6 +432,15 @@ export default function AgentConfigForm({
               placeholder="helpful, human_astrologer, consultative_sales"
             />
           </Field>
+
+          <Field label="Planner model">
+            <input
+              className={inputClass}
+              value={data.conversation_planner_model || ''}
+              onChange={(event) => onChange('conversation_planner_model', event.target.value)}
+              placeholder="Optional, e.g. gpt-5.5-low"
+            />
+          </Field>
         </div>
 
         <div className="mt-3">
@@ -425,6 +453,20 @@ export default function AgentConfigForm({
               value={data.conversation_required_inputs || ''}
               onChange={(event) => onChange('conversation_required_inputs', event.target.value)}
               placeholder={'budget:budget:number\nuse_case:use case:text'}
+            />
+          </Field>
+        </div>
+
+        <div className="mt-3">
+          <Field
+            label="Tool recipes"
+            hint="JSON array. Use this for ordered tool dependencies such as chart-first, then intent-relevant endpoints."
+          >
+            <textarea
+              className={`${inputClass} min-h-[112px] font-mono text-xs`}
+              value={data.conversation_tool_recipes || ''}
+              onChange={(event) => onChange('conversation_tool_recipes', event.target.value)}
+              placeholder={'[{ "id": "recipe", "steps": [{ "tool_id": "knowledge_search", "order": 1 }] }]'}
             />
           </Field>
         </div>

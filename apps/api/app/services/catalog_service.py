@@ -11,11 +11,14 @@ import re
 import uuid
 from datetime import datetime
 from functools import partial
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import httpx
 import structlog
 
+from app.config import Settings
+from app.services.knowledge_service import KnowledgeService
 from .job_store import JobStore
 
 logger = structlog.get_logger()
@@ -210,6 +213,7 @@ async def fetch_shopify_products(
     store_url: str,
     access_token: Optional[str],
     job_id: str,
+    brand_id: Optional[str] = None,
 ) -> None:
     """Background task: paginate Shopify /products.json and store results in job."""
     if not await _job_store.get(job_id):
@@ -296,11 +300,39 @@ async def fetch_shopify_products(
                     break
 
         await _job_store.update(job_id, {"items": all_items, "status": "completed", "total": len(all_items)})
+        if brand_id and all_items:
+            await _upsert_shopify_catalog_into_knowledge(brand_id, all_items, job_id)
         logger.info("shopify_fetch_complete", items=len(all_items))
 
     except Exception as exc:
         await _job_store.update(job_id, {"status": "error", "error": str(exc)})
         logger.error("shopify_fetch_failed", error=str(exc))
+
+
+async def _upsert_shopify_catalog_into_knowledge(brand_id: str, items: List[dict], source_job_id: str) -> None:
+    """Persist fetched Shopify products into the brand knowledge base.
+
+    Shopify MCP is useful for actions, but catalog discovery needs NOVA's own
+    hybrid retrieval so broad and nuanced product queries work reliably.
+    """
+    service = KnowledgeService(Settings())
+    kb_job_id = await service.start_bulk_upload("product", items, brand_id)
+    product_items = [
+        SimpleNamespace(
+            sku=str(item.get("sku") or item.get("id") or uuid.uuid4()),
+            name=item.get("name") or item.get("title") or "Untitled product",
+            price=int(item.get("price") or 0),
+            currency=item.get("currency") or "INR",
+            category=item.get("category") or item.get("product_type") or "General",
+            image_url=item.get("image_url") or item.get("image"),
+            product_url=item.get("product_url") or item.get("url"),
+            in_stock=item.get("in_stock", True),
+            features=item.get("features") or [],
+        )
+        for item in items
+    ]
+    await service.process_bulk_upload(kb_job_id, "product", product_items, brand_id)
+    await _job_store.update(source_job_id, {"knowledge_job_id": kb_job_id, "knowledge_status": "completed"})
 
 
 async def fetch_json_feed(url: str) -> dict:

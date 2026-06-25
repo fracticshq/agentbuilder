@@ -22,10 +22,10 @@ describe('reduceActivity', () => {
   });
 
   it('keys connector steps by endpoint_id so start/result update the same row', () => {
-    let s = reduceActivity(EMPTY_ACTIVITY, ev('connector_start', 'Calling chart', { endpoint_id: 'lalkitab_chart' }));
-    s = reduceActivity(s, ev('connector_result', '', { endpoint_id: 'lalkitab_chart', success: true, latency_ms: 1636 }));
+    let s = reduceActivity(EMPTY_ACTIVITY, ev('connector_start', 'Checking configured source', { endpoint_id: 'custom_endpoint' }));
+    s = reduceActivity(s, ev('connector_result', 'Configured source returned context', { endpoint_id: 'custom_endpoint', success: true, latency_ms: 1636 }));
     expect(s.steps).toHaveLength(1);
-    expect(s.steps[0].label).toBe('Casting the Lal Kitab chart');
+    expect(s.steps[0].label).toBe('Configured source returned context');
     expect(s.steps[0].status).toBe('done');
     expect(s.steps[0].detail).toBe('1.6s');
   });

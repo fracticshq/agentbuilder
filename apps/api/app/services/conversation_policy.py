@@ -115,20 +115,33 @@ def _merge_policy(base: dict[str, Any], override: dict[str, Any]) -> dict[str, A
                 **(base.get(key) if isinstance(base.get(key), dict) else {}),
                 **(override.get(key) if isinstance(override.get(key), dict) else {}),
             }
-    if isinstance(override.get("required_inputs"), list):
-        merged["required_inputs"] = override["required_inputs"]
+    for list_key in ("required_inputs", "tool_recipes"):
+        if isinstance(override.get(list_key), list):
+            merged[list_key] = override[list_key]
     return merged
 
 
 def _default_policy(config: dict[str, Any]) -> dict[str, Any]:
     domain = config.get("domain") if isinstance(config.get("domain"), dict) else {}
-    template = domain.get("template") or config.get("agent_template") or config.get("template") or "generic"
+    template = domain.get("template") or config.get("agent_template") or config.get("template")
+    if not template:
+        connector_text = " ".join(
+            f"{connector.get('id', '')} {connector.get('name', '')} "
+            + " ".join(str(endpoint.get("id", "")) for endpoint in (connector.get("endpoints") or []) if isinstance(endpoint, dict))
+            for connector in (config.get("context_connectors") or [])
+            if isinstance(connector, dict)
+        ).lower()
+        if "lalkitab" in connector_text or "lal kitab" in connector_text:
+            template = "astrology_lalkitab"
+    template = template or "generic"
     base = {
         "goal": "",
+        "planner_model": None,
         "required_inputs": [],
         "question_required": False,
         "input_extraction_hints": {"infer_unlabeled_values": True},
         "answer_style": "helpful",
+        "tool_recipes": [],
         "public_progress_style": {
             "initial_label": "Reading your message",
             "initial_summary": "I’m checking what is needed before answering.",
@@ -149,6 +162,7 @@ def _default_policy(config: dict[str, Any]) -> dict[str, Any]:
         base.update(
             {
                 "goal": "Provide human, practical Lal Kitab and Vedic astrology guidance.",
+                "planner_model": config.get("planner_model") or "gpt-5.5-low",
                 "required_inputs": [
                     {
                         "id": "birth_date",
@@ -174,6 +188,62 @@ def _default_policy(config: dict[str, Any]) -> dict[str, Any]:
                 ],
                 "question_required": True,
                 "answer_style": "human_astrologer",
+                "tool_recipes": [
+                    {
+                        "id": "vedika_lal_kitab_chart_first",
+                        "description": "For chart-specific Lal Kitab answers, resolve birthplace if needed, call chart first, then call only the relevant secondary Lal Kitab endpoints.",
+                        "steps": [
+                            {
+                                "tool_id": "lalkitab_chart",
+                                "required": True,
+                                "order": 1,
+                                "reason": "Build the base Lal Kitab chart before using any secondary calculated endpoint.",
+                            },
+                            {
+                                "tool_id": "lalkitab_predictions",
+                                "order": 2,
+                                "when": "future, career, timing, relocation, relationship, or broad life questions",
+                                "depends_on": "lalkitab_chart",
+                            },
+                            {
+                                "tool_id": "lalkitab_remedies",
+                                "order": 2,
+                                "when": "remedy, upay, totke, problem-solving, or mitigation questions",
+                                "depends_on": "lalkitab_chart",
+                            },
+                            {
+                                "tool_id": "lalkitab_totke",
+                                "order": 2,
+                                "when": "totke or practical remedial action questions",
+                                "depends_on": "lalkitab_chart",
+                            },
+                            {
+                                "tool_id": "lalkitab_houses",
+                                "order": 2,
+                                "when": "house, placement, planet, or chart structure questions",
+                                "depends_on": "lalkitab_chart",
+                            },
+                            {
+                                "tool_id": "lalkitab_debts",
+                                "order": 2,
+                                "when": "debt, rin, karmic, obligation, or ancestral questions",
+                                "depends_on": "lalkitab_chart",
+                            },
+                            {
+                                "tool_id": "lalkitab_lucky",
+                                "order": 2,
+                                "when": "lucky, favorable, color, number, date, or timing questions",
+                                "depends_on": "lalkitab_chart",
+                            },
+                            {
+                                "tool_id": "lalkitab_varshphal",
+                                "order": 2,
+                                "when": "annual, yearly, varshphal, or age/year specific questions",
+                                "depends_on": "lalkitab_chart",
+                            },
+                        ],
+                    }
+                ],
                 "memory_policy": {
                     "cache_evidence": True,
                     "invalidation_fields": ["birth_date", "birth_time", "birth_place"],
@@ -191,7 +261,12 @@ def plan_conversation_turn(
 ) -> ConversationTurnPlan:
     previous_state = previous_state or {}
     previous_inputs = previous_state.get("resolved_inputs") if isinstance(previous_state.get("resolved_inputs"), dict) else {}
+    previous_pending = previous_state.get("pending_inputs") if isinstance(previous_state.get("pending_inputs"), list) else []
     extracted = extract_inputs_for_policy(message, policy)
+    if not extracted.get("birth_place") and _is_pending_field(previous_pending, "birth_place"):
+        pending_place = _extract_place_only_reply(message)
+        if pending_place:
+            extracted["birth_place"] = pending_place
     resolved = {**previous_inputs, **{k: v for k, v in extracted.items() if v not in (None, "")}}
     required = [field for field in policy.get("required_inputs") or [] if isinstance(field, dict) and field.get("required", True)]
     missing = [
@@ -371,7 +446,7 @@ def _extract_date(text: str) -> str | None:
     patterns = [
         r"\b\d{4}-\d{1,2}-\d{1,2}\b",
         r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
-        r"\b\d{1,2}\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+\d{4}\b",
+        r"\b\d{1,2}\s*(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+\d{4}\b",
         r"\b(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+\d{1,2}\s+\d{4}\b",
     ]
     formats = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y", "%d/%m/%y", "%d %B %Y", "%d %b %Y", "%B %d %Y", "%b %d %Y")
@@ -380,6 +455,12 @@ def _extract_date(text: str) -> str | None:
         if not match:
             continue
         raw = match.group(0).replace(",", " ")
+        raw = re.sub(
+            r"^(\d{1,2})(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b",
+            r"\1 \2",
+            raw,
+            flags=re.IGNORECASE,
+        )
         for fmt in formats:
             try:
                 return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
@@ -415,6 +496,16 @@ def _extract_time(text: str) -> str | None:
 
 
 def _extract_place(text: str, *, has_date: bool, has_time: bool) -> str | None:
+    born_suffix = re.search(
+        r"\b([A-Za-z][A-Za-z\s,.-]{1,80})\s+(?:born|birthplace)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if born_suffix:
+        place = _clean_place(born_suffix.group(1))
+        if place:
+            parts = [part.strip() for part in re.split(r"[.;\n]+", place) if part.strip()]
+            return parts[-1] if parts else place
     labeled = re.search(
         r"\b(?:birth\s*place|birthplace|place\s*of\s*birth|pob|p\.?o\.?b\.?|born\s+in|place|city)\s*[:=]?\s*([A-Za-z][A-Za-z\s,.-]{1,120})",
         text,
@@ -425,7 +516,7 @@ def _extract_place(text: str, *, has_date: bool, has_time: bool) -> str | None:
     if not (has_date and has_time):
         return None
     after_time = re.search(
-        r"(?:\b\d{3,4}\s*(?:IST|india(?:n)?\s+timezone)?\b|\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b)\s*,?\s*([A-Za-z][A-Za-z\s,.-]{2,120})",
+        r"(?:\b\d{3,4}\s*(?:hrs|hours?|IST|india(?:n)?\s+timezone)?\b|\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b)\s*(?:[,.)-]|\btime\b)?\s*([A-Za-z][A-Za-z\s,.-]{1,120})",
         text,
         re.IGNORECASE,
     )
@@ -437,17 +528,41 @@ def _extract_place(text: str, *, has_date: bool, has_time: bool) -> str | None:
     scrubbed = re.sub(r"\b\d{4}-\d{1,2}-\d{1,2}\b", " ", text)
     scrubbed = re.sub(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", " ", scrubbed)
     scrubbed = re.sub(
-        r"\b\d{1,2}\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+\d{4}\b",
+        r"\b\d{1,2}\s*(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+\d{4}\b",
         " ",
         scrubbed,
         flags=re.IGNORECASE,
     )
     scrubbed = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b|\b\d{3,4}\s*(?:hrs|hours?|ist)?\b", " ", scrubbed, flags=re.IGNORECASE)
     scrubbed = re.sub(r"\b(?:name|dob|date|time|birth|of|place|question|query|ist|india timezone)\b\s*[:=-]?", " ", scrubbed, flags=re.IGNORECASE)
-    candidates = re.findall(r"\b[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?(?:\s*,\s*[A-Z][A-Za-z]+)?", scrubbed)
-    if candidates:
-        return _clean_place(candidates[-1])
+    parts = [
+        _clean_place(part)
+        for part in re.split(r"[.;\n]+", scrubbed)
+        if _clean_place(part)
+    ]
+    if parts:
+        # Names tend to be the first free-text fragment; birthplace is usually
+        # the trailing location-like fragment once date/time have been removed.
+        return parts[-1]
     return None
+
+
+def _is_pending_field(pending_inputs: list[dict[str, Any]], field_id: str) -> bool:
+    return any(isinstance(item, dict) and item.get("id") == field_id for item in pending_inputs)
+
+
+def _extract_place_only_reply(text: str) -> str | None:
+    cleaned = _clean_place(text or "")
+    if not cleaned:
+        return None
+    if _extract_date(cleaned) or _extract_time(cleaned) or message_has_question(cleaned):
+        return None
+    if re.search(r"\d", cleaned):
+        return None
+    words = [word for word in re.split(r"[\s,]+", cleaned) if word]
+    if not 1 <= len(words) <= 6:
+        return None
+    return cleaned
 
 
 def _extract_labeled_value(text: str, field: dict[str, Any]) -> str | None:
@@ -468,6 +583,9 @@ def _clean_place(value: str) -> str:
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0]
+    cleaned = re.sub(r"^(?:hrs?|hours?|time|at)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:hrs?|hours?|time|ist|india timezone)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip(" .,-")
 
 

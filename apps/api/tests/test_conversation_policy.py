@@ -32,6 +32,51 @@ def test_unlabeled_birth_details_only_asks_for_question():
     assert "What would you like to ask" in plan.response_text
 
 
+def test_compact_lowercase_birth_details_only_asks_for_question():
+    plan = plan_conversation_turn(
+        message="anant mendiratta. 16july 1987. 1526 hrs time. delhi.",
+        policy=astrology_policy(),
+        previous_state={},
+    )
+
+    assert plan.action == "ask_question"
+    assert plan.resolved_inputs["birth_date"] == "1987-07-16"
+    assert plan.resolved_inputs["birth_time"] == "15:26:00"
+    assert plan.resolved_inputs["birth_place"].lower() == "delhi"
+    assert plan.context_decision["use_context"] is False
+
+
+def test_place_before_time_with_born_suffix_is_extracted():
+    plan = plan_conversation_turn(
+        message="anant mendiratta 16 july 1987. delhi born. 1526 hrs.",
+        policy=astrology_policy(),
+        previous_state={},
+    )
+
+    assert plan.action == "ask_question"
+    assert plan.resolved_inputs["birth_date"] == "1987-07-16"
+    assert plan.resolved_inputs["birth_time"] == "15:26:00"
+    assert plan.resolved_inputs["birth_place"].lower() == "delhi"
+
+
+def test_pending_birth_place_accepts_place_only_followup():
+    policy = astrology_policy()
+    plan = plan_conversation_turn(
+        message="delhi, india.",
+        policy=policy,
+        previous_state={
+            "resolved_inputs": {
+                "birth_date": "1987-07-16",
+                "birth_time": "15:26:00",
+            },
+            "pending_inputs": [{"id": "birth_place", "label": "birth place", "type": "place"}],
+        },
+    )
+
+    assert plan.action == "ask_question"
+    assert plan.resolved_inputs["birth_place"].lower() == "delhi, india"
+
+
 def test_question_without_required_inputs_asks_for_missing_fields():
     plan = plan_conversation_turn(
         message="Will I build a profitable company before 40?",

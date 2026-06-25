@@ -9,7 +9,8 @@ import inspect
 import json
 import re
 import uuid
-from typing import AsyncGenerator, Optional
+from types import SimpleNamespace
+from typing import Any, AsyncGenerator, Optional
 from datetime import datetime, timezone
 import structlog
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -51,6 +52,7 @@ from .conversation_policy import (
     normalize_conversation_policy,
     plan_conversation_turn,
 )
+from .agent_turn_planner import AgentTurnPlan, AgentTurnPlanner
 from .tool_registry import ToolRegistryService
 
 logger = structlog.get_logger(__name__)
@@ -87,6 +89,11 @@ GUARDRAIL_OFF_DOMAIN_MESSAGE = (
 LOW_CONFIDENCE_MESSAGE = (
     "I don’t have enough verified information in the knowledge base to answer that reliably. "
     "Please share a little more detail or contact the brand team for confirmation."
+)
+INTERNAL_SOURCE_TERMS = re.compile(
+    r"\b(api|rag|chunk|chunks|connector|connectors|endpoint|endpoints|tool call|tool calls|tool-backed|"
+    r"execution history|observation|observations|geocode lookup|runtime|mcp)\b",
+    re.IGNORECASE,
 )
 
 
@@ -280,6 +287,10 @@ class MessageService:
         return rag if isinstance(rag, dict) else {}
 
     def _rag_enabled(self) -> bool:
+        if (self.agent_config or {}).get("data_source") == "shopify":
+            shopify = (self.agent_config or {}).get("shopify") or {}
+            if shopify.get("integration_mode") in {None, "", "hybrid_catalog_rag_mcp", "admin_catalog_sync"}:
+                return True
         rag = self._agent_rag_config()
         if "enabled" in rag:
             return bool(rag.get("enabled"))
@@ -889,7 +900,32 @@ Answer the user directly.
             }
             return LOW_CONFIDENCE_MESSAGE, next_metadata
 
+        hide_internal_sources = bool(
+            ((self.agent_config or {}).get("conversation_policy") or {}).get("hide_internal_sources", True)
+        )
+        if hide_internal_sources and response_text and INTERNAL_SOURCE_TERMS.search(response_text):
+            return self._strip_internal_source_language(response_text), {
+                **metadata,
+                "public_answer_sanitized": True,
+            }
+
         return response_text, metadata
+
+    def _strip_internal_source_language(self, response_text: str) -> str:
+        """Remove backend/runtime explanations from public answers."""
+        kept: list[str] = []
+        for paragraph in re.split(r"\n{2,}", response_text or ""):
+            if INTERNAL_SOURCE_TERMS.search(paragraph):
+                continue
+            cleaned = paragraph.strip()
+            if cleaned:
+                kept.append(cleaned)
+        if kept:
+            return "\n\n".join(kept)
+        return (
+            "I couldn’t complete the calculation cleanly from the details available right now. "
+            "Please share your question again and I’ll re-check it carefully."
+        )
 
     async def _store_guardrail_response(
         self,
@@ -967,6 +1003,240 @@ Answer the user directly.
         except ValueError as e:
             logger.error("llm_provider_init_failed", provider=resolved_provider, model=resolved_model, error=str(e))
             raise
+
+    async def _planner_llm_provider(self, policy: dict[str, Any]):
+        """Use the configured planner model when available, otherwise the agent LLM.
+
+        Planner model override is best-effort; if the deployment is not
+        configured yet, the harness keeps running with the agent model.
+        """
+        planner_model = (policy or {}).get("planner_model")
+        current_model = getattr(getattr(self.llm_provider, "config", None), "model", None)
+        if not planner_model or planner_model == current_model:
+            return self.llm_provider
+        try:
+            llm_config = (self.agent_config or {}).get("llm") if isinstance((self.agent_config or {}).get("llm"), dict) else {}
+            runtime_config = await self.runtime_settings_service.get_llm_runtime_config(
+                provider_name=llm_config.get("provider"),
+                model=str(planner_model),
+            )
+            return self._build_llm_provider(runtime_config)
+        except Exception as exc:  # pragma: no cover - defensive; runtime fallback
+            logger.warning(
+                "planner_model_override_failed",
+                planner_model=planner_model,
+                current_model=current_model,
+                error=str(exc),
+            )
+            return self.llm_provider
+
+    def _tool_schemas_for_planner(self) -> list[dict[str, Any]]:
+        if not self.tool_registry:
+            return []
+        try:
+            return self.tool_registry.get_tool_schemas()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("planner_tool_schema_failed", error=str(exc))
+            return []
+
+    def _resolve_planner_tool(self, tool_id: str):
+        if not self.tool_registry or not tool_id:
+            return None
+        exact = self.tool_registry.get(tool_id)
+        if exact:
+            return exact
+        safe_tool_id = str(tool_id).lower().strip()
+        for tool in self.tool_registry.list_tools():
+            if getattr(tool, "name", "") == tool_id:
+                return tool
+            endpoint = getattr(tool, "endpoint", None)
+            if isinstance(endpoint, dict):
+                endpoint_id = str(endpoint.get("id") or "").lower()
+                endpoint_name = str(endpoint.get("name") or "").lower()
+                if safe_tool_id in {endpoint_id, endpoint_name} or getattr(tool, "name", "").lower().endswith(safe_tool_id):
+                    return tool
+        return None
+
+    async def _execute_planner_tool_plan(
+        self,
+        *,
+        turn_plan: AgentTurnPlan,
+        message: str,
+        conversation_id: str,
+    ) -> tuple[dict[str, ToolResult], list[StreamingMessageResponse]]:
+        """Execute a validated planner tool plan through registered allowlisted tools."""
+        tool_results: dict[str, ToolResult] = {}
+        events: list[StreamingMessageResponse] = []
+        resolved_inputs = dict(turn_plan.resolved_inputs or {})
+        for index, step in enumerate(turn_plan.tool_plan or []):
+            tool_id = str(step.get("tool_id") or "").strip()
+            tool = self._resolve_planner_tool(tool_id)
+            step_key = tool_id or f"step_{index + 1}"
+            if not tool:
+                result = ToolResult(
+                    success=False,
+                    data=None,
+                    error=f"Tool {tool_id} is not available to this agent.",
+                    metadata={"tool_id": tool_id, "blocked_reason": "tool_not_available"},
+                )
+                tool_results[step_key] = result
+                events.append(
+                    StreamingMessageResponse(
+                        type="activity",
+                        content=f"{tool_id} is not available.",
+                        conversation_id=conversation_id,
+                        metadata={
+                            "activity": {
+                                "activity_id": f"tool:{step_key}",
+                                "kind": "tool_call",
+                                "status": "failed",
+                                "visibility": "console",
+                                "label": f"Tool unavailable: {tool_id}",
+                                "summary": result.error,
+                                "data": result.metadata,
+                                "controls": [],
+                            }
+                        },
+                    )
+                )
+                continue
+
+            tool_name = getattr(tool, "name", tool_id)
+            tool_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+            payload = tool_input.get("payload") if isinstance(tool_input.get("payload"), dict) else {}
+            payload = {**resolved_inputs, **payload}
+            run_kwargs = dict(tool_input)
+            if "query" not in run_kwargs:
+                run_kwargs["query"] = turn_plan.question or message
+            if payload:
+                run_kwargs["payload"] = payload
+
+            events.append(
+                StreamingMessageResponse(
+                    type="activity",
+                    content=step.get("reason") or f"Running {tool_name}",
+                    conversation_id=conversation_id,
+                    metadata={
+                        "activity": {
+                            "activity_id": f"tool:{tool_name}",
+                            "kind": "connector_call" if str(tool_name).startswith("tool_context_") else "tool_call",
+                            "status": "running",
+                            "visibility": "public",
+                            "label": step.get("reason") or "Checking the configured source",
+                            "summary": step.get("reason") or "",
+                            "data": {"tool_name": tool_name, "tool_id": tool_id},
+                            "controls": [],
+                        }
+                    },
+                )
+            )
+            try:
+                result = await tool.run(**run_kwargs)
+            except Exception as exc:  # pragma: no cover - defensive
+                result = ToolResult(success=False, data=None, error=str(exc), metadata={"tool_id": tool_id, "tool_name": tool_name})
+            tool_results[tool_name] = result
+            metadata = getattr(result, "metadata", None) or {}
+            status = "completed" if result.success else "failed"
+            events.append(
+                StreamingMessageResponse(
+                    type="activity",
+                    content=f"{tool_name} completed." if result.success else (result.error or f"{tool_name} failed."),
+                    conversation_id=conversation_id,
+                    metadata={
+                        "activity": {
+                            "activity_id": f"tool:{tool_name}",
+                            "kind": "connector_call" if metadata.get("connector_id") else "tool_call",
+                            "status": status,
+                            "visibility": "public" if result.success else "console",
+                            "label": metadata.get("endpoint_name") or metadata.get("connector_name") or tool_name,
+                            "summary": "Done." if result.success else (result.error or "The call failed."),
+                            "data": _sanitize_for_json(metadata),
+                            "controls": [],
+                        }
+                    },
+                )
+            )
+            if isinstance(metadata.get("resolved_inputs"), dict):
+                resolved_inputs.update({k: v for k, v in metadata["resolved_inputs"].items() if v not in (None, "")})
+        return tool_results, events
+
+    async def _generate_planner_agent_result(
+        self,
+        *,
+        message: str,
+        chat_history: list[dict],
+        turn_plan: AgentTurnPlan,
+        tool_results: dict[str, ToolResult],
+        rag_tool_result: ToolResult | None = None,
+    ) -> AgentResult:
+        """Synthesize a public answer from the LLM-first plan and executed evidence."""
+        all_tool_results = dict(tool_results or {})
+        if rag_tool_result:
+            all_tool_results["knowledge_search"] = rag_tool_result
+        hide_internal_sources = bool((self.agent_config or {}).get("conversation_policy", {}).get("hide_internal_sources", True))
+        evidence = {
+            key: {
+                "success": result.success,
+                "data": _sanitize_for_json(result.data if isinstance(result.data, dict) else {"value": result.data}),
+                "error": result.error,
+                "metadata": _sanitize_for_json(result.metadata or {}),
+            }
+            for key, result in all_tool_results.items()
+        }
+        source_rule = (
+            "Do not mention APIs, RAG, chunks, connectors, tools, endpoint names, source provenance, or internal context handling."
+            if hide_internal_sources
+            else "You may briefly describe evidence sources if it helps."
+        )
+        prompt = f"""
+{self.system_prompt}
+
+You are writing the final answer for a NOVA agent after a structured planner and allowlisted tools ran.
+
+User message:
+{message}
+
+Planner output:
+{json.dumps(_sanitize_for_json(turn_plan.raw_plan or {}), indent=2, default=str)}
+
+Resolved user inputs:
+{json.dumps(_sanitize_for_json(turn_plan.resolved_inputs or {}), indent=2, default=str)}
+
+Conversation history:
+{json.dumps(chat_history[-8:], indent=2, default=str)}
+
+Tool and context evidence:
+{json.dumps(evidence, indent=2, default=str)}
+
+Rules:
+- Answer the user directly in the configured agent style.
+- Use the evidence internally; do not fabricate missing facts.
+- If evidence is insufficient, ask for the next useful detail or say what you can answer without overclaiming.
+- {source_rule}
+"""
+        response = await self.llm_provider.generate(prompt)
+        return AgentResult(
+            answer=response.content,
+            metadata={
+                "tool_results": all_tool_results,
+                "steps_executed": len(all_tool_results),
+                "validation_passed": True,
+                "validation_confidence": 0.9,
+                "planner": {
+                    "source": turn_plan.source,
+                    "intent": turn_plan.intent,
+                    "context_decision": turn_plan.context_decision,
+                    "tool_plan": turn_plan.tool_plan,
+                    "resolved_inputs": turn_plan.resolved_inputs,
+                },
+                "api_context": {
+                    "tool_outputs": {
+                        key: _sanitize_for_json(result.metadata or {})
+                        for key, result in all_tool_results.items()
+                    }
+                },
+            },
+        )
 
     async def _configure_retrieval_pipeline(self, brand_slug: Optional[str]) -> None:
         if not self._rag_enabled():
@@ -1374,10 +1644,19 @@ Answer the user directly.
                 await self._load_conversation_policy_state(conversation_id)
                 if short_term_enabled else {}
             )
-            turn_plan = plan_conversation_turn(
+            fallback_turn_plan = plan_conversation_turn(
                 message=runtime_message,
                 policy=conversation_policy,
                 previous_state=policy_state,
+            )
+            planner_provider = await self._planner_llm_provider(conversation_policy)
+            turn_plan = await AgentTurnPlanner(planner_provider).plan(
+                message=runtime_message,
+                policy=conversation_policy,
+                previous_state=policy_state,
+                tool_schemas=self._tool_schemas_for_planner(),
+                system_prompt=self.system_prompt or "",
+                fallback_plan=fallback_turn_plan,
             )
 
             if turn_plan.should_short_circuit:
@@ -1478,9 +1757,14 @@ Answer the user directly.
                         "last_search_query",
                         "last_constraints",
                         "rerank_results",
+                        "connector_inputs",
                     ):
                         if key in meta:
                             session_state[key] = meta.get(key)
+
+            remembered_inputs = session_state.get("connector_inputs") or {}
+            if remembered_inputs:
+                self._apply_remembered_connector_inputs(remembered_inputs)
 
             context_dict = {
                 "memory": memory_context,
@@ -1494,7 +1778,19 @@ Answer the user directly.
             # Instead of linear retrieve->generate, let the agent plan and execute.
             from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
 
-            if isinstance(self.orchestrator, ShopifyOrchestrator):
+            if turn_plan.tool_plan:
+                planner_tool_results, _ = await self._execute_planner_tool_plan(
+                    turn_plan=turn_plan,
+                    message=runtime_message,
+                    conversation_id=conversation_id,
+                )
+                agent_result = await self._generate_planner_agent_result(
+                    message=runtime_message,
+                    chat_history=chat_history,
+                    turn_plan=turn_plan,
+                    tool_results=planner_tool_results,
+                )
+            elif isinstance(self.orchestrator, ShopifyOrchestrator):
                 agent_result = await self.orchestrator.run(
                     query=runtime_message,
                     chat_history=chat_history,
@@ -1773,10 +2069,19 @@ Answer the user directly.
                 await self._load_conversation_policy_state(conversation_id)
                 if short_term_enabled else {}
             )
-            turn_plan = plan_conversation_turn(
+            fallback_turn_plan = plan_conversation_turn(
                 message=runtime_message,
                 policy=conversation_policy,
                 previous_state=policy_state,
+            )
+            planner_provider = await self._planner_llm_provider(conversation_policy)
+            turn_plan = await AgentTurnPlanner(planner_provider).plan(
+                message=runtime_message,
+                policy=conversation_policy,
+                previous_state=policy_state,
+                tool_schemas=self._tool_schemas_for_planner(),
+                system_prompt=self.system_prompt or "",
+                fallback_plan=fallback_turn_plan,
             )
             for activity in turn_plan.activities:
                 if activity.get("visibility") != "hidden":
@@ -1846,20 +2151,25 @@ Answer the user directly.
             # Do not emit generic context events here. Public widget traffic often
             # starts with greetings, and timeline events should represent actual
             # retrieval/tool work rather than configuration loading.
-            lalkitab_pending = (
-                await self._load_lalkitab_pending_state(conversation_id)
-                if short_term_enabled else {}
-            )
-            lalkitab_pending = {
-                **lalkitab_pending,
-                **self._lalkitab_pending_from_policy(policy_state, turn_plan),
-            }
-            lalkitab_plan = await build_lalkitab_runtime_context(
-                self.agent_config or {}, runtime_message, pending_state=lalkitab_pending
-            )
+            agent_result = None
+            lalkitab_pending: dict[str, Any] = {}
+            lalkitab_plan = SimpleNamespace(handled=False, api_context=None)
+
+            if not turn_plan.tool_plan:
+                lalkitab_pending = (
+                    await self._load_lalkitab_pending_state(conversation_id)
+                    if short_term_enabled else {}
+                )
+                lalkitab_pending = {
+                    **lalkitab_pending,
+                    **self._lalkitab_pending_from_policy(policy_state, turn_plan),
+                }
+                lalkitab_plan = await build_lalkitab_runtime_context(
+                    self.agent_config or {}, runtime_message, pending_state=lalkitab_pending
+                )
 
             # Surface real runtime activity (geocoding, connector calls) as it happens.
-            if lalkitab_plan.handled:
+            if agent_result is None and lalkitab_plan.handled:
                 for event in lalkitab_plan.events:
                     yield StreamingMessageResponse(
                         type=event.get("type") or "status",
@@ -1869,7 +2179,7 @@ Answer the user directly.
                     )
 
             # Birthplace disambiguation: pause and ask the user to pick a place.
-            if lalkitab_plan.handled and lalkitab_plan.awaiting_place_choice:
+            if agent_result is None and lalkitab_plan.handled and lalkitab_plan.awaiting_place_choice:
                 disambiguation_metadata = {
                     "connector_id": "vedika_lal_kitab",
                     "connector_name": "Vedika Lal Kitab",
@@ -1900,7 +2210,7 @@ Answer the user directly.
                 )
                 return
 
-            if lalkitab_plan.handled and lalkitab_plan.missing_input:
+            if agent_result is None and lalkitab_plan.handled and lalkitab_plan.missing_input:
                 missing_metadata = {
                     "connector_id": "vedika_lal_kitab",
                     "connector_name": "Vedika Lal Kitab",
@@ -1931,7 +2241,7 @@ Answer the user directly.
                 )
                 return
 
-            connector_preflight = [] if lalkitab_plan.handled else self._connector_missing_inputs_for_message(runtime_message)
+            connector_preflight = [] if turn_plan.tool_plan or lalkitab_plan.handled else self._connector_missing_inputs_for_message(runtime_message)
             if connector_preflight:
                 first_missing = connector_preflight[0]
                 yield StreamingMessageResponse(
@@ -2006,6 +2316,16 @@ Answer the user directly.
             if remembered_inputs:
                 self._apply_remembered_connector_inputs(remembered_inputs)
 
+            planner_tool_results: dict[str, ToolResult] = {}
+            if turn_plan.tool_plan:
+                planner_tool_results, planner_events = await self._execute_planner_tool_plan(
+                    turn_plan=turn_plan,
+                    message=runtime_message,
+                    conversation_id=conversation_id,
+                )
+                for event in planner_events:
+                    yield event
+
             prompt_context = {
                 "session_state": session_state,
                 "prompt_runtime": self._build_prompt_runtime_context(request),
@@ -2022,7 +2342,14 @@ Answer the user directly.
 
             from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
 
-            if lalkitab_plan.handled:
+            if turn_plan.tool_plan:
+                agent_result = await self._generate_planner_agent_result(
+                    message=runtime_message,
+                    chat_history=chat_history,
+                    turn_plan=turn_plan,
+                    tool_results=planner_tool_results,
+                )
+            elif lalkitab_plan.handled:
                 cached_rag_context = (
                     lalkitab_pending.get("rag_context")
                     if isinstance(lalkitab_pending.get("rag_context"), dict)
