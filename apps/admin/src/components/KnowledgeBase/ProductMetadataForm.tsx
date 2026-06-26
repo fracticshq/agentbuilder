@@ -149,7 +149,7 @@ export default function ProductMetadataForm({
               className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500 sm:text-sm"
             />
             <p className="mt-1 text-xs text-gray-500">
-              Price in smallest currency unit (paise for INR, cents for USD)
+              Price in the smallest unit for the selected currency.
             </p>
           </div>
 
@@ -161,10 +161,11 @@ export default function ProductMetadataForm({
             <select
               id="currency"
               required
-              value={data.currency || 'INR'}
+              value={data.currency || ''}
               onChange={(e) => handleChange('currency', e.target.value)}
               className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500 sm:text-sm"
             >
+              <option value="" disabled>Select currency</option>
               <option value="INR">INR (₹)</option>
               <option value="USD">USD ($)</option>
               <option value="EUR">EUR (€)</option>

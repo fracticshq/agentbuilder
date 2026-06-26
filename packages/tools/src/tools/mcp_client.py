@@ -140,7 +140,8 @@ class McpTool(BaseTool):
                         "sku": sku,
                         "name": name,
                         "price": float(price) if price else 0.0,
-                        "currency": str(rp.get("currency") or rp.get("currencyCode") or "INR"),
+                        "currency": str(rp.get("currency") or rp.get("currencyCode")).upper() if (rp.get("currency") or rp.get("currencyCode")) else None,
+                        "currency_source": "product" if (rp.get("currency") or rp.get("currencyCode")) else "missing",
                         "category": str(rp.get("category") or rp.get("productType") or "General"),
                         "in_stock": bool(rp.get("in_stock") if rp.get("in_stock") is not None else True),
                         "image_url": img,
@@ -254,4 +255,3 @@ class McpClient:
         except Exception as e:
             logger.warning("mcp_server_unreachable", endpoint=self.endpoint, error=str(e))
             return []
-

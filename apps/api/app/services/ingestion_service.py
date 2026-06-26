@@ -217,7 +217,7 @@ class IngestionService:
                 "sku": json_obj.get("sku") or json_obj.get("product_id"),
                 "name": json_obj.get("name") or json_obj.get("product_name"),
                 "price": json_obj.get("price"),
-                "currency": json_obj.get("currency", "INR"),
+                "currency": json_obj.get("currency"),
                 "category": json_obj.get("category"),
                 "image_url": json_obj.get("image_url"),
                 "product_url": json_obj.get("product_url"),

@@ -34,6 +34,16 @@ function parseStructuredField(value: string, fallback: any): any {
   }
 }
 
+function structuredFieldToText(value: any, fallback: any): string {
+  if (value === undefined || value === null || value === '') {
+    return JSON.stringify(fallback, null, 2);
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  return JSON.stringify(value, null, 2);
+}
+
 const CAPABILITY_RESERVED_KEYS = new Set([
   'enabled',
   'selected',
@@ -439,6 +449,13 @@ interface AgentData {
   shopify_mcp_enabled: boolean;
   shopify_integration_mode: 'hybrid_catalog_rag_mcp' | 'storefront_ucp_mcp' | 'admin_catalog_sync';
   shopify_agent_profile_url: string;
+  commerce_default_currency: string;
+  commerce_currency_policy: string;
+  commerce_source_display_policy: 'cards_only' | 'hide_sources' | 'show_sources';
+  commerce_product_top_k: number;
+  commerce_max_product_cards: number;
+  commerce_include_out_of_stock: boolean;
+  commerce_taxonomy_json: string;
   api_data_source_enabled: boolean;
   api_data_source_name: string;
   api_data_source_url: string;
@@ -487,6 +504,12 @@ interface AgentData {
   allowed_file_types: string[];
   max_file_size: number;
 }
+
+const defaultCommerceTaxonomy = {
+  categories: [],
+  attributes: [],
+  synonyms: {},
+};
 
 const initialData: AgentData = {
   // Basic Info
@@ -558,6 +581,13 @@ const initialData: AgentData = {
   shopify_mcp_enabled: false,
   shopify_integration_mode: 'hybrid_catalog_rag_mcp',
   shopify_agent_profile_url: '',
+  commerce_default_currency: '',
+  commerce_currency_policy: 'catalog_first_config_fallback',
+  commerce_source_display_policy: 'cards_only',
+  commerce_product_top_k: 8,
+  commerce_max_product_cards: 5,
+  commerce_include_out_of_stock: false,
+  commerce_taxonomy_json: JSON.stringify(defaultCommerceTaxonomy, null, 2),
   api_data_source_enabled: false,
   api_data_source_name: '',
   api_data_source_url: '',
@@ -755,6 +785,7 @@ export default function AgentWizard() {
       const agentApiConfig = config.agent_api || {};
       const apiDataSource = config.api_data_source || {};
       const conversationPolicy = config.conversation_policy || {};
+      const commerce = config.commerce || {};
       const selectedSkillIds = extractSelectedCapabilityIds(config.skills, 'skill_id');
       const selectedToolIds = extractSelectedCapabilityIds(config.tools, 'tool_id');
 
@@ -787,6 +818,14 @@ export default function AgentWizard() {
         shopify_mcp_enabled: config.shopify?.mcp_enabled ?? false,
         shopify_integration_mode: config.shopify?.integration_mode || 'hybrid_catalog_rag_mcp',
         shopify_agent_profile_url: config.shopify?.agent_profile_url || '',
+        commerce_default_currency: commerce.default_currency || '',
+        commerce_currency_policy: commerce.currency_policy || 'catalog_first_config_fallback',
+        commerce_source_display_policy: commerce.display_policy?.source_display_policy
+          || (commerce.display_policy?.cards_only ? 'cards_only' : (features.show_sources ? 'show_sources' : 'hide_sources')),
+        commerce_product_top_k: commerce.retrieval?.product_top_k ?? commerce.retrieval?.top_k ?? 8,
+        commerce_max_product_cards: commerce.retrieval?.max_product_cards ?? commerce.retrieval?.max_cards ?? 4,
+        commerce_include_out_of_stock: commerce.retrieval?.include_out_of_stock ?? false,
+        commerce_taxonomy_json: structuredFieldToText(commerce.taxonomy, defaultCommerceTaxonomy),
         api_data_source_enabled: apiDataSource.enabled ?? false,
         api_data_source_name: apiDataSource.name || '',
         api_data_source_url: apiDataSource.url || '',
@@ -944,13 +983,23 @@ export default function AgentWizard() {
       context_cache_enabled: true,
       context_invalidation_fields: 'birth_date, birth_time, birth_place',
       selected_skill_ids: Array.from(new Set([...(agentData.selected_skill_ids || []), 'knowledge_qa', 'api_data_lookup', 'conversation_summary'])),
-    } : field === 'agent_template' && value === 'ecommerce_sales' ? {
-      role: agentData.role || 'You are an expert ecommerce sales assistant.',
+    } : field === 'agent_template' && (value === 'ecommerce_sales' || value === 'ecommerce') ? {
+      role: agentData.role || (value === 'ecommerce_sales' ? 'You are an expert ecommerce sales assistant.' : 'You are a helpful ecommerce assistant.'),
       purpose: agentData.purpose || 'Help shoppers choose products using catalog data, page context, and approved brand knowledge.',
       system_prompt: agentData.system_prompt || 'You are a helpful ecommerce sales agent. Use product catalog, current page context, inventory, policies, and approved knowledge before recommending products. Ask concise follow-up questions when user needs are unclear.',
       url_context_boost_enabled: true,
+      show_sources: false,
       show_product_cards: true,
+      commerce_default_currency: agentData.commerce_default_currency || '',
+      commerce_currency_policy: agentData.commerce_currency_policy || 'catalog_first_config_fallback',
+      commerce_source_display_policy: 'cards_only',
       selected_skill_ids: Array.from(new Set([...(agentData.selected_skill_ids || []), 'knowledge_qa', 'product_recommendation', 'url_context_boost'])),
+    } : field === 'data_source' && value === 'shopify' ? {
+      show_sources: false,
+      show_product_cards: true,
+      commerce_default_currency: agentData.commerce_default_currency || '',
+      commerce_currency_policy: agentData.commerce_currency_policy || 'catalog_first_config_fallback',
+      commerce_source_display_policy: 'cards_only',
     } : {};
 
     setAgentData(prev => ({
@@ -965,6 +1014,27 @@ export default function AgentWizard() {
     setIsDeploying(true);
     try {
       const existingConfiguration = existingAgent?.configuration || {};
+      const isCommerceAgent = agentData.agent_template === 'ecommerce'
+        || agentData.agent_template === 'ecommerce_sales'
+        || agentData.data_source === 'shopify';
+      const configuredDefaultCurrency = (agentData.commerce_default_currency || '').trim().toUpperCase();
+      const commerceConfig = isCommerceAgent ? {
+        enabled: true,
+        default_currency: configuredDefaultCurrency || undefined,
+        currency_policy: agentData.commerce_currency_policy || 'catalog_first_config_fallback',
+        display_policy: {
+          source_display_policy: agentData.commerce_source_display_policy || 'cards_only',
+          show_sources: agentData.show_sources,
+          show_product_cards: agentData.show_product_cards,
+          cards_only: agentData.commerce_source_display_policy === 'cards_only',
+        },
+        retrieval: {
+          product_top_k: agentData.commerce_product_top_k,
+          max_product_cards: agentData.commerce_max_product_cards,
+          include_out_of_stock: agentData.commerce_include_out_of_stock,
+        },
+        taxonomy: parseStructuredField(agentData.commerce_taxonomy_json, defaultCommerceTaxonomy),
+      } : existingConfiguration.commerce;
       // Transform wizard data to API format
       const apiPayload: CreateAgentRequest = {
         brand_id: agentData.brand_id,
@@ -1049,6 +1119,7 @@ export default function AgentWizard() {
             integration_mode: agentData.shopify_integration_mode,
             agent_profile_url: agentData.shopify_agent_profile_url,
           } : undefined,
+          commerce: commerceConfig,
           context_connectors: serializeContextConnectors(agentData.context_connectors),
           conversation_policy: {
             goal: agentData.conversation_policy_goal || agentData.purpose || agentData.description,
@@ -1258,6 +1329,23 @@ export default function AgentWizard() {
         mcp_enabled: agentData.shopify_mcp_enabled,
         integration_mode: agentData.shopify_integration_mode,
         agent_profile_url: agentData.shopify_agent_profile_url,
+      } : undefined,
+      commerce: (agentData.agent_template === 'ecommerce' || agentData.agent_template === 'ecommerce_sales' || agentData.data_source === 'shopify') ? {
+        enabled: true,
+        default_currency: (agentData.commerce_default_currency || '').trim().toUpperCase() || undefined,
+        currency_policy: agentData.commerce_currency_policy || 'catalog_first_config_fallback',
+        display_policy: {
+          source_display_policy: agentData.commerce_source_display_policy,
+          show_sources: agentData.show_sources,
+          show_product_cards: agentData.show_product_cards,
+          cards_only: agentData.commerce_source_display_policy === 'cards_only',
+        },
+        retrieval: {
+          product_top_k: agentData.commerce_product_top_k,
+          max_product_cards: agentData.commerce_max_product_cards,
+          include_out_of_stock: agentData.commerce_include_out_of_stock,
+        },
+        taxonomy: parseStructuredField(agentData.commerce_taxonomy_json, defaultCommerceTaxonomy),
       } : undefined,
       skills: { selected: agentData.selected_skill_ids },
       tools: { selected: agentData.selected_tool_ids },

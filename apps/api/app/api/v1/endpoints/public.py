@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.connections import connection_manager
+from app.services.commerce_config import is_commerce_agent_config, normalize_commerce_configuration
 
 router = APIRouter()
 
@@ -46,29 +47,15 @@ def _widget_enabled(configuration: dict[str, Any]) -> bool:
     return widget.get("enabled", True) is not False
 
 
-def _is_commerce_agent(configuration: dict[str, Any]) -> bool:
-    domain = configuration.get("domain") or {}
-    template = str(
-        configuration.get("agent_template")
-        or configuration.get("template")
-        or domain.get("template")
-        or domain.get("type")
-        or ""
-    ).lower()
-    return (
-        configuration.get("data_source") == "shopify"
-        or bool(configuration.get("shopify"))
-        or template in {"ecommerce", "ecommerce_sales", "shopify"}
-    )
-
-
 def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
     """Return widget-safe configuration without secrets or admin-only material."""
+    configuration = normalize_commerce_configuration(configuration, public_widget_projection=True)
     features = configuration.get("features") or {}
     channels = configuration.get("channels") or {}
     widget = channels.get("widget") or {}
     domain = configuration.get("domain") or {}
     url_context_boost = configuration.get("url_context_boost") or {}
+    is_commerce_agent = is_commerce_agent_config(configuration)
 
     # 'basic' (cycling indicator) or 'advanced' (live step timeline).
     activity_mode = widget.get("activity_mode", features.get("activity_mode", "basic"))
@@ -79,9 +66,19 @@ def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
     activity_persistence = widget.get("activity_persistence", features.get("activity_persistence", "temporary"))
     if activity_persistence not in ("temporary", "persistent"):
         activity_persistence = "temporary"
-    show_sources = False if _is_commerce_agent(configuration) else widget.get("show_sources", features.get("show_sources", False))
+    commerce_display_policy = (configuration.get("commerce") or {}).get("display_policy") or {}
+    show_sources = (
+        commerce_display_policy.get("show_sources", False)
+        if is_commerce_agent
+        else widget.get("show_sources", features.get("show_sources", False))
+    )
+    show_product_cards = (
+        commerce_display_policy.get("show_product_cards", True)
+        if is_commerce_agent
+        else widget.get("show_product_cards", features.get("show_product_cards", True))
+    )
 
-    return {
+    public_config = {
         "domain": domain,
         "url_context_boost": {
             "enabled": url_context_boost.get("enabled", False),
@@ -89,7 +86,7 @@ def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
         "features": {
             "websockets": features.get("websockets", True),
             "show_sources": show_sources,
-            "show_product_cards": widget.get("show_product_cards", features.get("show_product_cards", True)),
+            "show_product_cards": show_product_cards,
             "human_takeover": widget.get("human_takeover", features.get("human_takeover", False)),
             "activity_mode": activity_mode,
             "activity_persistence": activity_persistence,
@@ -99,13 +96,16 @@ def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
                 "enabled": widget.get("enabled", True),
                 "preview_enabled": widget.get("preview_enabled", widget.get("enabled", True)),
                 "show_sources": show_sources,
-                "show_product_cards": widget.get("show_product_cards", features.get("show_product_cards", True)),
+                "show_product_cards": show_product_cards,
                 "human_takeover": widget.get("human_takeover", features.get("human_takeover", False)),
                 "activity_mode": activity_mode,
                 "activity_persistence": activity_persistence,
             }
         },
     }
+    if is_commerce_agent:
+        public_config["commerce"] = configuration["commerce"]
+    return public_config
 
 
 @router.get("/agents", response_model=list[PublicAgentResponse])

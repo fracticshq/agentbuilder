@@ -118,6 +118,13 @@ export interface AgentStudioData {
   shopify_mcp_enabled: boolean;
   shopify_integration_mode: 'hybrid_catalog_rag_mcp' | 'storefront_ucp_mcp' | 'admin_catalog_sync';
   shopify_agent_profile_url: string;
+  commerce_default_currency: string;
+  commerce_currency_policy: string;
+  commerce_source_display_policy: 'cards_only' | 'hide_sources' | 'show_sources';
+  commerce_product_top_k: number;
+  commerce_max_product_cards: number;
+  commerce_include_out_of_stock: boolean;
+  commerce_taxonomy_json: string;
   api_data_source_enabled: boolean;
   api_data_source_name: string;
   api_data_source_url: string;

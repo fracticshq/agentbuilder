@@ -25,7 +25,8 @@ class ProductData(BaseModel):
     sku: str = Field(..., description="Product SKU/ID (unique identifier)")
     name: str = Field(..., description="Product name/title")
     price: int = Field(..., description="Price in smallest currency unit (e.g., paise, cents)")
-    currency: str = Field(..., description="Currency code (e.g., INR, USD)")
+    currency: Optional[str] = Field(None, description="Currency code (e.g., INR, USD)")
+    currency_source: Optional[Literal["catalog", "configured_default", "missing"]] = None
     category: str = Field(..., description="Product category")
     image_url: Optional[str] = Field(None, description="Product image URL")
     product_url: Optional[str] = Field(None, description="Product page URL")
@@ -59,6 +60,7 @@ class BulkUploadItem(BaseModel):
     name: Optional[str] = None
     price: Optional[int] = None
     currency: Optional[str] = None
+    currency_source: Optional[Literal["catalog", "configured_default", "missing"]] = None
     category: Optional[str] = None
     image_url: Optional[str] = None
     product_url: Optional[str] = None
@@ -269,7 +271,7 @@ async def bulk_upload_json(
     
     Accepts:
     - Up to 1000 items per request
-    - Products: Must have sku, name, price, currency, category
+    - Products: Must have sku, name, price, category. Currency is optional and may come from commerce config.
     - Dealers: Must have dealer_id, name, city, phone
     
     Each item will be:
@@ -288,7 +290,7 @@ async def bulk_upload_json(
           "sku": "FAU-001",
           "name": "Chrome Faucet",
           "price": 3499,
-          "currency": "INR",
+          "currency": "USD",
           "category": "faucets",
           "features": ["chrome", "ceramic disc"]
         }
@@ -310,8 +312,6 @@ async def bulk_upload_json(
                     missing.append("name")
                 if item_dict.get("price") is None:
                     missing.append("price")
-                if not item_dict.get("currency"):
-                    missing.append("currency")
                 if not item_dict.get("category"):
                     missing.append("category")
                 
@@ -786,7 +786,8 @@ async def get_products_by_skus(
                     'sku': product_data.get('sku'),
                     'name': product_data.get('name', 'Unknown Product'),
                     'price': product_data.get('price', 0),
-                    'currency': product_data.get('currency', 'INR'),
+                    'currency': product_data.get('currency'),
+                    'currency_source': product_data.get('currency_source', 'missing'),
                     'category': product_data.get('category', 'Uncategorized'),
                     'in_stock': product_data.get('in_stock', True),
                     'features': product_data.get('features', []),

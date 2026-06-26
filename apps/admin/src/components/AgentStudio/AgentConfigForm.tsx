@@ -85,6 +85,17 @@ export default function AgentConfigForm({
   const cleanShopDomain = data.shopify_shop_url.replace(/^https?:\/\//, '').replace(/\/$/, '');
   const storefrontMcpEndpoint = cleanShopDomain ? `https://${cleanShopDomain}/api/mcp` : 'https://your-store.myshopify.com/api/mcp';
   const ucpMcpEndpoint = cleanShopDomain ? `https://${cleanShopDomain}/api/ucp/mcp` : 'https://your-store.myshopify.com/api/ucp/mcp';
+  const handleCommerceSourcePolicyChange = (value: 'cards_only' | 'hide_sources' | 'show_sources') => {
+    onChange('commerce_source_display_policy', value);
+    if (value === 'cards_only') {
+      onChange('show_sources', false);
+      onChange('show_product_cards', true);
+    } else if (value === 'hide_sources') {
+      onChange('show_sources', false);
+    } else {
+      onChange('show_sources', true);
+    }
+  };
 
   return (
     <div className="space-y-5">
@@ -264,6 +275,93 @@ export default function AgentConfigForm({
               label="Use Shopify commerce"
               description="Turns on the commerce path: Agent -> NOVA catalog/RAG + MCP/UCP -> Shopify -> Store."
             />
+          </div>
+
+          <div className="mt-3 rounded-md border border-gray-200 bg-white p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-gray-900">Commerce Defaults</p>
+                <p className="mt-1 text-xs leading-5 text-gray-500">Provider-neutral defaults used by catalog answers, product cards, and retrieval.</p>
+              </div>
+              <span className="shrink-0 rounded bg-gray-100 px-2 py-1 text-xs font-medium text-gray-600">Admin default</span>
+            </div>
+
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              <Field label="Default currency" hint="Used when catalog data does not provide a currency.">
+                <input
+                  value={data.commerce_default_currency || ''}
+                  onChange={(event) => onChange('commerce_default_currency', event.target.value.toUpperCase())}
+                  className={inputClass}
+                  placeholder="ISO-4217 code"
+                />
+              </Field>
+
+              <Field label="Currency policy">
+                <select
+                  value={data.commerce_currency_policy || 'catalog_first_config_fallback'}
+                  onChange={(event) => onChange('commerce_currency_policy', event.target.value)}
+                  className={inputClass}
+                >
+                  <option value="catalog_first_config_fallback">Catalog, then configured default</option>
+                  <option value="catalog_only">Catalog only</option>
+                  <option value="default_only">Default only</option>
+                </select>
+              </Field>
+
+              <Field label="Display policy">
+                <select
+                  value={data.commerce_source_display_policy || 'cards_only'}
+                  onChange={(event) => handleCommerceSourcePolicyChange(event.target.value as 'cards_only' | 'hide_sources' | 'show_sources')}
+                  className={inputClass}
+                >
+                  <option value="cards_only">Product cards, hide sources</option>
+                  <option value="hide_sources">Hide sources</option>
+                  <option value="show_sources">Show sources</option>
+                </select>
+              </Field>
+            </div>
+
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              <Field label="Product top K">
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={data.commerce_product_top_k}
+                  onChange={(event) => onChange('commerce_product_top_k', Number(event.target.value))}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field label="Max cards">
+                <input
+                  type="number"
+                  min={1}
+                  max={12}
+                  value={data.commerce_max_product_cards}
+                  onChange={(event) => onChange('commerce_max_product_cards', Number(event.target.value))}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Switch
+                checked={Boolean(data.commerce_include_out_of_stock)}
+                onChange={() => onChange('commerce_include_out_of_stock', !data.commerce_include_out_of_stock)}
+                label="Include out of stock"
+                description="Allow unavailable products in retrieval when the catalog marks stock status."
+              />
+            </div>
+
+            <div className="mt-3">
+              <Field label="Taxonomy JSON" hint="Optional category, attribute, or synonym hints. Leave arrays empty if the catalog owns taxonomy.">
+                <textarea
+                  value={data.commerce_taxonomy_json || ''}
+                  onChange={(event) => onChange('commerce_taxonomy_json', event.target.value)}
+                  className={`${inputClass} min-h-[104px] font-mono text-xs leading-5`}
+                  placeholder={'{ "categories": [], "attributes": [], "synonyms": {} }'}
+                />
+              </Field>
+            </div>
           </div>
 
           <div className="mt-3 grid gap-3 md:grid-cols-3">

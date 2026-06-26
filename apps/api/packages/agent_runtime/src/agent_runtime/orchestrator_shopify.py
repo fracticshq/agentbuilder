@@ -342,7 +342,9 @@ class ShopifyOrchestrator(Orchestrator):
         if isinstance(value, dict):
             return self._to_price(value.get("amount"))
         try:
-            return float(str(value).replace(",", "").replace("₹", "").strip())
+            text = str(value).replace(",", "")
+            match = re.search(r"-?\d+(?:\.\d+)?", text)
+            return float(match.group(0)) if match else None
         except (TypeError, ValueError):
             return None
 
@@ -407,8 +409,7 @@ class ShopifyOrchestrator(Orchestrator):
         for idx, product in enumerate(products, start=1):
             name = product.get("name") or product.get("title") or f"Product {idx}"
             price = product.get("price")
-            currency = product.get("currency") or ""
-            price_text = f" ({currency} {self._display_price(price)})" if price not in (None, "") else ""
+            price_text = f" ({self._format_price(price, product.get('currency'))})" if price not in (None, "") else ""
             options.append(f"{idx}. {name}{price_text}")
         return "Which product should I add to your cart?\n" + "\n".join(options)
 
@@ -430,15 +431,12 @@ class ShopifyOrchestrator(Orchestrator):
         if any(term in lowered for term in cart_only_terms):
             return None
 
-        product_terms = {
-            "product", "products", "recommend", "show", "find", "search", "price",
-            "prices", "cost", "available", "stock", "in stock", "buy", "add",
-            "pendant", "bracelet", "bangle", "earring", "necklace", "ring",
-            "dress", "shirt", "top", "bottom", "jewelry", "jewellery",
-            "audio", "speaker", "speakers", "subwoofer", "amplifier", "receiver",
-            "streamer", "network player", "home theater", "home theatre", "sound",
+        commerce_terms = {
+            "product", "products", "item", "items", "recommend", "show", "find", "search",
+            "price", "prices", "cost", "available", "stock", "in stock", "buy", "add",
+            "shop", "store", "catalog", "under", "below", "less than", "within", "budget",
         }
-        if not any(term in lowered for term in product_terms):
+        if not any(term in lowered for term in commerce_terms):
             return None
 
         constraints = self._extract_shopping_constraints(last_user_msg)
@@ -466,42 +464,9 @@ class ShopifyOrchestrator(Orchestrator):
     def _extract_shopping_constraints(self, query: str) -> Dict[str, Any]:
         lowered = query.lower()
         constraints: Dict[str, Any] = {
-            "product_type": None,
-            "attributes": [],
-            "occasion": None,
             "budget": None,
-            "preferences": [],
             "negative_constraints": [],
-            "recipient_context": None,
         }
-
-        product_types = [
-            "earrings", "earring", "necklace", "ring", "bracelet", "bangle", "pendant",
-            "dress", "shirt", "top", "bottom", "jewelry", "jewellery",
-            "speakers", "speaker", "subwoofer", "amplifier", "receiver", "streamer",
-            "network player", "home theater", "home theatre", "soundbar",
-        ]
-        for term in product_types:
-            if term in lowered:
-                constraints["product_type"] = term
-                break
-
-        attribute_terms = ["heart", "drop", "wedding", "bridal", "lightweight", "simple", "minimal", "statement", "gold", "silver", "pearl", "diamond", "floral", "daily", "party", "office", "gift"]
-        for term in attribute_terms:
-            if term in lowered:
-                if term in {"wedding", "bridal", "party", "office", "daily"} and not constraints["occasion"]:
-                    constraints["occasion"] = term
-                else:
-                    constraints["attributes"].append(term)
-
-        pref_patterns = {
-            "lightweight": r"\blight\s*weight|lightweight\b",
-            "not flashy": r"\bnot\s+(too\s+)?flashy\b|\bsubtle\b",
-            "budget friendly": r"\bbudget\b|\baffordable\b",
-        }
-        for label, pattern in pref_patterns.items():
-            if re.search(pattern, lowered):
-                constraints["preferences"].append(label)
 
         for neg in re.findall(r"\b(?:not|no|avoid|without)\s+([a-z0-9 -]{2,30})", lowered):
             cleaned = re.sub(r"\b(for|with|and|or|under|below|above|over)\b.*$", "", neg).strip()
@@ -509,51 +474,37 @@ class ShopifyOrchestrator(Orchestrator):
                 constraints["negative_constraints"].append(cleaned)
 
         budget_match = re.search(
-            r"(?:under|below|less than|upto|up to|within)\s*(?:rs\.?|inr|₹)?\s*([0-9][0-9,]*(?:\.\d+)?)\s*(k|thousand|lakh|lac)?\b",
+            r"(?:under|below|less than|upto|up to|within)\s*(?P<currency>[$€£¥₹₨]|[a-z]{3}|rs\.?)?\s*(?P<amount>[0-9][0-9,]*(?:\.\d+)?)\s*(?P<suffix>k|thousand|lakh|lac)?\b",
             lowered,
         )
         if budget_match:
-            amount = float(budget_match.group(1).replace(",", ""))
-            suffix = (budget_match.group(2) or "").strip()
+            amount = float(budget_match.group("amount").replace(",", ""))
+            suffix = (budget_match.group("suffix") or "").strip()
             if suffix in {"k", "thousand"}:
                 amount *= 1_000
             elif suffix in {"lakh", "lac"}:
                 amount *= 100_000
+            currency = (budget_match.group("currency") or "").replace(".", "").upper() or None
+            symbol_currency_map = {
+                "$": "USD",
+                "€": "EUR",
+                "£": "GBP",
+                "¥": "JPY",
+                "₹": "INR",
+                "₨": "INR",
+                "RS": "INR",
+            }
             constraints["budget"] = {
                 "operator": "max",
                 "amount": amount,
-                "currency": "INR" if "₹" in lowered or "inr" in lowered or "rs" in lowered else None,
+                "currency": symbol_currency_map.get(currency, currency),
             }
 
-        recipient_match = re.search(r"\b(?:for|gift for)\s+(wife|husband|mother|mom|sister|friend|girlfriend|boyfriend|bride|wedding gift)\b", lowered)
-        if recipient_match:
-            constraints["recipient_context"] = recipient_match.group(1)
-
-        constraints["attributes"] = sorted(set(constraints["attributes"]))
-        constraints["preferences"] = sorted(set(constraints["preferences"]))
         constraints["negative_constraints"] = sorted(set(constraints["negative_constraints"]))
         return constraints
 
     def _build_search_query(self, query: str, constraints: Dict[str, Any]) -> str:
-        lowered = query.lower()
-        cleaned = re.sub(
-            r"\b(can you|could you|would you|do you have|show me|find me|search for|look for|give me|please show|please find|recommend|show|find|search|give|please|from the store|include prices?|products?|product|items?|some|any|can|could|would|you|me|for|with|and|or)\b",
-            " ",
-            lowered,
-            flags=re.IGNORECASE,
-        )
-        cleaned = re.sub(r"[^a-z0-9\s-]", " ", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        important_terms = [constraints.get("product_type") or ""]
-        important_terms.extend(constraints.get("attributes") or [])
-        if constraints.get("occasion"):
-            important_terms.append(constraints["occasion"])
-        merged = " ".join([cleaned, *important_terms])
-        tokens = []
-        for token in merged.split():
-            if token not in tokens:
-                tokens.append(token)
-        return " ".join(tokens).strip() or query
+        return query.strip()
 
     async def _get_next_action(self) -> Tuple[str, Optional[Dict]]:
         """Consult the LLM to decide the next step."""
@@ -746,30 +697,31 @@ class ShopifyOrchestrator(Orchestrator):
         # Reset last_searched if this was a new search
         if tool_name in ("search_shop_catalog", "search_catalog"):
             self.last_searched = {}
-            ranked_products = self._rerank_products(products)
-            focus_products = self._filter_products_for_constraints(ranked_products)
+            tool_commerce_intent = metadata.get("commerce_intent")
+            if isinstance(tool_commerce_intent, dict):
+                self.last_constraints = tool_commerce_intent
+
+            tool_focus = metadata.get("active_product_focus")
+            if isinstance(tool_focus, list) and tool_focus:
+                focus_source = tool_focus
+            else:
+                focus_source = products
+
+            focus_products = self._normalize_focus_products(focus_source)
             self.active_product_focus = focus_products[:10]
             self.product_reference_map = self._build_product_reference_map(self.active_product_focus)
-            self.rerank_results = [
-                {
-                    "rank": product.get("rank"),
-                    "name": product.get("name"),
-                    "variant_id": product.get("variant_id"),
-                    "match_score": product.get("match_score"),
-                    "matched_constraints": product.get("matched_constraints", []),
-                    "missing_constraints": product.get("missing_constraints", []),
-                    "reason": product.get("reason"),
-                }
-                for product in ranked_products[:10]
-            ]
-            metadata["products"] = focus_products[:5]
+            tool_rerank_results = metadata.get("rerank_results")
+            self.rerank_results = tool_rerank_results if isinstance(tool_rerank_results, list) else []
+
+            final_products = focus_products[:5]
+            metadata["products"] = final_products
             metadata["active_product_focus"] = self.active_product_focus
             metadata["product_reference_map"] = self.product_reference_map
             metadata["commerce_intent"] = self.last_constraints
             metadata["original_query"] = self.last_user_query
             metadata["search_query"] = self.last_search_query
             metadata["rerank_results"] = self.rerank_results
-            result.data = self._format_focus_products_for_prompt(focus_products[:5])
+            result.data = self._format_focus_products_for_prompt(final_products)
             products = metadata.get("products", [])
 
         for p in products:
@@ -788,13 +740,40 @@ class ShopifyOrchestrator(Orchestrator):
         lines = ["Found catalog products:"]
         for index, product in enumerate(products, start=1):
             name = product.get("name") or product.get("title") or product.get("sku") or "Product"
-            price = self._display_price(product.get("price"))
-            currency = str(product.get("currency") or "INR").upper()
-            price_text = f"₹{price:,}" if currency == "INR" and isinstance(price, (int, float)) else f"{currency} {price}"
-            category = product.get("category") or product.get("description") or "General"
+            price_text = self._format_price(product.get("price"), product.get("currency"))
+            details = []
+            category = product.get("category") or product.get("product_type")
+            if category:
+                details.append(str(category))
             sku = product.get("sku") or product.get("id")
-            lines.append(f"{index}. {name} - {price_text} ({category}, SKU: {sku})")
+            if sku:
+                details.append(f"SKU: {sku}")
+            details_text = f" ({', '.join(details)})" if details else ""
+            lines.append(f"{index}. {name} - {price_text}{details_text}")
         return "\n".join(lines)
+
+    def _format_price(self, price: Any, currency: Any = None) -> str:
+        if isinstance(price, dict):
+            currency = currency or price.get("currency") or price.get("currencyCode")
+            price = price.get("amount")
+        display_price = self._display_price(price)
+        if display_price in (None, ""):
+            return "price unavailable"
+        if isinstance(display_price, (int, float)):
+            amount = f"{display_price:,.0f}" if float(display_price).is_integer() else f"{display_price:,.2f}"
+        else:
+            amount = str(display_price)
+        currency_text = str(currency or "").upper().strip()
+        return f"{currency_text} {amount}".strip()
+
+    def _normalize_focus_products(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not isinstance(products, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for idx, product in enumerate(products, start=1):
+            if isinstance(product, dict):
+                normalized.append(self._normalize_focus_product(product, idx))
+        return normalized
 
     def _normalize_focus_product(self, product: Dict[str, Any], original_rank: int) -> Dict[str, Any]:
         name = str(product.get("name") or product.get("title") or product.get("sku") or f"Product {original_rank}")
@@ -816,84 +795,10 @@ class ShopifyOrchestrator(Orchestrator):
         return normalized
 
     def _rerank_products(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if not isinstance(products, list):
-            return []
-        constraints = self.last_constraints or {}
-        original_query_tokens = self._tokens(self.last_user_query or "")
-        ranked: List[Dict[str, Any]] = []
-        max_budget = (constraints.get("budget") or {}).get("amount") if isinstance(constraints.get("budget"), dict) else None
-        desired_terms = set(constraints.get("attributes") or [])
-        if constraints.get("product_type"):
-            desired_terms.add(str(constraints["product_type"]))
-        if constraints.get("occasion"):
-            desired_terms.add(str(constraints["occasion"]))
-        desired_terms.update(constraints.get("preferences") or [])
-
-        for idx, raw_product in enumerate(products, start=1):
-            if not isinstance(raw_product, dict):
-                continue
-            product = self._normalize_focus_product(raw_product, idx)
-            product_text = " ".join(
-                str(product.get(key) or "")
-                for key in ("name", "title", "category", "sku", "description")
-            ).lower()
-            product_tokens = self._tokens(product_text)
-            matched_terms = sorted(term for term in desired_terms if term and term.lower() in product_text)
-            token_overlap = len(original_query_tokens.intersection(product_tokens))
-            score = max(0.0, 1.0 - (idx - 1) * 0.03) + token_overlap * 0.08 + len(matched_terms) * 0.18
-            missing_terms = sorted(term for term in desired_terms if term and term not in matched_terms)
-
-            price = self._to_price(product.get("price"))
-            if max_budget is not None and price is not None:
-                budget = float(max_budget)
-                comparable_price = price / 100 if budget and price > budget * 10 else price
-                if comparable_price <= budget:
-                    score += 0.35
-                    matched_terms.append(f"under budget {max_budget:g}")
-                else:
-                    score -= 0.45
-                    missing_terms.append(f"over budget {max_budget:g}")
-
-            for negative in constraints.get("negative_constraints") or []:
-                if negative and str(negative).lower() in product_text:
-                    score -= 0.5
-                    missing_terms.append(f"avoid {negative}")
-
-            product["match_score"] = round(score, 3)
-            product["matched_constraints"] = sorted(set(matched_terms))
-            product["missing_constraints"] = sorted(set(missing_terms))[:5]
-            if product["matched_constraints"]:
-                product["reason"] = f"Matches {', '.join(product['matched_constraints'][:3])}."
-            else:
-                product["reason"] = "Relevant Shopify catalog result."
-            ranked.append(product)
-
-        ranked.sort(key=lambda p: (p.get("match_score") or 0), reverse=True)
-        for idx, product in enumerate(ranked, start=1):
-            product["rank"] = idx
-        return ranked
+        return self._normalize_focus_products(products)
 
     def _filter_products_for_constraints(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Keep card/focus products aligned with hard user constraints.
-
-        We still rank over-budget products for reasoning, but cards and follow-up
-        references should not include rejected alternatives for max-budget queries.
-        """
-        constraints = self.last_constraints or {}
-        budget = constraints.get("budget") if isinstance(constraints.get("budget"), dict) else {}
-        max_budget = budget.get("amount")
-        if max_budget is None:
-            return products
-
-        filtered = [
-            product
-            for product in products
-            if not any(
-                str(term).lower().startswith("over budget")
-                for term in product.get("missing_constraints", [])
-            )
-        ]
-        return filtered
+        return products
 
     def _build_product_reference_map(self, products: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         reference_map: Dict[str, Dict[str, Any]] = {}
@@ -956,7 +861,7 @@ class ShopifyOrchestrator(Orchestrator):
                 text += f"System: {content}\n"
         
         if is_tool_after_search and has_add_intent:
-            text += "\n[SYSTEM NOTE]: You just found the product and the user wants to add it. You MUST now return the 'update_cart' JSON immediately. ⛔ DO NOT chat or say 'One moment'. Just return the JSON."
+            text += "\n[SYSTEM NOTE]: You just found the product and the user wants to add it. You MUST now return the 'update_cart' JSON immediately. Do not chat or say 'One moment'. Just return the JSON."
         elif is_tool_after_search:
             text += "\n[SYSTEM NOTE]: You just found the product. If the user only asked to see/search, DO NOT add it yet. Ask if they want to add it."
         
@@ -964,7 +869,7 @@ class ShopifyOrchestrator(Orchestrator):
             # Check if we already have the cart info in the last few messages
             has_recent_cart = any(str(m.get("role")) == "tool" and str(m.get("name")) in ["get_cart", "update_cart"] for m in context_window)
             if not has_recent_cart:
-                text += "\n[SYSTEM NOTE]: The user wants to remove/decrease an item. You MUST call 'get_cart' first to find the correct line_id and current quantity. ⛔ DO NOT chat first."
+                text += "\n[SYSTEM NOTE]: The user wants to remove/decrease an item. You MUST call 'get_cart' first to find the correct line_id and current quantity. Do not chat first."
 
         return str(text) + "\nAssistant:"
 
@@ -973,7 +878,7 @@ class ShopifyOrchestrator(Orchestrator):
         if not self.cart_lines:
             return ""
         
-        ctx = "\n### 🛒 CURRENT CART ITEMS (for removal/updates):\n"
+        ctx = "\n### CURRENT CART ITEMS (for removal/updates):\n"
         for line in self.cart_lines:
             if not isinstance(line, dict): continue
             line_id = str(line.get("id") or "unknown")
@@ -990,17 +895,16 @@ class ShopifyOrchestrator(Orchestrator):
         # 1. Format the ACTIVE focus (most recent search)
         active_focus_ctx = ""
         if self.active_product_focus:
-            lines = ["\n### 🎯 ACTIVE PRODUCT FOCUS (MOST RECENT RERANKED RESULTS):\n"]
+            lines = ["\n### ACTIVE PRODUCT FOCUS (MOST RECENT VALIDATED PRODUCTS):\n"]
             for product in self.active_product_focus[:5]:
                 name = product.get("name") or product.get("title")
                 gid = product.get("variant_id") or product.get("id")
-                price = self._display_price(product.get("price"))
-                score = product.get("match_score")
-                lines.append(f"- #{product.get('rank')}: {name} (ID: {gid}, price: {price}, match: {score})\n")
+                price = self._format_price(product.get("price"), product.get("currency"))
+                lines.append(f"- #{product.get('rank')}: {name} (ID: {gid}, price: {price})\n")
             lines.append("--> If the user says 'this', 'it', 'that product', or gives an ordinal like 'second one', resolve against THIS ordered list.\n")
             active_focus_ctx = "".join(lines)
         elif self.last_searched:
-            lines = ["\n### 🎯 ACTIVE PRODUCT FOCUS (MOST RECENT SEARCH):\n"]
+            lines = ["\n### ACTIVE PRODUCT FOCUS (MOST RECENT SEARCH):\n"]
             for title, gid in self.last_searched.items():
                 lines.append(f"- {title} (ID: {gid})\n")
             lines.append("--> If the user says 'yes', 'add it', or 'ok', they mean THIS product.\n")
@@ -1009,7 +913,7 @@ class ShopifyOrchestrator(Orchestrator):
         # 2. Format the broader session history
         history_products_ctx = ""
         if self.captured_ids:
-            lines = ["\n### 📚 SESSION PRODUCT HISTORY:\n"]
+            lines = ["\n### SESSION PRODUCT HISTORY:\n"]
             all_recent = list(self.captured_ids.items())
             num_total = len(all_recent)
             for i in range(max(0, num_total - 10), num_total):
@@ -1067,7 +971,7 @@ Thought: "I've removed one pair of white socks. You now have 1 pair remaining."
 {active_focus_ctx}{history_products_ctx}
 
 ### MANDATORY EXECUTION RULES
-1. **YES / CONFIRMATION HANDLING**: If the user says "yes" or "ok" after a search, use the ID from 🎯 ACTIVE PRODUCT FOCUS. Return the `update_cart` JSON immediately.
+1. **YES / CONFIRMATION HANDLING**: If the user says "yes" or "ok" after a search, use the ID from ACTIVE PRODUCT FOCUS. Return the `update_cart` JSON immediately.
 2. **IMMEDIATE CHAINING**: If user says "add [product]" or "buy [product]":
    - Search if needed, then IMMEDIATELY call `update_cart` in the next iteration. 
    - NEVER ask "Would you like me to add it?" if they already ordered you to add.
@@ -1078,9 +982,9 @@ Thought: "I've removed one pair of white socks. You now have 1 pair remaining."
    - If current quantity is 1: Use `update_cart` with `remove_items`: ["line_id"].
    - If current quantity > 1: Use `update_cart` with `update_items`: [{{"id": "line_id", "quantity": new_qty}}].
 5. **CHECKOUT LINK**: Provide a Checkout URL only after `update_cart` or `get_cart` succeeds and a checkout URL is available. Do not mention checkout URLs for product search/recommendation answers.
-6. **CATALOG PRICE SEMANTICS**: Catalog product prices may be stored in the smallest currency unit. For display, divide large integer prices by 100 and format them as normal customer-facing amounts.
-7. **SOUNDTRAILS CURRENCY**: Soundtrails is an INR storefront. If retrieved catalog text says USD for Soundtrails products, treat that as a stale legacy label and report INR/₹ instead.
-8. **BUDGET ANSWERS**: If the user asks for products under a budget, do not present over-budget products as matching recommendations. If no matching cards/products remain under the budget, say that none were found under the budget and offer to show closest alternatives.
+6. **PRODUCT GROUNDING**: For product search and recommendation answers, use only the products present in the latest tool result or active focus. Do not introduce products, categories, currencies, prices, or availability that are not in that metadata.
+7. **PRICE DISPLAY**: Catalog product prices may be stored in the smallest currency unit. For display, divide large integer prices by 100 and format them as normal customer-facing amounts with the product's own currency when present.
+8. **BUDGET ANSWERS**: If the validated product list is empty for a budget request, say that no matching products were found under that budget and offer to show closest alternatives. Do not apply hidden local filtering or mention internal sources, retrieval, validation, or ranking.
 
 ### OUTPUT FORMAT
 - To call a tool: Return ONLY the JSON object. No chat.

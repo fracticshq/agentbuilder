@@ -18,6 +18,8 @@ import httpx
 import structlog
 
 from app.config import Settings
+from app.connections import connection_manager
+from app.services.commerce_config import normalize_commerce_config
 from app.services.knowledge_service import KnowledgeService
 from .job_store import JobStore
 
@@ -80,22 +82,108 @@ def _to_cents(value: Any) -> int:
         return 0
 
 
-def _shopify_currency(product: Optional[Dict[str, Any]] = None, variant: Optional[Dict[str, Any]] = None) -> str:
-    """Shopify product feeds often omit currency; Soundtrails storefront prices are INR."""
-    for source in (variant or {}, product or {}):
-        currency = source.get("currency") or source.get("currencyCode") or source.get("price_currency")
-        if currency:
-            return str(currency).upper()
-    return "INR"
+def _price_amount(value: Any) -> Any:
+    if isinstance(value, dict):
+        return value.get("amount") or value.get("value") or value.get("price") or 0
+    return value
+
+
+def _normalize_currency(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    currency = str(value).strip()
+    return currency.upper() if currency else None
+
+
+def _extract_catalog_currency(*sources: Optional[Dict[str, Any]]) -> Optional[str]:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+
+        for key in ("currency", "currencyCode", "currency_code", "price_currency", "priceCurrency"):
+            currency = _normalize_currency(source.get(key))
+            if currency:
+                return currency
+
+        for price_key in ("price", "priceV2", "compare_at_price", "compareAtPrice"):
+            price = source.get(price_key)
+            if isinstance(price, dict):
+                currency = _extract_catalog_currency(price)
+                if currency:
+                    return currency
+
+        presentment_prices = source.get("presentment_prices")
+        if isinstance(presentment_prices, list):
+            for presentment in presentment_prices:
+                if not isinstance(presentment, dict):
+                    continue
+                currency = _extract_catalog_currency(presentment.get("price"), presentment)
+                if currency:
+                    return currency
+
+    return None
+
+
+def _currency_with_source(
+    *catalog_sources: Optional[Dict[str, Any]],
+    fallback_currency: Optional[str] = None,
+) -> tuple[Optional[str], str]:
+    catalog_currency = _extract_catalog_currency(*catalog_sources)
+    if catalog_currency:
+        return catalog_currency, "catalog"
+
+    configured_currency = _normalize_currency(fallback_currency)
+    if configured_currency:
+        return configured_currency, "configured_default"
+
+    return None, "missing"
 
 
 def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text or "").strip()
 
 
+async def _resolve_configured_default_currency(brand_id: Optional[str]) -> Optional[str]:
+    if not brand_id:
+        return None
+
+    try:
+        system_db = connection_manager.get_system_db()
+        brand = await system_db.brands.find_one({
+            "$or": [
+                {"id": brand_id},
+                {"slug": brand_id},
+            ]
+        })
+
+        brand_ids = {brand_id}
+        if brand:
+            for key in ("id", "slug"):
+                if brand.get(key):
+                    brand_ids.add(brand[key])
+
+        agent = await system_db.agents.find_one({
+            "$or": [
+                {"id": brand_id},
+                {"brand_id": {"$in": list(brand_ids)}},
+                {"brand_slug": {"$in": list(brand_ids)}},
+            ],
+            "configuration.commerce.default_currency": {"$nin": [None, ""]},
+        })
+        if not agent:
+            return None
+
+        config = agent.get("configuration") or {}
+        commerce = normalize_commerce_config(config.get("commerce"))
+        return _normalize_currency(commerce.get("default_currency"))
+    except Exception as exc:
+        logger.warning("catalog_default_currency_resolution_failed", brand_id=brand_id, error=str(exc))
+        return None
+
+
 # ── Normalizers ───────────────────────────────────────────────────────────────
 
-def _normalize_shopify(data: dict, base_url: str = "") -> List[dict]:
+def _normalize_shopify(data: dict, base_url: str = "", fallback_currency: Optional[str] = None) -> List[dict]:
     items: List[dict] = []
     for product in data.get("products", []):
         title = product.get("title", "")
@@ -110,6 +198,7 @@ def _normalize_shopify(data: dict, base_url: str = "") -> List[dict]:
         variants = product.get("variants", [])
 
         for v in variants:
+            currency, currency_source = _currency_with_source(v, product, fallback_currency=fallback_currency)
             variant_title = v.get("title", "")
             name = f"{title} – {variant_title}" if variant_title and variant_title != "Default Title" else title
             vid = v.get("image_id")
@@ -119,8 +208,9 @@ def _normalize_shopify(data: dict, base_url: str = "") -> List[dict]:
             items.append({
                 "sku": str(v.get("sku") or v.get("id") or uuid.uuid4()),
                 "name": name,
-                "price": _to_cents(v.get("price", 0)),
-                "currency": _shopify_currency(product, v),
+                "price": _to_cents(_price_amount(v.get("price", 0))),
+                "currency": currency,
+                "currency_source": currency_source,
                 "category": product_type,
                 "image_url": v_img,
                 "product_url": product_url,
@@ -130,11 +220,13 @@ def _normalize_shopify(data: dict, base_url: str = "") -> List[dict]:
             })
 
         if not variants:
+            currency, currency_source = _currency_with_source(product, fallback_currency=fallback_currency)
             items.append({
                 "sku": str(product.get("id") or uuid.uuid4()),
                 "name": title,
-                "price": 0,
-                "currency": _shopify_currency(product),
+                "price": _to_cents(_price_amount(product.get("price", 0))),
+                "currency": currency,
+                "currency_source": currency_source,
                 "category": product_type,
                 "image_url": primary_image,
                 "product_url": product_url,
@@ -145,7 +237,7 @@ def _normalize_shopify(data: dict, base_url: str = "") -> List[dict]:
     return items
 
 
-def _normalize_woocommerce(products: list) -> List[dict]:
+def _normalize_woocommerce(products: list, fallback_currency: Optional[str] = None) -> List[dict]:
     items = []
     for p in products:
         cats = p.get("categories", [])
@@ -155,11 +247,13 @@ def _normalize_woocommerce(products: list) -> List[dict]:
         tags = p.get("tags", [])
         features = [t["name"] for t in tags if t.get("name")]
         in_stock = p.get("stock_status", "instock") == "instock"
+        currency, currency_source = _currency_with_source(p, fallback_currency=fallback_currency)
         items.append({
             "sku": p.get("sku") or str(p.get("id") or uuid.uuid4()),
             "name": p.get("name", ""),
             "price": _to_cents(p.get("price") or p.get("regular_price", 0)),
-            "currency": "USD",
+            "currency": currency,
+            "currency_source": currency_source,
             "category": category,
             "image_url": image_url,
             "product_url": p.get("permalink"),
@@ -169,7 +263,7 @@ def _normalize_woocommerce(products: list) -> List[dict]:
     return items
 
 
-def _normalize_schema_org(raw: Any) -> List[dict]:
+def _normalize_schema_org(raw: Any, fallback_currency: Optional[str] = None) -> List[dict]:
     nodes = raw if isinstance(raw, list) else [raw]
     items = []
     for node in nodes:
@@ -182,11 +276,13 @@ def _normalize_schema_org(raw: Any) -> List[dict]:
                 image = v.get("image")
                 if isinstance(image, list):
                     image = image[0] if image else None
+                currency, currency_source = _currency_with_source(offer, v, node, fallback_currency=fallback_currency)
                 items.append({
                     "sku": v.get("sku") or str(uuid.uuid4()),
                     "name": v.get("name") or node.get("name", ""),
                     "price": _to_cents(offer.get("price", 0)),
-                    "currency": offer.get("priceCurrency", "USD"),
+                    "currency": currency,
+                    "currency_source": currency_source,
                     "category": node.get("category", "General"),
                     "image_url": image,
                     "product_url": offer.get("url"),
@@ -202,11 +298,13 @@ def _normalize_schema_org(raw: Any) -> List[dict]:
             image = node.get("image")
             if isinstance(image, list):
                 image = image[0] if image else None
+            currency, currency_source = _currency_with_source(offer, node, fallback_currency=fallback_currency)
             items.append({
                 "sku": node.get("sku") or str(uuid.uuid4()),
                 "name": node.get("name", ""),
                 "price": _to_cents(offer.get("price", 0)),
-                "currency": offer.get("priceCurrency", "USD"),
+                "currency": currency,
+                "currency_source": currency_source,
                 "category": node.get("category", "General"),
                 "image_url": image,
                 "product_url": offer.get("url"),
@@ -241,6 +339,7 @@ async def fetch_shopify_products(
 
     all_items: List[dict] = []
     try:
+        fallback_currency = await _resolve_configured_default_currency(brand_id)
         # Use a client without default redirect following to manage it manually and safely
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
             page_info: Optional[str] = None
@@ -295,7 +394,7 @@ async def fetch_shopify_products(
                 if not products:
                     break
 
-                batch = _normalize_shopify(data, base_url=base)
+                batch = _normalize_shopify(data, base_url=base, fallback_currency=fallback_currency)
                 all_items.extend(batch)
                 await _job_store.update(job_id, {"processed": len(all_items), "total": len(all_items)})
 
@@ -331,7 +430,8 @@ async def _upsert_shopify_catalog_into_knowledge(brand_id: str, items: List[dict
             sku=str(item.get("sku") or item.get("id") or uuid.uuid4()),
             name=item.get("name") or item.get("title") or "Untitled product",
             price=int(item.get("price") or 0),
-            currency=item.get("currency") or "INR",
+            currency=item.get("currency"),
+            currency_source=item.get("currency_source") or ("catalog" if item.get("currency") else "missing"),
             category=item.get("category") or item.get("product_type") or "General",
             image_url=item.get("image_url") or item.get("image"),
             product_url=item.get("product_url") or item.get("url"),
@@ -344,7 +444,7 @@ async def _upsert_shopify_catalog_into_knowledge(brand_id: str, items: List[dict
     await _job_store.update(source_job_id, {"knowledge_job_id": kb_job_id, "knowledge_status": "completed"})
 
 
-async def fetch_json_feed(url: str) -> dict:
+async def fetch_json_feed(url: str, fallback_currency: Optional[str] = None) -> dict:
     """Fetch a JSON URL, auto-detect format, return normalised items + detected format."""
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; AgentBuilder/1.0)",
@@ -358,11 +458,11 @@ async def fetch_json_feed(url: str) -> dict:
 
     fmt = _detect_format(data)
     if fmt == "shopify":
-        items = _normalize_shopify(data)
+        items = _normalize_shopify(data, fallback_currency=fallback_currency)
     elif fmt == "woocommerce":
-        items = _normalize_woocommerce(data)
+        items = _normalize_woocommerce(data, fallback_currency=fallback_currency)
     elif fmt == "schema_org":
-        items = _normalize_schema_org(data)
+        items = _normalize_schema_org(data, fallback_currency=fallback_currency)
     elif fmt == "generic":
         items = data  # pass-through; Map Fields step handles it
     else:
@@ -382,7 +482,13 @@ def parse_csv(content: str) -> List[dict]:
     return rows
 
 
-async def run_firecrawl_scrape(urls: List[str], job_id: str, api_key: str) -> None:
+async def run_firecrawl_scrape(
+    urls: List[str],
+    job_id: str,
+    api_key: str,
+    *,
+    fallback_currency: Optional[str] = None,
+) -> None:
     """Background task: Firecrawl-extract product data from each URL."""
     if not await _job_store.get(job_id):
         return
@@ -489,11 +595,17 @@ async def run_firecrawl_scrape(urls: List[str], job_id: str, api_key: str) -> No
             items: List[dict] = []
             if extracted.get("product_type") == "ProductGroup" and extracted.get("variants"):
                 for v in extracted["variants"]:
+                    currency, currency_source = _currency_with_source(
+                        v,
+                        extracted,
+                        fallback_currency=fallback_currency,
+                    )
                     items.append({
                         "sku": v.get("sku") or str(uuid.uuid4()),
                         "name": v.get("name") or extracted.get("name", ""),
                         "price": _to_cents(v.get("price") or extracted.get("price", 0)),
-                        "currency": extracted.get("currency", "USD"),
+                        "currency": currency,
+                        "currency_source": currency_source,
                         "category": extracted.get("category", "General"),
                         "image_url": v.get("image_url") or extracted.get("image_url"),
                         "product_url": url,
@@ -503,11 +615,16 @@ async def run_firecrawl_scrape(urls: List[str], job_id: str, api_key: str) -> No
                         "size": v.get("size"),
                     })
             else:
+                currency, currency_source = _currency_with_source(
+                    extracted,
+                    fallback_currency=fallback_currency,
+                )
                 items.append({
                     "sku": extracted.get("sku") or str(uuid.uuid4()),
                     "name": extracted.get("name", ""),
                     "price": _to_cents(extracted.get("price", 0)),
-                    "currency": extracted.get("currency", "USD"),
+                    "currency": currency,
+                    "currency_source": currency_source,
                     "category": extracted.get("category", "General"),
                     "image_url": extracted.get("image_url"),
                     "product_url": url,

@@ -43,6 +43,7 @@ from .strapi_client import StrapiClient
 from .runtime_settings_service import RuntimeSettingsService
 from .tool_config_secrets import decrypt_full_agent_configuration_for_runtime
 from .capability_firewall import CapabilityDecision, CapabilityFirewall
+from .commerce_config import is_commerce_agent_config, normalize_commerce_configuration
 from .observability_service import ObservabilityService
 from .prompt_assembler import PromptAssembler
 from .skill_registry import BuiltInSkillRegistry
@@ -183,22 +184,6 @@ def _deduplicate_entities(entities: list[dict], *identity_keys: str) -> list[dic
         unique_entities.append(entity)
 
     return unique_entities
-
-
-def _is_commerce_agent_config(config: dict[str, Any]) -> bool:
-    domain = config.get("domain") or {}
-    template = str(
-        config.get("agent_template")
-        or config.get("template")
-        or domain.get("template")
-        or domain.get("type")
-        or ""
-    ).lower()
-    return (
-        config.get("data_source") == "shopify"
-        or bool(config.get("shopify"))
-        or template in {"ecommerce", "ecommerce_sales", "shopify"}
-    )
 
 
 class MessageService:
@@ -1283,8 +1268,9 @@ Rules:
         if self.retrieval_pipeline:
             self.tool_registry.register(RetrievalTool(self.retrieval_pipeline))
             if (self.agent_config or {}).get("data_source") == "shopify":
-                self.tool_registry.register(CatalogSearchTool(self.retrieval_pipeline, name="search_catalog"))
-                self.tool_registry.register(CatalogSearchTool(self.retrieval_pipeline, name="search_shop_catalog"))
+                commerce_config = (self.agent_config or {}).get("commerce") or {}
+                self.tool_registry.register(CatalogSearchTool(self.retrieval_pipeline, name="search_catalog", commerce_config=commerce_config))
+                self.tool_registry.register(CatalogSearchTool(self.retrieval_pipeline, name="search_shop_catalog", commerce_config=commerce_config))
 
     async def _configure_runtime_dependencies(
         self,
@@ -1422,6 +1408,7 @@ Rules:
                     agent.get("configuration", {}),
                     self.runtime_settings_service,
                 )
+                config = normalize_commerce_configuration(config)
                 normalized_prompt_layers = self.prompt_assembler.normalize_prompt_layers(agent, config)
                 self.agent_config = {
                     **config,
@@ -1912,7 +1899,7 @@ Rules:
 
             tool_results = agent_metadata.get("tool_results", {})
             citations, _products, _dealers = _extract_tool_result_metadata(tool_results)
-            if _is_commerce_agent_config(self.agent_config or {}):
+            if is_commerce_agent_config(self.agent_config or {}):
                 citations = []
             duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
             status_label = "fallback" if agent_metadata.get("fallback") else "success"
@@ -2710,7 +2697,7 @@ Rules:
 
             # Send final metadata (orchestrator handles retrieval internally)
             citations, safe_products, safe_dealers = _extract_tool_result_metadata(tool_results)
-            if _is_commerce_agent_config(self.agent_config or {}):
+            if is_commerce_agent_config(self.agent_config or {}):
                 citations = []
 
             unique_products = _deduplicate_entities(

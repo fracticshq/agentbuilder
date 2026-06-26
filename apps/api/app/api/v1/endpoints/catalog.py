@@ -160,7 +160,8 @@ async def import_shopify(
 async def import_json_feed(req: JsonFeedRequest):
     """Fetch a JSON feed URL and auto-detect its format. Synchronous."""
     try:
-        result = await catalog_service.fetch_json_feed(req.url)
+        fallback_currency = await catalog_service._resolve_configured_default_currency(req.brand_id)
+        result = await catalog_service.fetch_json_feed(req.url, fallback_currency=fallback_currency)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -213,12 +214,14 @@ async def import_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
 
     job_id = str(uuid.uuid4())
     await catalog_service.create_job(job_id, "scrape", total=len(req.urls))
+    fallback_currency = await catalog_service._resolve_configured_default_currency(req.brand_id)
 
     background_tasks.add_task(
         catalog_service.run_firecrawl_scrape,
         req.urls,
         job_id,
         api_key,
+        fallback_currency=fallback_currency,
     )
     return {"job_id": job_id, "status": "processing"}
 
@@ -321,7 +324,8 @@ async def manual_sync(
 
     if source_type == "json_feed":
         try:
-            result = await catalog_service.fetch_json_feed(config["source_url"])
+            fallback_currency = await catalog_service._resolve_configured_default_currency(brand_id)
+            result = await catalog_service.fetch_json_feed(config["source_url"], fallback_currency=fallback_currency)
             return {"status": "completed", **result}
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))

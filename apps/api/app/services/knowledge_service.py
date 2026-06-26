@@ -18,6 +18,7 @@ from pymongo import UpdateOne
 from ..config import Settings
 from ..connections import connection_manager
 from .chunking import chunk_text, resolve_agent_chunking
+from .commerce_config import normalize_commerce_config
 from .job_store import JobStore
 from .qdrant_vector_service import QdrantVectorService
 from .runtime_settings_service import RuntimeSettingsService
@@ -83,6 +84,59 @@ class KnowledgeService:
     def folder_path_from_name(self, name: Optional[str], parent_path: Optional[str] = None) -> str:
         _, clean_name, path = self._normalize_item_path(parent_path, name)
         return path if clean_name else self._normalize_folder_path(parent_path)
+
+    def _normalize_currency(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        currency = str(value).strip()
+        return currency.upper() if currency else None
+
+    async def _resolve_configured_default_currency(
+        self,
+        brand_id: str,
+        brand_scope: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        try:
+            system_db = connection_manager.get_system_db()
+            identifiers = {brand_id}
+            if brand_scope:
+                for key in ("brand_id", "brand_slug", "identifier"):
+                    if brand_scope.get(key):
+                        identifiers.add(brand_scope[key])
+                identifiers.update(alias for alias in brand_scope.get("aliases", []) if alias)
+
+            agent = await system_db.agents.find_one({
+                "$or": [
+                    {"id": {"$in": list(identifiers)}},
+                    {"brand_id": {"$in": list(identifiers)}},
+                    {"brand_slug": {"$in": list(identifiers)}},
+                ],
+                "configuration.commerce.default_currency": {"$nin": [None, ""]},
+            })
+            if not agent:
+                return None
+
+            commerce = normalize_commerce_config((agent.get("configuration") or {}).get("commerce"))
+            return self._normalize_currency(commerce.get("default_currency"))
+        except Exception as exc:
+            logger.warning("knowledge_default_currency_resolution_failed", brand_id=brand_id, error=str(exc))
+            return None
+
+    def _resolve_item_currency(
+        self,
+        item: Any,
+        configured_default_currency: Optional[str] = None,
+    ) -> tuple[Optional[str], str]:
+        item_currency = self._normalize_currency(getattr(item, "currency", None))
+        item_source = getattr(item, "currency_source", None)
+        if item_currency:
+            return item_currency, item_source if item_source in {"catalog", "configured_default"} else "catalog"
+
+        default_currency = self._normalize_currency(configured_default_currency)
+        if default_currency:
+            return default_currency, "configured_default"
+
+        return None, "missing"
 
     async def _get_knowledge_folders_collection(self, brand_id: str):
         db = await self._get_brand_database(brand_id)
@@ -329,6 +383,7 @@ class KnowledgeService:
         try:
             await self._ensure_connection(brand_id)  # Use brand-specific database
             brand_scope = await self._resolve_brand_scope(brand_id)
+            configured_default_currency = await self._resolve_configured_default_currency(brand_id, brand_scope)
             await self.job_store.update(job_id, {"status": "processing"})
 
             # Extract text from document
@@ -377,11 +432,13 @@ class KnowledgeService:
                 
                 # Add structured data if provided
                 if product_data:
+                    currency, currency_source = self._resolve_item_currency(product_data, configured_default_currency)
                     chunk_doc["product_data"] = {
                         "sku": product_data.sku,
                         "name": product_data.name,
                         "price": product_data.price,
-                        "currency": product_data.currency,
+                        "currency": currency,
+                        "currency_source": currency_source,
                         "category": product_data.category,
                         "image_url": product_data.image_url,
                         "product_url": product_data.product_url,
@@ -435,11 +492,18 @@ class KnowledgeService:
         try:
             await self._ensure_connection(brand_id)  # Use brand-specific database
             brand_scope = await self._resolve_brand_scope(brand_id)
+            configured_default_currency = await self._resolve_configured_default_currency(brand_id, brand_scope)
             await self.job_store.update(job_id, {"status": "processing"})
 
             for i, item in enumerate(items):
                 if content_type == "product":
-                    await self._process_product_item(item, brand_id, job_id, brand_scope)
+                    await self._process_product_item(
+                        item,
+                        brand_id,
+                        job_id,
+                        brand_scope,
+                        configured_default_currency=configured_default_currency,
+                    )
                 elif content_type == "dealer":
                     await self._process_dealer_item(item, brand_id, job_id, brand_scope)
 
@@ -458,9 +522,17 @@ class KnowledgeService:
             await self.job_store.update(job_id, {"status": "error", "error": str(e)})
             logger.error("Bulk upload failed", job_id=job_id, error=str(e))
     
-    async def _process_product_item(self, item: Any, brand_id: str, job_id: str, brand_scope: Optional[Dict[str, Any]] = None):
+    async def _process_product_item(
+        self,
+        item: Any,
+        brand_id: str,
+        job_id: str,
+        brand_scope: Optional[Dict[str, Any]] = None,
+        configured_default_currency: Optional[str] = None,
+    ):
         """Process a single product item."""
-        display_price = self._display_product_price(item.price, item.currency)
+        currency, currency_source = self._resolve_item_currency(item, configured_default_currency)
+        display_price = self._display_product_price(item.price, currency)
         # Generate text description for embedding
         text_parts = [
             f"Product: {item.name}",
@@ -499,7 +571,8 @@ class KnowledgeService:
                     "sku": item.sku,
                     "name": item.name,
                     "price": item.price,
-                    "currency": item.currency,
+                    "currency": currency,
+                    "currency_source": currency_source,
                     "category": item.category,
                     "image_url": item.image_url,
                     "product_url": item.product_url,
@@ -539,7 +612,8 @@ class KnowledgeService:
                 amount = f"{display_price:,.2f}"
         except (TypeError, ValueError):
             amount = str(price or "0")
-        return f"{currency or 'INR'} {amount}"
+        currency = self._normalize_currency(currency)
+        return f"{currency} {amount}" if currency else amount
     
     async def _process_dealer_item(self, item: Any, brand_id: str, job_id: str, brand_scope: Optional[Dict[str, Any]] = None):
         """Process a single dealer item."""

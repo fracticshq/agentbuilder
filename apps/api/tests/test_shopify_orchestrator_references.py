@@ -101,22 +101,34 @@ async def test_add_cheaper_one_picks_lowest_price_product():
     assert "lowest-price" in orchestrator.resolved_reference["reason"]
 
 
-def test_rerank_products_uses_full_constraints_not_only_shopify_order():
+def test_catalog_capture_preserves_tool_validated_order_and_metadata():
     orchestrator = ShopifyOrchestrator(FakeLLM(), FakeTools())
     orchestrator.last_user_query = "show me heart drop earrings for wedding under 1500"
-    orchestrator.last_constraints = orchestrator._extract_shopping_constraints(orchestrator.last_user_query)
-    products = [
+    orchestrator.last_search_query = orchestrator.last_user_query
+    tool_products = [
         product(1, "Plain Earrings", "gid://shopify/ProductVariant/1", 120000),
         product(2, "Heart Drop Wedding Earrings", "gid://shopify/ProductVariant/2", 140000),
     ]
+    result = ToolResult(
+        success=True,
+        data="",
+        metadata={
+            "products": tool_products,
+            "commerce_intent": {"budget": {"operator": "max", "amount": 1500, "currency": None}},
+            "rerank_results": [{"rank": 1, "name": "Plain Earrings"}],
+        },
+    )
 
-    ranked = orchestrator._rerank_products(products)
+    orchestrator._capture_result_state("search_catalog", result)
 
-    assert ranked[0]["name"] == "Heart Drop Wedding Earrings"
-    assert "heart" in ranked[0]["matched_constraints"]
-    assert "under budget 1500" in ranked[0]["matched_constraints"]
-    assert "over budget 1500" not in ranked[0]["missing_constraints"]
-    assert ranked[0]["match_score"] > ranked[1]["match_score"]
+    assert [p["name"] for p in result.metadata["products"]] == [
+        "Plain Earrings",
+        "Heart Drop Wedding Earrings",
+    ]
+    assert orchestrator.active_product_focus[0]["name"] == "Plain Earrings"
+    assert orchestrator.last_constraints == result.metadata["commerce_intent"]
+    assert orchestrator.rerank_results == result.metadata["rerank_results"]
+    assert result.data.splitlines()[1].startswith("1. Plain Earrings")
 
 
 def test_reference_add_without_focus_asks_for_clarification_not_tool_call():
@@ -130,12 +142,12 @@ def test_reference_add_without_focus_asks_for_clarification_not_tool_call():
     assert orchestrator.resolved_reference["status"] == "no_focus"
 
 
-def test_active_focus_prompt_displays_minor_unit_prices_as_rupees():
+def test_active_focus_prompt_displays_minor_unit_prices_with_product_currency():
     orchestrator, _ = make_orchestrator([
         product(1, "Heart Drop Earrings", "gid://shopify/ProductVariant/1", 149900),
     ])
 
     prompt = orchestrator._get_combined_system_prompt()
 
-    assert "price: 1499" in prompt
+    assert "price: INR 1,499" in prompt
     assert "price: 149900" not in prompt

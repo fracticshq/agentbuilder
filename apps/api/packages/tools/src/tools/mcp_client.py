@@ -119,7 +119,7 @@ class McpTool(BaseTool):
                     
                     # Price: from variants.price or top-level
                     price = rp.get("price", 0)
-                    currency = rp.get("currency") or rp.get("currencyCode") or "INR"
+                    currency = rp.get("currency") or rp.get("currencyCode")
                     price_range = rp.get("price_range")
                     if not price and isinstance(price_range, dict):
                         min_price = price_range.get("min") or {}
@@ -155,7 +155,8 @@ class McpTool(BaseTool):
                         "sku": sku,
                         "name": name,
                         "price": float(price) if price else 0.0,
-                        "currency": str(currency),
+                        "currency": str(currency).upper() if currency else None,
+                        "currency_source": "product" if currency else "missing",
                         "category": str(rp.get("category") or rp.get("productType") or "General"),
                         "in_stock": bool(rp.get("in_stock") if rp.get("in_stock") is not None else True),
                         "image_url": img,
