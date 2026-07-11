@@ -28,6 +28,92 @@ def test_shopify_normalization_preserves_catalog_currency_before_fallback():
     assert items[0]["currency_source"] == "catalog"
 
 
+def test_shopify_normalization_preserves_parent_and_multi_option_variant_metadata():
+    items = _normalize_shopify(
+        {
+            "products": [
+                {
+                    "id": 991,
+                    "handle": "denon-home-150-wireless-speaker-1",
+                    "title": "Denon Home 150 Wireless Speaker",
+                    "options": [{"name": "Color"}, {"name": "Finish"}],
+                    "variants": [
+                        {
+                            "id": 49151795560721,
+                            "sku": "DENON-BLK",
+                            "title": "Black / Matte",
+                            "option1": "Black",
+                            "option2": "Matte",
+                            "price": "41900.00",
+                        },
+                        {
+                            "id": 49151800443153,
+                            "sku": "DENON-WHT",
+                            "title": "White / Gloss",
+                            "option1": "White",
+                            "option2": "Gloss",
+                            "price": "41900.00",
+                        },
+                    ],
+                }
+            ]
+        },
+        base_url="https://soundtrails.in",
+        fallback_currency="INR",
+    )
+
+    assert len(items) == 2
+    assert items[0]["product_group_id"] == items[1]["product_group_id"] == "shopify:991"
+    assert items[0]["parent_name"] == "Denon Home 150 Wireless Speaker"
+    assert items[0]["has_variants"] is True
+    assert items[0]["variant_count"] == 2
+    assert items[0]["variant_options"] == {"Color": "Black", "Finish": "Matte"}
+    assert items[1]["variant_options"] == {"Color": "White", "Finish": "Gloss"}
+    assert items[0]["variant_url"].endswith("?variant=49151795560721")
+
+
+def test_shopify_normalization_uses_variant_featured_images():
+    items = _normalize_shopify(
+        {
+            "products": [
+                {
+                    "id": 991,
+                    "handle": "denon-home-150-wireless-speaker-1",
+                    "title": "Denon Home 150 Wireless Speaker",
+                    "images": [
+                        {"id": 1, "src": "https://cdn.example.com/black.jpg", "variant_ids": [49151795560721]},
+                        {"id": 2, "src": "https://cdn.example.com/white-fallback.jpg", "variant_ids": [49151800443153]},
+                    ],
+                    "options": [{"name": "Colour"}],
+                    "variants": [
+                        {
+                            "id": 49151795560721,
+                            "sku": "DENON-BLK",
+                            "title": "Black",
+                            "option1": "Black",
+                            "price": "41900.00",
+                            "featured_image": {"src": "https://cdn.example.com/black-featured.jpg"},
+                        },
+                        {
+                            "id": 49151800443153,
+                            "sku": "DENON-WHT",
+                            "title": "White",
+                            "option1": "White",
+                            "price": "41900.00",
+                            "featured_image": {"src": "https://cdn.example.com/white-featured.jpg"},
+                        },
+                    ],
+                }
+            ]
+        },
+        base_url="https://soundtrails.in",
+        fallback_currency="INR",
+    )
+
+    assert items[0]["image_url"] == "https://cdn.example.com/black-featured.jpg"
+    assert items[1]["image_url"] == "https://cdn.example.com/white-featured.jpg"
+
+
 def test_catalog_normalization_marks_missing_or_configured_currency():
     shopify_items = _normalize_shopify(
         {"products": [{"id": 1, "title": "Mystery Item", "variants": [{"id": 11, "price": "10"}]}]}

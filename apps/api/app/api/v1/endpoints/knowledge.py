@@ -3,7 +3,9 @@ Knowledge Base API Endpoints - Enhanced with Structured Metadata
 Supports both document uploads and bulk JSON imports with product/dealer data
 """
 
-from typing import List, Optional, Literal
+import re
+from typing import Any, Dict, List, Optional, Literal
+from urllib.parse import urlsplit, urlunsplit
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, BackgroundTasks, Body
 from pydantic import BaseModel, Field
 import structlog
@@ -32,6 +34,19 @@ class ProductData(BaseModel):
     product_url: Optional[str] = Field(None, description="Product page URL")
     in_stock: Optional[bool] = Field(True, description="Stock availability")
     features: Optional[List[str]] = Field(default_factory=list, description="Product features/tags")
+    product_group_id: Optional[str] = None
+    handle: Optional[str] = None
+    parent_name: Optional[str] = None
+    has_variants: Optional[bool] = None
+    variant_count: Optional[int] = None
+    price_min: Optional[int] = None
+    price_max: Optional[int] = None
+    default_variant_id: Optional[str] = None
+    variant_id: Optional[str] = None
+    variant_sku: Optional[str] = None
+    variant_title: Optional[str] = None
+    variant_options: Optional[dict] = Field(default_factory=dict)
+    variant_url: Optional[str] = None
 
 
 class DealerData(BaseModel):
@@ -66,6 +81,19 @@ class BulkUploadItem(BaseModel):
     product_url: Optional[str] = None
     in_stock: Optional[bool] = None
     features: Optional[List[str]] = None
+    product_group_id: Optional[str] = None
+    handle: Optional[str] = None
+    parent_name: Optional[str] = None
+    has_variants: Optional[bool] = None
+    variant_count: Optional[int] = None
+    price_min: Optional[int] = None
+    price_max: Optional[int] = None
+    default_variant_id: Optional[str] = None
+    variant_id: Optional[str] = None
+    variant_sku: Optional[str] = None
+    variant_title: Optional[str] = None
+    variant_options: Optional[dict] = Field(default_factory=dict)
+    variant_url: Optional[str] = None
     
     # For dealers
     dealer_id: Optional[str] = None
@@ -734,6 +762,182 @@ class ProductsBySkusRequest(BaseModel):
     agent_id: str = Field(..., description="Agent ID to determine brand database")
 
 
+def _base_product_url(url: Any) -> Optional[str]:
+    if url in (None, ""):
+        return None
+    try:
+        parts = urlsplit(str(url))
+        if not parts.scheme or not parts.netloc:
+            return re.sub(r"\?.*$", "", str(url)).rstrip("/")
+        return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+    except Exception:
+        return re.sub(r"\?.*$", "", str(url)).rstrip("/")
+
+
+def _product_group_key(product: Dict[str, Any]) -> Optional[str]:
+    for key in ("product_group_id", "product_id", "handle"):
+        value = product.get(key)
+        if value not in (None, ""):
+            return f"{key}:{str(value).strip().lower()}"
+    base_url = _base_product_url(product.get("product_url") or product.get("url") or product.get("variant_url"))
+    if base_url:
+        return f"url:{base_url.lower()}"
+    return None
+
+
+def _variant_identity(product: Dict[str, Any]) -> Optional[str]:
+    for key in ("variant_id", "variant_sku", "sku", "variant_url", "id"):
+        value = product.get(key)
+        if value not in (None, ""):
+            return re.sub(r"\s+", " ", str(value).strip().lower())
+    return None
+
+
+def _product_card_from_data(product_data: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "sku": product_data.get("sku"),
+        "name": product_data.get("parent_name") or product_data.get("name", "Unknown Product"),
+        "price": product_data.get("price", 0),
+        "currency": product_data.get("currency"),
+        "currency_source": product_data.get("currency_source", "missing"),
+        "category": product_data.get("category", "Uncategorized"),
+        "in_stock": product_data.get("in_stock", True),
+        "features": product_data.get("features", []),
+        "image_url": product_data.get("image_url"),
+        "image": product_data.get("image"),
+        "product_url": product_data.get("product_url") or product_data.get("url"),
+        "url": product_data.get("url") or product_data.get("product_url"),
+        "product_group_id": product_data.get("product_group_id"),
+        "product_id": product_data.get("product_id"),
+        "handle": product_data.get("handle"),
+        "parent_name": product_data.get("parent_name"),
+        "has_variants": product_data.get("has_variants"),
+        "variant_count": product_data.get("variant_count"),
+        "price_min": product_data.get("price_min"),
+        "price_max": product_data.get("price_max"),
+        "default_variant_id": product_data.get("default_variant_id"),
+        "variant_id": product_data.get("variant_id"),
+        "variant_sku": product_data.get("variant_sku"),
+        "variant_title": product_data.get("variant_title"),
+        "variant_options": product_data.get("variant_options") or {},
+        "variant_url": product_data.get("variant_url"),
+    }
+
+
+def _variant_from_product(product: Dict[str, Any], selected: Dict[str, Any]) -> Dict[str, Any]:
+    variant_options = product.get("variant_options")
+    if not isinstance(variant_options, dict):
+        variant_options = {}
+    return {
+        "id": product.get("variant_id") or product.get("sku"),
+        "variant_id": product.get("variant_id") or product.get("sku"),
+        "sku": product.get("variant_sku") or product.get("sku"),
+        "variant_sku": product.get("variant_sku") or product.get("sku"),
+        "name": product.get("name"),
+        "title": product.get("variant_title") or product.get("name"),
+        "variant_title": product.get("variant_title"),
+        "variant_options": variant_options,
+        "price": product.get("price"),
+        "currency": product.get("currency"),
+        "currency_source": product.get("currency_source"),
+        "image_url": product.get("image_url") or product.get("image"),
+        "image": product.get("image") or product.get("image_url"),
+        "product_url": product.get("product_url") or product.get("url"),
+        "variant_url": product.get("variant_url") or product.get("product_url") or product.get("url"),
+        "in_stock": product.get("in_stock", True),
+        "is_default": _variant_identity(product) == _variant_identity(selected),
+    }
+
+
+def _variant_group_queries(product: Dict[str, Any]) -> List[Dict[str, Any]]:
+    queries: List[Dict[str, Any]] = []
+    for key in ("product_group_id", "product_id", "handle"):
+        value = product.get(key)
+        if value not in (None, ""):
+            queries.append({f"product_data.{key}": value})
+    base_url = _base_product_url(product.get("product_url") or product.get("url") or product.get("variant_url"))
+    if base_url:
+        escaped = re.escape(base_url.rstrip("/"))
+        queries.append({
+            "$or": [
+                {"product_data.product_url": base_url},
+                {"product_data.url": base_url},
+                {"product_data.variant_url": {"$regex": rf"^{escaped}(?:/)?(?:\?.*)?$"}},
+            ]
+        })
+    return queries
+
+
+async def _hydrate_product_cards(kb_collection: Any, products: List[Dict[str, Any]], max_variants: int = 100) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    order: List[str] = []
+    for index, product in enumerate(products):
+        product["_variant_rank"] = index
+        group_key = _product_group_key(product) or _variant_identity(product) or f"product:{index}"
+        if group_key not in grouped:
+            grouped[group_key] = []
+            order.append(group_key)
+        grouped[group_key].append(product)
+
+    hydrated_products: List[Dict[str, Any]] = []
+    for group_key in order:
+        group_products = grouped[group_key]
+        selected = sorted(
+            group_products,
+            key=lambda item: (
+                int(item.get("_variant_rank") or 9999),
+                0 if item.get("in_stock", True) else 1,
+                float(item.get("price") or 10**18),
+            ),
+        )[0]
+        siblings: List[Dict[str, Any]] = []
+        for query in _variant_group_queries(selected):
+            cursor = kb_collection.find({"content_type": "product", **query})
+            async for doc in cursor:
+                product_data = doc.get("product_data", {})
+                if product_data and product_data.get("sku"):
+                    siblings.append(_product_card_from_data(product_data))
+                if len(siblings) >= max_variants:
+                    break
+            if siblings:
+                break
+
+        combined: List[Dict[str, Any]] = []
+        seen = set()
+        for product in [*group_products, *siblings]:
+            identity = _variant_identity(product)
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            combined.append(product)
+
+        combined = sorted(
+            combined,
+            key=lambda item: (
+                0 if _variant_identity(item) == _variant_identity(selected) else 1,
+                int(item.get("_variant_rank") or 9999),
+                0 if item.get("in_stock", True) else 1,
+                float(item.get("price") or 10**18),
+                _variant_identity(item) or "",
+            ),
+        )
+        variants = [_variant_from_product(product, selected) for product in combined]
+        prices = [float(variant["price"]) for variant in variants if variant.get("price") not in (None, "")]
+        card = dict(selected)
+        card["name"] = selected.get("parent_name") or selected.get("name") or "Unknown Product"
+        card["has_variants"] = len(variants) > 1 or bool(selected.get("has_variants"))
+        card["variant_count"] = max(int(selected.get("variant_count") or 0), len(variants))
+        card["variants"] = variants
+        card["default_variant_id"] = selected.get("variant_id") or selected.get("default_variant_id") or selected.get("sku")
+        if prices:
+            card["price_min"] = min(prices)
+            card["price_max"] = max(prices)
+        card.pop("_variant_rank", None)
+        hydrated_products.append(card)
+
+    return hydrated_products
+
+
 @router.post("/products/by-skus")
 async def get_products_by_skus(
     request: ProductsBySkusRequest,
@@ -758,6 +962,14 @@ async def get_products_by_skus(
         brand_slug = agent.get('brand_slug')
         if not brand_slug:
             raise HTTPException(status_code=400, detail="Agent has no brand_slug configured")
+
+        commerce_config = ((agent.get("configuration") or {}).get("commerce") or {})
+        retrieval_config = commerce_config.get("retrieval") if isinstance(commerce_config, dict) else {}
+        try:
+            max_variants = int((retrieval_config or {}).get("max_variants_per_card") or 100)
+        except (TypeError, ValueError):
+            max_variants = 100
+        max_variants = max(1, min(max_variants, 500))
         
         # Get brand database using connection manager helper
         try:
@@ -773,7 +985,7 @@ async def get_products_by_skus(
         kb_collection = brand_db['knowledge_base']
         
         # Fetch products by SKUs
-        products = []
+        matched_products = []
         cursor = kb_collection.find({
             'content_type': 'product',
             'product_data.sku': {'$in': request.skus}
@@ -782,18 +994,9 @@ async def get_products_by_skus(
         async for doc in cursor:
             product_data = doc.get('product_data', {})
             if product_data and product_data.get('sku'):
-                products.append({
-                    'sku': product_data.get('sku'),
-                    'name': product_data.get('name', 'Unknown Product'),
-                    'price': product_data.get('price', 0),
-                    'currency': product_data.get('currency'),
-                    'currency_source': product_data.get('currency_source', 'missing'),
-                    'category': product_data.get('category', 'Uncategorized'),
-                    'in_stock': product_data.get('in_stock', True),
-                    'features': product_data.get('features', []),
-                    'image_url': product_data.get('image_url'),
-                    'product_url': product_data.get('product_url')
-                })
+                matched_products.append(_product_card_from_data(product_data))
+
+        products = await _hydrate_product_cards(kb_collection, matched_products, max_variants=max_variants)
         
         logger.info(
             "Fetched products by SKUs",

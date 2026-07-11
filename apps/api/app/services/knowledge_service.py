@@ -138,6 +138,29 @@ class KnowledgeService:
 
         return None, "missing"
 
+    def _product_variant_metadata(self, item: Any) -> Dict[str, Any]:
+        fields = (
+            "product_group_id",
+            "handle",
+            "parent_name",
+            "has_variants",
+            "variant_count",
+            "price_min",
+            "price_max",
+            "default_variant_id",
+            "variant_id",
+            "variant_sku",
+            "variant_title",
+            "variant_options",
+            "variant_url",
+        )
+        metadata: Dict[str, Any] = {}
+        for field in fields:
+            value = getattr(item, field, None)
+            if value not in (None, "", [], {}):
+                metadata[field] = value
+        return metadata
+
     async def _get_knowledge_folders_collection(self, brand_id: str):
         db = await self._get_brand_database(brand_id)
         return db["knowledge_folders"]
@@ -445,6 +468,7 @@ class KnowledgeService:
                         "in_stock": product_data.in_stock,
                         "features": product_data.features or []
                     }
+                    chunk_doc["product_data"].update(self._product_variant_metadata(product_data))
                 
                 if dealer_data:
                     chunk_doc["dealer_data"] = {
@@ -540,6 +564,15 @@ class KnowledgeService:
             f"Category: {item.category}",
             f"Price: {display_price}"
         ]
+        if getattr(item, "parent_name", None) and getattr(item, "parent_name") != item.name:
+            text_parts.append(f"Parent Product: {item.parent_name}")
+        if getattr(item, "variant_title", None):
+            text_parts.append(f"Variant: {item.variant_title}")
+        variant_options = getattr(item, "variant_options", None)
+        if isinstance(variant_options, dict) and variant_options:
+            text_parts.append(
+                "Options: " + ", ".join(f"{key}: {value}" for key, value in variant_options.items())
+            )
         
         if item.features:
             text_parts.append(f"Features: {', '.join(item.features)}")
@@ -588,6 +621,7 @@ class KnowledgeService:
                     "created_at": datetime.utcnow().isoformat()
                 }
             }
+            chunk_doc["product_data"].update(self._product_variant_metadata(item))
             
             # Upsert to MongoDB (update if SKU exists, insert if new)
             await self.collection.update_one(

@@ -3,7 +3,7 @@ import types
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 
-from app.api.v1.endpoints.knowledge import upload_document
+from app.api.v1.endpoints.knowledge import _hydrate_product_cards, _product_card_from_data, upload_document
 from app.config import Settings
 from app.services.knowledge_service import KnowledgeService
 
@@ -20,6 +20,86 @@ async def test_detect_source_type_uses_mime_or_extension(knowledge_service):
     assert knowledge_service.detect_source_type("text/plain; charset=utf-8", "notes.txt") == "txt"
     assert knowledge_service.detect_source_type("", "catalog.csv") == "csv"
     assert knowledge_service.detect_source_type("application/octet-stream", "archive.zip") is None
+
+
+@pytest.mark.asyncio
+async def test_products_by_skus_hydrates_variant_siblings_for_card_payload():
+    class FakeCursor:
+        def __init__(self, rows):
+            self.rows = rows
+            self.index = 0
+
+        def __aiter__(self):
+            self.index = 0
+            return self
+
+        async def __anext__(self):
+            if self.index >= len(self.rows):
+                raise StopAsyncIteration
+            row = self.rows[self.index]
+            self.index += 1
+            return row
+
+    class FakeCollection:
+        def __init__(self, rows):
+            self.rows = rows
+            self.queries = []
+
+        def find(self, query):
+            self.queries.append(query)
+            group_id = query.get("product_data.product_group_id")
+            rows = [
+                row
+                for row in self.rows
+                if row.get("content_type") == query.get("content_type")
+                and row.get("product_data", {}).get("product_group_id") == group_id
+            ]
+            return FakeCursor(rows)
+
+    rows = [
+        {
+            "content_type": "product",
+            "product_data": {
+                "sku": "DENON-BLK",
+                "name": "Denon Home 150 - Black",
+                "parent_name": "Denon Home 150",
+                "product_group_id": "shopify:denon-home-150",
+                "variant_id": "black",
+                "variant_sku": "DENON-BLK",
+                "variant_options": {"Colour": "Black"},
+                "price": 4190000,
+                "currency": "INR",
+                "product_url": "https://example.com/products/denon-home-150",
+                "variant_url": "https://example.com/products/denon-home-150?variant=black",
+            },
+        },
+        {
+            "content_type": "product",
+            "product_data": {
+                "sku": "DENON-WHT",
+                "name": "Denon Home 150 - White",
+                "parent_name": "Denon Home 150",
+                "product_group_id": "shopify:denon-home-150",
+                "variant_id": "white",
+                "variant_sku": "DENON-WHT",
+                "variant_options": {"Colour": "White"},
+                "price": 4290000,
+                "currency": "INR",
+                "product_url": "https://example.com/products/denon-home-150",
+                "variant_url": "https://example.com/products/denon-home-150?variant=white",
+            },
+        },
+    ]
+    collection = FakeCollection(rows)
+    selected_product = _product_card_from_data(rows[0]["product_data"])
+
+    products = await _hydrate_product_cards(collection, [selected_product])
+
+    assert len(products) == 1
+    assert products[0]["name"] == "Denon Home 150"
+    assert products[0]["variant_count"] == 2
+    assert [variant["variant_sku"] for variant in products[0]["variants"]] == ["DENON-BLK", "DENON-WHT"]
+    assert products[0]["variants"][0]["is_default"] is True
 
 
 @pytest.mark.asyncio

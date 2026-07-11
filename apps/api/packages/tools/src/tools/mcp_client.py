@@ -2,10 +2,54 @@ import httpx
 import uuid
 import json
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 import structlog
 from .types import BaseTool, ToolResult
 
 logger = structlog.get_logger(__name__)
+
+
+def _base_product_url(url: Any) -> Optional[str]:
+    if url in (None, ""):
+        return None
+    try:
+        parts = urlsplit(str(url))
+        if not parts.scheme or not parts.netloc:
+            return str(url).split("?", 1)[0].rstrip("/")
+        return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+    except Exception:
+        return str(url).split("?", 1)[0].rstrip("/")
+
+
+def _variant_url(product_url: Any, variant_id: Any) -> Optional[str]:
+    if product_url in (None, ""):
+        return None
+    base_url = _base_product_url(product_url) or str(product_url)
+    if variant_id in (None, ""):
+        return base_url
+    separator = "&" if "?" in base_url else "?"
+    return f"{base_url}{separator}variant={variant_id}"
+
+
+def _variant_options(raw_variant: Dict[str, Any]) -> Dict[str, str]:
+    options = raw_variant.get("variant_options") or raw_variant.get("selectedOptions") or raw_variant.get("selected_options")
+    if isinstance(options, dict):
+        return {str(key): str(value) for key, value in options.items() if value not in (None, "")}
+    if isinstance(options, list):
+        normalized: Dict[str, str] = {}
+        for index, option in enumerate(options, start=1):
+            if isinstance(option, dict):
+                name = option.get("name") or option.get("label") or f"Option {index}"
+                value = option.get("value")
+                if value not in (None, ""):
+                    normalized[str(name)] = str(value)
+        return normalized
+    normalized = {}
+    for index in range(1, 4):
+        value = raw_variant.get(f"option{index}")
+        if value not in (None, ""):
+            normalized[f"Option {index}"] = str(value)
+    return normalized
 
 class McpTool(BaseTool):
     """Dynamic tool instance for a remote Model Context Protocol (MCP) tool."""
@@ -84,7 +128,7 @@ class McpTool(BaseTool):
                 # Use parsed_json or result dict as the data source
                 data_source = parsed_json if parsed_json is not None else result
                 
-                # ── Extract Products (search_catalog/search_shop_catalog/get_product_details) ──
+                # ── Extract Products (search_shop_catalog, get_product_details) ──
                 raw_products = []
                 if isinstance(data_source, dict):
                     if "products" in data_source:
@@ -148,6 +192,41 @@ class McpTool(BaseTool):
                             img = rp["media"][0].get("url")
                         elif isinstance(rp.get("featuredImage"), dict):
                             img = rp["featuredImage"].get("url")
+
+                    product_url = rp.get("product_url") or rp.get("url")
+                    normalized_variants = []
+                    for raw_variant in variants_list:
+                        if not isinstance(raw_variant, dict):
+                            continue
+                        raw_variant_id = raw_variant.get("variant_id") or raw_variant.get("id")
+                        raw_variant_sku = raw_variant.get("sku") or raw_variant_id or sku
+                        raw_variant_price = raw_variant.get("price") or price
+                        raw_variant_currency = (
+                            raw_variant.get("currency")
+                            or raw_variant.get("currencyCode")
+                            or currency
+                        )
+                        if isinstance(raw_variant_price, dict):
+                            raw_variant_currency = raw_variant_price.get("currency") or raw_variant_currency
+                            raw_variant_price = raw_variant_price.get("amount", 0)
+                        normalized_variants.append({
+                            "id": str(raw_variant_id or raw_variant_sku),
+                            "variant_id": str(raw_variant_id or raw_variant_sku),
+                            "sku": str(raw_variant_sku),
+                            "variant_sku": str(raw_variant_sku),
+                            "title": raw_variant.get("title") or raw_variant.get("name"),
+                            "variant_title": raw_variant.get("title") or raw_variant.get("name"),
+                            "variant_options": _variant_options(raw_variant),
+                            "price": float(raw_variant_price) if raw_variant_price else 0.0,
+                            "currency": str(raw_variant_currency).upper() if raw_variant_currency else None,
+                            "currency_source": "product" if raw_variant_currency else "missing",
+                            "image_url": raw_variant.get("image_url") or raw_variant.get("image") or img,
+                            "product_url": product_url,
+                            "variant_url": _variant_url(product_url, raw_variant_id),
+                            "in_stock": bool(raw_variant.get("in_stock") if raw_variant.get("in_stock") is not None else True),
+                            "is_default": raw_variant_id == variant_id,
+                        })
+                    variant_prices = [variant["price"] for variant in normalized_variants if variant.get("price")]
                             
                     metadata["products"].append({
                         "id": p_id,
@@ -160,7 +239,15 @@ class McpTool(BaseTool):
                         "category": str(rp.get("category") or rp.get("productType") or "General"),
                         "in_stock": bool(rp.get("in_stock") if rp.get("in_stock") is not None else True),
                         "image_url": img,
-                        "product_url": rp.get("product_url") or rp.get("url")
+                        "product_url": product_url,
+                        "product_group_id": str(rp.get("product_group_id") or rp.get("product_id") or rp.get("id") or _base_product_url(product_url) or p_id),
+                        "handle": rp.get("handle"),
+                        "has_variants": len(normalized_variants) > 1,
+                        "variant_count": len(normalized_variants),
+                        "price_min": min(variant_prices) if variant_prices else None,
+                        "price_max": max(variant_prices) if variant_prices else None,
+                        "default_variant_id": str(variant_id) if variant_id else None,
+                        "variants": normalized_variants,
                     })
                 
                 # ── Extract Cart (update_cart, get_cart) ──

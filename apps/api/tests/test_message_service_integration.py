@@ -36,6 +36,49 @@ def _empty_memory_context() -> dict:
     }
 
 
+def test_commerce_response_preparation_groups_flat_url_sibling_variants():
+    from app.services.message_service import _prepare_commerce_products_for_response
+
+    products = [
+        {
+            "sku": "49151795560721",
+            "id": "49151795560721",
+            "name": "Denon Home 150 - Wireless Speaker – Black",
+            "price": 4190000,
+            "currency": "INR",
+            "product_url": "https://example.com/products/denon-home-150-wireless-speaker-1",
+            "image_url": "https://example.com/black.jpg",
+            "in_stock": True,
+        },
+        {
+            "sku": "49151800443153",
+            "id": "49151800443153",
+            "name": "Denon Home 150 - Wireless Speaker – White",
+            "price": 4190000,
+            "currency": "INR",
+            "product_url": "https://example.com/products/denon-home-150-wireless-speaker-1",
+            "image_url": "https://example.com/white.jpg",
+            "in_stock": True,
+        },
+    ]
+
+    grouped = _prepare_commerce_products_for_response(
+        products,
+        {
+            "commerce": {
+                "default_currency": "INR",
+                "currency_policy": "catalog_first_config_fallback",
+            }
+        },
+    )
+
+    assert len(grouped) == 1
+    assert grouped[0]["name"] == "Denon Home 150 - Wireless Speaker"
+    assert grouped[0]["variant_count"] == 2
+    assert grouped[0]["variants"][0]["variant_options"] == {"Variant": "Black"}
+    assert grouped[0]["variants"][1]["variant_options"] == {"Variant": "White"}
+
+
 @pytest.fixture
 def service_bundle():
     settings = _make_settings()

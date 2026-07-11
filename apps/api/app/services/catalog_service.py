@@ -143,6 +143,77 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text or "").strip()
 
 
+def _shopify_product_group_id(product: Dict[str, Any], handle: str, product_url: Optional[str]) -> str:
+    product_id = (
+        product.get("admin_graphql_api_id")
+        or product.get("graphql_id")
+        or product.get("id")
+        or handle
+        or product_url
+        or uuid.uuid4()
+    )
+    return f"shopify:{product_id}"
+
+
+def _shopify_option_names(product: Dict[str, Any]) -> List[str]:
+    raw_options = product.get("options") or []
+    option_names: List[str] = []
+    if isinstance(raw_options, list):
+        for index, option in enumerate(raw_options, start=1):
+            if isinstance(option, dict):
+                option_names.append(str(option.get("name") or f"Option {index}"))
+            elif option not in (None, ""):
+                option_names.append(str(option))
+    while len(option_names) < 3:
+        option_names.append(f"Option {len(option_names) + 1}")
+    return option_names[:3]
+
+
+def _shopify_variant_options(variant: Dict[str, Any], option_names: List[str]) -> Dict[str, str]:
+    options: Dict[str, str] = {}
+    for index, option_name in enumerate(option_names, start=1):
+        value = variant.get(f"option{index}")
+        if value not in (None, "", "Default Title"):
+            options[str(option_name)] = str(value)
+    return options
+
+
+def _shopify_variant_url(product_url: Optional[str], variant_id: Any) -> Optional[str]:
+    if not product_url or variant_id in (None, ""):
+        return product_url
+    separator = "&" if "?" in product_url else "?"
+    return f"{product_url}{separator}variant={variant_id}"
+
+
+def _shopify_image_src(image: Any) -> Optional[str]:
+    if isinstance(image, dict):
+        src = image.get("src") or image.get("url")
+        return str(src) if src not in (None, "") else None
+    if image not in (None, ""):
+        return str(image)
+    return None
+
+
+def _shopify_variant_image(variant: Dict[str, Any], images: List[Any], primary_image: Optional[str]) -> Optional[str]:
+    featured_image = variant.get("featured_image") or variant.get("image")
+    featured_src = _shopify_image_src(featured_image)
+    if featured_src:
+        return featured_src
+
+    variant_id = variant.get("id")
+    image_id = variant.get("image_id")
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        if image_id not in (None, "") and image.get("id") == image_id:
+            return _shopify_image_src(image) or primary_image
+        variant_ids = image.get("variant_ids")
+        if variant_id not in (None, "") and isinstance(variant_ids, list) and variant_id in variant_ids:
+            return _shopify_image_src(image) or primary_image
+
+    return primary_image
+
+
 async def _resolve_configured_default_currency(brand_id: Optional[str]) -> Optional[str]:
     if not brand_id:
         return None
@@ -191,23 +262,32 @@ def _normalize_shopify(data: dict, base_url: str = "", fallback_currency: Option
         vendor = product.get("vendor", "")
         handle = product.get("handle", "")
         product_url = f"{base_url}/products/{handle}" if handle and base_url else None
+        product_group_id = _shopify_product_group_id(product, handle, product_url)
+        option_names = _shopify_option_names(product)
         images = product.get("images", [])
-        primary_image = images[0].get("src") if images else None
+        primary_image = _shopify_image_src(images[0]) if images else None
         raw_tags = product.get("tags", "")
         features = [t.strip() for t in (raw_tags.split(",") if isinstance(raw_tags, str) else raw_tags) if t.strip()]
         variants = product.get("variants", [])
+        variant_count = len(variants)
+        variant_prices = [_to_cents(_price_amount(v.get("price", 0))) for v in variants if isinstance(v, dict)]
+        price_min = min(variant_prices) if variant_prices else None
+        price_max = max(variant_prices) if variant_prices else None
+        default_variant_id = str(variants[0].get("id")) if variants and variants[0].get("id") not in (None, "") else None
 
         for v in variants:
             currency, currency_source = _currency_with_source(v, product, fallback_currency=fallback_currency)
             variant_title = v.get("title", "")
             name = f"{title} – {variant_title}" if variant_title and variant_title != "Default Title" else title
-            vid = v.get("image_id")
-            v_img = next((img["src"] for img in images if img.get("id") == vid), primary_image)
+            v_img = _shopify_variant_image(v, images, primary_image)
             inv_qty = v.get("inventory_quantity")
             in_stock = (inv_qty is None or inv_qty > 0) or v.get("inventory_policy") == "continue"
+            variant_id = str(v.get("id")) if v.get("id") not in (None, "") else None
+            variant_sku = str(v.get("sku") or variant_id or uuid.uuid4())
             items.append({
-                "sku": str(v.get("sku") or v.get("id") or uuid.uuid4()),
+                "sku": variant_sku,
                 "name": name,
+                "parent_name": title,
                 "price": _to_cents(_price_amount(v.get("price", 0))),
                 "currency": currency,
                 "currency_source": currency_source,
@@ -217,6 +297,18 @@ def _normalize_shopify(data: dict, base_url: str = "", fallback_currency: Option
                 "in_stock": bool(in_stock),
                 "features": features,
                 "vendor": vendor,
+                "handle": handle,
+                "product_group_id": product_group_id,
+                "has_variants": variant_count > 1,
+                "variant_count": variant_count,
+                "price_min": price_min,
+                "price_max": price_max,
+                "default_variant_id": default_variant_id,
+                "variant_id": variant_id,
+                "variant_sku": variant_sku,
+                "variant_title": variant_title if variant_title and variant_title != "Default Title" else None,
+                "variant_options": _shopify_variant_options(v, option_names),
+                "variant_url": _shopify_variant_url(product_url, variant_id),
             })
 
         if not variants:
@@ -233,6 +325,14 @@ def _normalize_shopify(data: dict, base_url: str = "", fallback_currency: Option
                 "in_stock": True,
                 "features": features,
                 "vendor": vendor,
+                "handle": handle,
+                "product_group_id": product_group_id,
+                "has_variants": False,
+                "variant_count": 0,
+                "price_min": None,
+                "price_max": None,
+                "default_variant_id": None,
+                "variant_options": {},
             })
     return items
 
@@ -437,6 +537,19 @@ async def _upsert_shopify_catalog_into_knowledge(brand_id: str, items: List[dict
             product_url=item.get("product_url") or item.get("url"),
             in_stock=item.get("in_stock", True),
             features=item.get("features") or [],
+            product_group_id=item.get("product_group_id"),
+            handle=item.get("handle"),
+            parent_name=item.get("parent_name"),
+            has_variants=item.get("has_variants", False),
+            variant_count=item.get("variant_count", 0),
+            price_min=item.get("price_min"),
+            price_max=item.get("price_max"),
+            default_variant_id=item.get("default_variant_id"),
+            variant_id=item.get("variant_id"),
+            variant_sku=item.get("variant_sku"),
+            variant_title=item.get("variant_title"),
+            variant_options=item.get("variant_options") or {},
+            variant_url=item.get("variant_url"),
         )
         for item in items
     ]

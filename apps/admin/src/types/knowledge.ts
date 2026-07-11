@@ -2,16 +2,53 @@
 
 export type ContentType = 'product' | 'dealer' | 'faq' | 'office' | 'category' | 'guide' | 'document';
 
+export interface ProductVariantData {
+  id?: string;
+  variant_id?: string;
+  sku?: string;
+  variant_sku?: string;
+  name?: string;
+  title?: string;
+  variant_title?: string;
+  variant_options?: Record<string, string>;
+  price?: number;
+  currency?: string;
+  currency_source?: string;
+  image_url?: string;
+  image?: string;
+  product_url?: string;
+  variant_url?: string;
+  in_stock?: boolean;
+  is_default?: boolean;
+}
+
 export interface ProductData {
   sku: string;
+  id?: string;
+  product_group_id?: string;
+  handle?: string;
   name: string;
   price: number;           // Integer (paise/cents)
   currency: string;         // e.g., "INR", "USD"
+  currency_source?: string;
   category: string;
   image_url?: string;
+  image?: string;
   product_url?: string;
   in_stock: boolean;
   features: string[];
+  description?: string;
+  has_variants?: boolean;
+  variant_count?: number;
+  price_min?: number;
+  price_max?: number;
+  default_variant_id?: string;
+  variant_id?: string;
+  variant_sku?: string;
+  variant_title?: string;
+  variant_options?: Record<string, string>;
+  variant_url?: string;
+  variants?: ProductVariantData[];
 }
 
 export interface DealerData {

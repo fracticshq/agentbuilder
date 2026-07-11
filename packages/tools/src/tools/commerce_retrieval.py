@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 
 DEFAULT_COMMERCE_CONFIG: Dict[str, Any] = {
@@ -18,6 +19,7 @@ DEFAULT_COMMERCE_CONFIG: Dict[str, Any] = {
         "rrf_k": 60,
         "max_cards": 5,
         "max_product_cards": 5,
+        "max_variants_per_card": 100,
         "self_crag_enabled": True,
         "max_retries": 2,
     },
@@ -131,7 +133,7 @@ class CommerceRetrievalPipeline:
             valid, invalid_reasons = self._validate_candidates(fused, intent)
             retrieval_context = retry_context
 
-        products = valid[:limit]
+        products = await self._group_variant_products(valid, limit=limit, filters=product_filters)
         confidence = self._confidence(products, direct_products, retrieval_products, retrieval_context)
         return CommerceRetrievalResult(
             products=products,
@@ -146,6 +148,7 @@ class CommerceRetrievalPipeline:
                 },
                 "retried_with_expanded_query": retried,
                 "invalid_reasons": invalid_reasons[:10],
+                "variant_groups": sum(1 for product in products if product.get("has_variants")),
             },
         )
 
@@ -347,6 +350,251 @@ class CommerceRetrievalPipeline:
         if product_data.get("variant_id") is not None:
             item["variant_id"] = product_data.get("variant_id")
         return item
+
+    async def _group_variant_products(
+        self,
+        products: List[Dict[str, Any]],
+        *,
+        limit: int,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        groups: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
+        for rank, product in enumerate(products, start=1):
+            group_key = self._product_group_key(product)
+            if not group_key:
+                group_key = self._identity(product) or f"product:{rank}"
+            if group_key not in groups:
+                groups[group_key] = {
+                    "key": group_key,
+                    "rank": rank,
+                    "products": [],
+                }
+                order.append(group_key)
+            product_copy = dict(product)
+            product_copy["_variant_rank"] = rank
+            groups[group_key]["products"].append(product_copy)
+
+        grouped_products: List[Dict[str, Any]] = []
+        for group_key in order:
+            group_products = groups[group_key]["products"]
+            selected = self._select_default_variant(group_products)
+            group_products = await self._hydrate_variant_group(selected, group_products, filters=filters)
+            group_products = self._ordered_variant_products(group_products, selected)
+            grouped = dict(selected)
+            variants = [self._variant_from_product(product, selected) for product in group_products]
+            variant_prices = [
+                self._numeric_price(variant.get("price"))
+                for variant in variants
+                if self._numeric_price(variant.get("price")) is not None
+            ]
+            grouped["product_group_id"] = selected.get("product_group_id") or group_key
+            grouped["name"] = selected.get("parent_name") or self._common_product_name(group_products) or selected.get("name")
+            grouped["title"] = grouped["name"]
+            grouped["has_variants"] = len(variants) > 1 or bool(selected.get("has_variants"))
+            grouped["variant_count"] = max(int(selected.get("variant_count") or 0), len(variants))
+            grouped["variants"] = variants
+            grouped["default_variant_id"] = selected.get("variant_id") or selected.get("default_variant_id") or selected.get("id")
+            if variant_prices:
+                grouped["price_min"] = min(variant_prices)
+                grouped["price_max"] = max(variant_prices)
+            grouped.pop("_variant_rank", None)
+            grouped_products.append(grouped)
+            if len(grouped_products) >= limit:
+                break
+        return grouped_products
+
+    async def _hydrate_variant_group(
+        self,
+        selected: Dict[str, Any],
+        group_products: List[Dict[str, Any]],
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        collection = self._catalog_collection()
+        if collection is None:
+            return group_products
+
+        queries = self._variant_group_queries(selected)
+        if not queries:
+            return group_products
+
+        max_variants = max(1, min(self.retrieval_int("max_variants_per_card", 100), 500))
+        base_filters = {
+            key: value
+            for key, value in (filters or {}).items()
+            if key not in {"$or", "product_data.price"}
+        }
+        base_filters["content_type"] = "product"
+
+        hydrated: List[Dict[str, Any]] = []
+        for query in queries:
+            cursor = collection.find(
+                {**base_filters, **query},
+                {"product_data": 1, "title": 1, "content": 1, "doc_id": 1, "url": 1},
+            ).limit(max_variants)
+            rows = await cursor.to_list(length=max_variants)
+            for row_index, row in enumerate(rows):
+                product = self._normalize_product(row.get("product_data") or {}, source="variant_hydration", row=row)
+                product["_variant_rank"] = int(selected.get("_variant_rank") or 9999) + 1000 + row_index
+                hydrated.append(product)
+            if hydrated:
+                break
+
+        return self._dedupe_variant_products([*group_products, *hydrated])
+
+    def _variant_group_queries(self, product: Dict[str, Any]) -> List[Dict[str, Any]]:
+        queries: List[Dict[str, Any]] = []
+        for key in ("product_group_id", "product_id", "handle"):
+            value = product.get(key)
+            if value not in (None, ""):
+                queries.append({f"product_data.{key}": value})
+
+        url = product.get("product_url") or product.get("url") or product.get("variant_url")
+        base_url = self._base_product_url(url)
+        if base_url:
+            escaped = re.escape(base_url.rstrip("/"))
+            queries.append({
+                "$or": [
+                    {"product_data.product_url": base_url},
+                    {"product_data.url": base_url},
+                    {"product_data.variant_url": {"$regex": rf"^{escaped}(?:/)?(?:\?.*)?$"}},
+                ]
+            })
+
+        deduped = []
+        seen = set()
+        for query in queries:
+            key = repr(query)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(query)
+        return deduped
+
+    def _dedupe_variant_products(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for product in products:
+            identity = self._variant_identity(product)
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            deduped.append(product)
+        return deduped
+
+    def _ordered_variant_products(
+        self,
+        products: List[Dict[str, Any]],
+        selected: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        selected_identity = self._variant_identity(selected)
+
+        def sort_key(product: Dict[str, Any]) -> Tuple[int, int, float, str]:
+            identity = self._variant_identity(product)
+            selected_rank = 0 if identity and identity == selected_identity else 1
+            in_stock_rank = 0 if product.get("in_stock", True) else 1
+            price = self._numeric_price(product.get("price"))
+            return (
+                selected_rank,
+                int(product.get("_variant_rank") or 9999),
+                float(price if price is not None else 10**18),
+                identity or "",
+            )
+
+        return sorted(products, key=sort_key)
+
+    def _product_group_key(self, product: Dict[str, Any]) -> Optional[str]:
+        for key in ("product_group_id", "product_id", "handle"):
+            value = product.get(key)
+            if value not in (None, ""):
+                return f"{key}:{str(value).strip().lower()}"
+        url = product.get("product_url") or product.get("url") or product.get("variant_url")
+        base_url = self._base_product_url(url)
+        if base_url:
+            return f"url:{base_url.lower()}"
+        return None
+
+    @staticmethod
+    def _base_product_url(url: Any) -> Optional[str]:
+        if url in (None, ""):
+            return None
+        try:
+            parts = urlsplit(str(url))
+            if not parts.scheme or not parts.netloc:
+                return re.sub(r"\?.*$", "", str(url)).rstrip("/")
+            return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+        except Exception:
+            return re.sub(r"\?.*$", "", str(url)).rstrip("/")
+
+    def _select_default_variant(self, products: List[Dict[str, Any]]) -> Dict[str, Any]:
+        def sort_key(product: Dict[str, Any]) -> Tuple[int, float, int]:
+            in_stock_rank = 0 if product.get("in_stock", True) else 1
+            price = self._numeric_price(product.get("price"))
+            return (int(product.get("_variant_rank") or 9999), in_stock_rank, float(price if price is not None else 10**18))
+
+        return min(products, key=sort_key)
+
+    def _variant_from_product(self, product: Dict[str, Any], selected: Dict[str, Any]) -> Dict[str, Any]:
+        variant_options = product.get("variant_options")
+        if not isinstance(variant_options, dict):
+            variant_options = {}
+        label = self._variant_label(product, selected)
+        if not variant_options and label:
+            variant_options = {"Variant": label}
+        return {
+            "id": product.get("variant_id") or product.get("id") or product.get("sku"),
+            "variant_id": product.get("variant_id") or product.get("id") or product.get("sku"),
+            "sku": product.get("variant_sku") or product.get("sku"),
+            "variant_sku": product.get("variant_sku") or product.get("sku"),
+            "name": product.get("name"),
+            "title": product.get("variant_title") or label or product.get("name"),
+            "variant_title": product.get("variant_title") or label,
+            "variant_options": variant_options,
+            "price": product.get("price"),
+            "currency": product.get("currency"),
+            "currency_source": product.get("currency_source"),
+            "image_url": product.get("image_url") or product.get("image"),
+            "image": product.get("image") or product.get("image_url"),
+            "product_url": product.get("product_url") or product.get("url"),
+            "variant_url": product.get("variant_url") or product.get("product_url") or product.get("url"),
+            "in_stock": product.get("in_stock", True),
+            "is_default": (product.get("variant_id") or product.get("id") or product.get("sku")) == (
+                selected.get("variant_id") or selected.get("id") or selected.get("sku")
+            ),
+        }
+
+    def _variant_label(self, product: Dict[str, Any], selected: Dict[str, Any]) -> str:
+        explicit = product.get("variant_title")
+        if explicit not in (None, "", "Default Title"):
+            return str(explicit)
+        parent = product.get("parent_name") or selected.get("parent_name") or self._common_product_name([product, selected])
+        name = str(product.get("name") or "")
+        if parent and name.lower().startswith(str(parent).lower()):
+            return re.sub(r"^[\s\-–—/]+", "", name[len(str(parent)):]).strip()
+        return ""
+
+    def _common_product_name(self, products: List[Dict[str, Any]]) -> str:
+        parent_names = [str(product.get("parent_name")) for product in products if product.get("parent_name")]
+        if parent_names:
+            return parent_names[0]
+        names = [str(product.get("name") or product.get("title") or "") for product in products if product.get("name") or product.get("title")]
+        if not names:
+            return ""
+        if len(names) == 1:
+            return names[0]
+        prefix = names[0]
+        for name in names[1:]:
+            while prefix and not name.lower().startswith(prefix.lower()):
+                prefix = prefix[:-1]
+        prefix = re.sub(r"[\s\-–—/]+$", "", prefix).strip()
+        return prefix or names[0]
+
+    @staticmethod
+    def _numeric_price(price: Any) -> Optional[float]:
+        try:
+            return float(price)
+        except (TypeError, ValueError):
+            return None
 
     def _normalize_currency(self, currency: Any) -> Tuple[Optional[str], str]:
         fallback = self.default_currency()
@@ -627,6 +875,14 @@ class CommerceRetrievalPipeline:
     @staticmethod
     def _identity(product: Dict[str, Any]) -> Optional[str]:
         for key in ("sku", "id", "product_id", "variant_id", "handle", "product_url", "url", "name"):
+            value = product.get(key)
+            if value not in (None, ""):
+                return re.sub(r"\s+", " ", str(value).strip().lower())
+        return None
+
+    @staticmethod
+    def _variant_identity(product: Dict[str, Any]) -> Optional[str]:
+        for key in ("variant_id", "variant_sku", "sku", "variant_url", "id"):
             value = product.get(key)
             if value not in (None, ""):
                 return re.sub(r"\s+", " ", str(value).strip().lower())

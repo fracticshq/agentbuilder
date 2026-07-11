@@ -252,11 +252,21 @@ class CatalogSearchTool(RetrievalTool):
         lines = ["Found catalog products:"]
         for index, product in enumerate(products[:5], start=1):
             name = product.get("name") or product.get("title") or product.get("sku") or "Product"
-            price = self._display_price(product.get("price"), product.get("currency"))
+            price = self._display_product_price(product)
             category = product.get("category") or product.get("description") or "General"
             sku = product.get("sku") or product.get("id")
-            lines.append(f"{index}. {name} - {price} ({category}, SKU: {sku})")
+            variant_count = int(product.get("variant_count") or len(product.get("variants") or []) or 0)
+            variant_note = f", {variant_count} variants" if variant_count > 1 else ""
+            lines.append(f"{index}. {name} - {price} ({category}, SKU: {sku}{variant_note})")
         return "\n".join(lines)
+
+    def _display_product_price(self, product: Dict[str, Any]) -> str:
+        price_min = product.get("price_min")
+        price_max = product.get("price_max")
+        currency = product.get("currency")
+        if price_min not in (None, "") and price_max not in (None, "") and price_min != price_max:
+            return f"{self._display_price(price_min, currency)} - {self._display_price(price_max, currency)}"
+        return self._display_price(product.get("price"), currency)
 
     def _display_price(self, price: Any, currency: Any) -> str:
         try:

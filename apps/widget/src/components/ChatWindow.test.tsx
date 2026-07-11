@@ -228,6 +228,184 @@ describe('ChatWindow', () => {
       expect(screen.getByRole('button', { name: 'Learn more about this product' })).toBeInTheDocument();
     });
 
+    it('renders one grouped product card with selectable variants', () => {
+      setBrand();
+      const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+      const productMessages: Message[] = [
+        { id: '1', content: 'Show me Denon Home 150', role: 'user', timestamp: new Date() },
+        {
+          id: '2',
+          content: 'This matches your search.',
+          role: 'assistant',
+          timestamp: new Date(),
+          products: [
+            {
+              product_group_id: 'shopify:denon-home-150',
+              sku: 'DENON-BLK',
+              name: 'Denon Home 150 Wireless Speaker',
+              price: 4190000,
+              currency: 'INR',
+              category: 'General',
+              in_stock: true,
+              product_url: 'https://soundtrails.in/products/denon-home-150-wireless-speaker-1',
+              variant_count: 2,
+              has_variants: true,
+              variants: [
+                {
+                  variant_id: '49151795560721',
+                  variant_sku: 'DENON-BLK',
+                  variant_options: { Color: 'Black' },
+                  price: 4190000,
+                  currency: 'INR',
+                  variant_url: 'https://soundtrails.in/products/denon-home-150-wireless-speaker-1?variant=49151795560721',
+                  in_stock: true,
+                  is_default: true,
+                },
+                {
+                  variant_id: '49151800443153',
+                  variant_sku: 'DENON-WHT',
+                  variant_options: { Color: 'White' },
+                  price: 4290000,
+                  currency: 'INR',
+                  variant_url: 'https://soundtrails.in/products/denon-home-150-wireless-speaker-1?variant=49151800443153',
+                  in_stock: true,
+                },
+              ],
+            },
+          ],
+        },
+      ];
+
+      render(
+        <ChatWindow messages={productMessages} isTyping={false} onSendMessage={vi.fn()} onClose={noopClose} onToggleExpand={noopExpand} />
+      );
+
+      expect(screen.getByText('Product:')).toBeInTheDocument();
+      expect(screen.getAllByText('Denon Home 150 Wireless Speaker')).toHaveLength(1);
+      expect(screen.getByText('SKU: DENON-BLK (Black)')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /more variants/i })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: /White/ }));
+      expect(screen.getByText('SKU: DENON-WHT (White)')).toBeInTheDocument();
+      expect(screen.getAllByText('₹42,900.00').length).toBeGreaterThan(0);
+      fireEvent.click(screen.getByRole('button', { name: 'Learn more about this product' }));
+      expect(openSpy).toHaveBeenCalledWith(
+        'https://soundtrails.in/products/denon-home-150-wireless-speaker-1?variant=49151800443153',
+        '_blank',
+        'noopener,noreferrer'
+      );
+      openSpy.mockRestore();
+    });
+
+    it('expands variant tiles inline when more variants are available', () => {
+      setBrand();
+      const colors = ['Black', 'White', 'Silver', 'Walnut', 'Blue', 'Red'];
+      const productMessages: Message[] = [
+        { id: '1', content: 'Show Denon colours', role: 'user', timestamp: new Date() },
+        {
+          id: '2',
+          content: 'Here are the variants.',
+          role: 'assistant',
+          timestamp: new Date(),
+          products: [
+            {
+              product_group_id: 'shopify:denon-home-150',
+              sku: 'DENON-BLK',
+              name: 'Denon Home 150 Wireless Speaker',
+              price: 4190000,
+              currency: 'INR',
+              category: 'General',
+              in_stock: true,
+              product_url: 'https://soundtrails.in/products/denon-home-150-wireless-speaker-1',
+              variant_count: colors.length,
+              has_variants: true,
+              variants: colors.map((color, index) => ({
+                variant_id: `variant-${color}`,
+                variant_sku: `DENON-${color.toUpperCase()}`,
+                variant_options: { Colour: color },
+                price: 4190000,
+                currency: 'INR',
+                variant_url: `https://soundtrails.in/products/denon-home-150-wireless-speaker-1?variant=${index}`,
+                in_stock: true,
+                is_default: index === 0,
+              })),
+            },
+          ],
+        },
+      ];
+
+      render(
+        <ChatWindow messages={productMessages} isTyping={false} onSendMessage={vi.fn()} onClose={noopClose} onToggleExpand={noopExpand} />
+      );
+
+      expect(screen.getByText('Choose Colour')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /View 2 more variants/i })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Blue/ })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: /View 2 more variants/i }));
+
+      expect(screen.getByRole('button', { name: /Blue/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Red/ })).toBeInTheDocument();
+    });
+
+    it('renders multi-option variants as full purchasable variant tiles', () => {
+      setBrand();
+      const productMessages: Message[] = [
+        { id: '1', content: 'Show strawberry whey protein', role: 'user', timestamp: new Date() },
+        {
+          id: '2',
+          content: 'Here are matching variants.',
+          role: 'assistant',
+          timestamp: new Date(),
+          products: [
+            {
+              product_group_id: 'shopify:whey-protein',
+              sku: 'WHEY-STRAW-2LB',
+              name: 'Gold Standard 100% Whey Protein',
+              price: 549900,
+              currency: 'INR',
+              category: 'Nutrition',
+              in_stock: true,
+              product_url: 'https://example.com/products/whey',
+              variant_count: 2,
+              has_variants: true,
+              variants: [
+                {
+                  variant_id: 'strawberry-2lb',
+                  variant_sku: 'WHEY-STRAW-2LB',
+                  variant_options: { Flavour: 'Strawberry', Weight: '2 lbs (907 g)' },
+                  price: 549900,
+                  currency: 'INR',
+                  variant_url: 'https://example.com/products/whey?variant=strawberry-2lb',
+                  in_stock: true,
+                  is_default: true,
+                },
+                {
+                  variant_id: 'vanilla-5lb',
+                  variant_sku: 'WHEY-VAN-5LB',
+                  variant_options: { Flavour: 'Vanilla Ice Cream', Weight: '5 lbs (2.27 kg)' },
+                  price: 899900,
+                  currency: 'INR',
+                  variant_url: 'https://example.com/products/whey?variant=vanilla-5lb',
+                  in_stock: true,
+                },
+              ],
+            },
+          ],
+        },
+      ];
+
+      render(
+        <ChatWindow messages={productMessages} isTyping={false} onSendMessage={vi.fn()} onClose={noopClose} onToggleExpand={noopExpand} />
+      );
+
+      expect(screen.getByText('Choose Flavour & Weight')).toBeInTheDocument();
+      expect(screen.getByText('Strawberry')).toBeInTheDocument();
+      expect(screen.getByText('2 lbs (907 g)')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: /Vanilla Ice Cream/ }));
+      expect(screen.getByText('SKU: WHEY-VAN-5LB (Vanilla Ice Cream)')).toBeInTheDocument();
+      expect(screen.getByText('5 lbs (2.27 kg)')).toBeInTheDocument();
+    });
+
     it('does not render citations when showSources is false even if citations exist', () => {
       setBrand();
       const citedMessages: Message[] = [

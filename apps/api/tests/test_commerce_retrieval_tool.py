@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from retrieval.types import DocumentChunk, RetrievalContext
@@ -8,6 +10,7 @@ from tools.commerce_retrieval import CommerceRetrievalPipeline
 class FakeCursor:
     def __init__(self, rows):
         self.rows = rows
+        self._index = 0
 
     def limit(self, _limit):
         return self
@@ -15,15 +18,58 @@ class FakeCursor:
     async def to_list(self, length):
         return self.rows[:length]
 
+    def __aiter__(self):
+        self._index = 0
+        return self
+
+    async def __anext__(self):
+        if self._index >= len(self.rows):
+            raise StopAsyncIteration
+        row = self.rows[self._index]
+        self._index += 1
+        return row
+
 
 class FakeCollection:
     def __init__(self, rows):
         self.rows = rows
         self.queries = []
 
-    def find(self, query, projection):
+    def find(self, query, projection=None):
         self.queries.append({"query": query, "projection": projection})
-        return FakeCursor(self.rows)
+        return FakeCursor([row for row in self.rows if self._matches(row, query)])
+
+    def _matches(self, row, query):
+        for key, expected in query.items():
+            if key == "$or":
+                if not any(self._matches(row, branch) for branch in expected):
+                    return False
+                continue
+            actual = self._get_value(row, key)
+            if isinstance(expected, dict):
+                if "$in" in expected:
+                    if actual not in expected["$in"]:
+                        return False
+                if "$gt" in expected and not (actual is not None and actual > expected["$gt"]):
+                    return False
+                if "$lte" in expected and not (actual is not None and actual <= expected["$lte"]):
+                    return False
+                if "$regex" in expected:
+                    flags = re.IGNORECASE if expected.get("$options") == "i" else 0
+                    if actual is None or not re.search(expected["$regex"], str(actual), flags):
+                        return False
+            elif actual != expected:
+                return False
+        return True
+
+    @staticmethod
+    def _get_value(row, key):
+        value = row
+        for part in key.split("."):
+            if not isinstance(value, dict):
+                return None
+            value = value.get(part)
+        return value
 
 
 class FakeSearchBackend:
@@ -50,6 +96,7 @@ class FakeRetrievalPipeline:
 
 def product_row(**product_data):
     return {
+        "content_type": "product",
         "title": product_data.get("name"),
         "content": product_data.get("description", ""),
         "doc_id": product_data.get("sku", "doc"),
@@ -222,6 +269,195 @@ async def test_catalog_search_fuses_direct_and_retrieval_products_by_identity():
         "direct_catalog": 1,
         "retrieval_products": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_groups_variants_into_one_product_card():
+    tool = CatalogSearchTool(
+        FakeRetrievalPipeline(
+            rows=[
+                product_row(
+                    sku="DENON-BLK",
+                    name="Denon Home 150 Wireless Speaker - Black",
+                    parent_name="Denon Home 150 Wireless Speaker",
+                    product_group_id="shopify:denon-home-150",
+                    variant_id="gid://shopify/ProductVariant/black",
+                    variant_sku="DENON-BLK",
+                    variant_title="Black",
+                    variant_options={"Color": "Black"},
+                    product_type="speaker",
+                    category="General",
+                    price=4190000,
+                    currency="INR",
+                    product_url="https://soundtrails.in/products/denon-home-150-wireless-speaker-1",
+                    variant_url="https://soundtrails.in/products/denon-home-150-wireless-speaker-1?variant=49151795560721",
+                ),
+                product_row(
+                    sku="DENON-WHT",
+                    name="Denon Home 150 Wireless Speaker - White",
+                    parent_name="Denon Home 150 Wireless Speaker",
+                    product_group_id="shopify:denon-home-150",
+                    variant_id="gid://shopify/ProductVariant/white",
+                    variant_sku="DENON-WHT",
+                    variant_title="White",
+                    variant_options={"Color": "White"},
+                    product_type="speaker",
+                    category="General",
+                    price=4190000,
+                    currency="INR",
+                    product_url="https://soundtrails.in/products/denon-home-150-wireless-speaker-1",
+                    variant_url="https://soundtrails.in/products/denon-home-150-wireless-speaker-1?variant=49151800443153",
+                ),
+            ]
+        )
+    )
+
+    result = await tool.run(query="denon home speaker", commerce_config=commerce_config())
+
+    assert len(result.metadata["products"]) == 1
+    product = result.metadata["products"][0]
+    assert product["name"] == "Denon Home 150 Wireless Speaker"
+    assert product["product_group_id"] == "shopify:denon-home-150"
+    assert product["variant_count"] == 2
+    assert [variant["variant_options"]["Color"] for variant in product["variants"]] == ["Black", "White"]
+    assert "2 variants" in result.data
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_hydrates_all_sibling_variants_after_group_selection():
+    pipeline = FakeRetrievalPipeline(
+        rows=[
+            product_row(
+                sku="DENON-BLK",
+                name="Denon Home 150 Wireless Speaker - Black",
+                parent_name="Denon Home 150 Wireless Speaker",
+                product_group_id="shopify:denon-home-150",
+                variant_id="black",
+                variant_sku="DENON-BLK",
+                variant_options={"Colour": "Black"},
+                product_type="speaker",
+                category="General",
+                price=4190000,
+                currency="INR",
+                product_url="https://example.com/products/denon-home-150",
+                variant_url="https://example.com/products/denon-home-150?variant=black",
+            ),
+            product_row(
+                sku="DENON-WHT",
+                name="Denon Home 150 Wireless Speaker - White",
+                parent_name="Denon Home 150 Wireless Speaker",
+                product_group_id="shopify:denon-home-150",
+                variant_id="white",
+                variant_sku="DENON-WHT",
+                variant_options={"Colour": "White"},
+                product_type="speaker",
+                category="General",
+                price=4290000,
+                currency="INR",
+                product_url="https://example.com/products/denon-home-150",
+                variant_url="https://example.com/products/denon-home-150?variant=white",
+            ),
+        ]
+    )
+    tool = CatalogSearchTool(pipeline)
+
+    result = await tool.run(query="speaker under ₹42000", commerce_config=commerce_config())
+
+    assert len(result.metadata["products"]) == 1
+    product = result.metadata["products"][0]
+    assert product["sku"] == "DENON-BLK"
+    assert product["variant_count"] == 2
+    assert [variant["variant_sku"] for variant in product["variants"]] == ["DENON-BLK", "DENON-WHT"]
+    assert product["variants"][0]["is_default"] is True
+    assert product["price_min"] == 4190000
+    assert product["price_max"] == 4290000
+    assert any(query["query"].get("product_data.product_group_id") == "shopify:denon-home-150" for query in pipeline.bm25_search.collection.queries)
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_hydrates_siblings_by_handle_when_group_id_is_missing():
+    pipeline = FakeRetrievalPipeline(
+        rows=[
+            product_row(
+                sku="WHEY-STRAW-2",
+                name="Whey Protein - Strawberry / 2 lb",
+                parent_name="Whey Protein",
+                handle="whey-protein",
+                variant_id="strawberry-2",
+                variant_sku="WHEY-STRAW-2",
+                variant_options={"Flavour": "Strawberry", "Weight": "2 lb"},
+                product_type="protein",
+                category="Nutrition",
+                price=549900,
+                currency="INR",
+                product_url="https://example.com/products/whey-protein",
+            ),
+            product_row(
+                sku="WHEY-VAN-5",
+                name="Whey Protein - Vanilla / 5 lb",
+                parent_name="Whey Protein",
+                handle="whey-protein",
+                variant_id="vanilla-5",
+                variant_sku="WHEY-VAN-5",
+                variant_options={"Flavour": "Vanilla", "Weight": "5 lb"},
+                product_type="protein",
+                category="Nutrition",
+                price=899900,
+                currency="INR",
+                product_url="https://example.com/products/whey-protein",
+            ),
+        ]
+    )
+    tool = CatalogSearchTool(pipeline)
+
+    result = await tool.run(query="protein under ₹6000", commerce_config=commerce_config())
+
+    product = result.metadata["products"][0]
+    assert [variant["variant_options"] for variant in product["variants"]] == [
+        {"Flavour": "Strawberry", "Weight": "2 lb"},
+        {"Flavour": "Vanilla", "Weight": "5 lb"},
+    ]
+    assert any(query["query"].get("product_data.handle") == "whey-protein" for query in pipeline.bm25_search.collection.queries)
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_selects_matching_option_variant_first():
+    tool = CatalogSearchTool(
+        FakeRetrievalPipeline(
+            rows=[
+                product_row(
+                    sku="DENON-BLK",
+                    name="Denon Home 150 Wireless Speaker - Black",
+                    product_group_id="shopify:denon-home-150",
+                    variant_id="black",
+                    variant_options={"Color": "Black"},
+                    product_type="speaker",
+                    category="General",
+                    price=4190000,
+                    currency="INR",
+                    product_url="https://soundtrails.in/products/denon-home-150-wireless-speaker-1",
+                ),
+                product_row(
+                    sku="DENON-WHT",
+                    name="Denon Home 150 Wireless Speaker - White",
+                    product_group_id="shopify:denon-home-150",
+                    variant_id="white",
+                    variant_options={"Color": "White"},
+                    product_type="speaker",
+                    category="General",
+                    price=4190000,
+                    currency="INR",
+                    product_url="https://soundtrails.in/products/denon-home-150-wireless-speaker-1",
+                ),
+            ]
+        )
+    )
+
+    result = await tool.run(query="black denon home speaker", commerce_config=commerce_config())
+
+    product = result.metadata["products"][0]
+    assert product["variant_id"] == "black"
+    assert product["variants"][0]["variant_options"]["Color"] == "Black"
 
 
 @pytest.mark.asyncio
