@@ -92,7 +92,7 @@ export const KundaliChart: React.FC<{ data: KundaliChartData }> = ({ data }) => 
   const houses = data.houses || [];
   if (!houses.length) return null;
 
-  const birthBits = [data.birth?.date, data.birth?.time, data.birth?.place].filter(Boolean);
+  const birthBits = [data.birth?.name, data.birth?.date, data.birth?.time, data.birth?.place].filter(Boolean);
   const lagna = data.ascendant
     ? `Lagna: ${data.ascendant.name}${data.ascendant.hindi ? ` (${data.ascendant.hindi})` : ''}`
     : '';

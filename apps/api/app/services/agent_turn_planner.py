@@ -188,6 +188,10 @@ Rules:
 - Unlabeled comma/period-separated birth details (e.g. "16 July 1987, 15:26, Delhi India")
   mean birth_date, birth_time, birth_place — extract all three (date as YYYY-MM-DD,
   time as HH:MM:SS, place as the text the user gave).
+- Messages often lead with the person's NAME ("Sandeep Amar, DOB 25/01/1975, 11 AM,
+  New Delhi. How is my health in 2026"): extract it as resolved_inputs.name. A person's
+  name is NEVER the birth place, and the trailing question is NEVER the birth place —
+  put the question in "question".
 - Never ask the user for latitude, longitude, or timezone. A birthplace name is enough;
   the runtime geocodes it automatically. Ask a clarifying question only when a detail is
   genuinely ambiguous (e.g. "03/04/1990" could be 3 April or 4 March, or a city name that

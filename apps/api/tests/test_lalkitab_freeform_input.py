@@ -62,7 +62,7 @@ def test_clarification_never_asks_for_latitude_longitude():
 def test_clarification_asks_for_place_when_nothing_resolved():
     normalized, missing = lk.extract_lalkitab_birth_input("dob 16 July 1987, tob 1526")
     text = lk.format_lalkitab_missing_input_clarification(normalized, missing).lower()
-    assert "birth place" in text
+    assert "which city" in text or "birth place" in text
     assert "latitude" not in text
 
 
@@ -259,3 +259,62 @@ def test_kundali_summary_none_without_chart_context():
     assert lk.extract_kundali_chart_summary({}) is None
     assert lk.extract_kundali_chart_summary({"chart_context": {"note": "no placements"}}) is None
     assert lk.extract_kundali_chart_summary(None) is None
+
+
+@pytest.mark.asyncio
+async def test_verbatim_failure_one_shot_chart_with_profile(monkeypatch):
+    """The exact production failure must now build the chart in one turn,
+    keep the name out of geocoding, and route the 2026 health question."""
+    connector_calls: list[str] = []
+
+    async def fake_run(self, query, payload=None, **kwargs):
+        connector_calls.append(self.endpoint["id"])
+        return ToolResult(success=True, data={"endpoint": self.endpoint["id"]})
+
+    monkeypatch.setattr(lk.ContextConnectorTool, "run", fake_run)
+
+    out = await lk.build_lalkitab_runtime_context(
+        _lalkitab_config(),
+        "Sandeep Amar, DOB 25/01/1975, 11 AM, New Delhi. How is my health going to be in 2026",
+        birth_profile={
+            "source": "llm",
+            "name": "Sandeep Amar",
+            "birth_date": "1975-01-25",
+            "birth_time": "11:00:00",
+            "birth_place": "New Delhi",
+            "question": "How is my health going to be in 2026",
+        },
+    )
+
+    assert out.handled is True
+    assert out.missing_input == []
+    nbi = out.normalized_birth_input
+    assert nbi["name"] == "Sandeep Amar"
+    assert nbi["datetime"] == "1975-01-25T11:00:00"
+    assert nbi["latitude"] == 28.6139  # New Delhi resolved automatically
+    assert connector_calls[0] == "lalkitab_chart"
+    assert "lalkitab_varshphal" in out.selected_endpoint_ids  # "in 2026"
+
+
+@pytest.mark.asyncio
+async def test_profile_place_correction_invalidates_stale_coordinates(monkeypatch):
+    """A corrected birthplace must clear coordinates resolved for the old one."""
+    async def fake_run(self, query, payload=None, **kwargs):
+        return ToolResult(success=True, data={})
+
+    monkeypatch.setattr(lk.ContextConnectorTool, "run", fake_run)
+
+    out = await lk.build_lalkitab_runtime_context(
+        _lalkitab_config(),
+        "Birth place - Mumbai actually",
+        pending_state={
+            "normalized_birth_input": {
+                "date": "1975-01-25", "time": "11:00:00",
+                "birth_place": "Delhi", "latitude": 28.6139,
+                "longitude": 77.209, "timezone": "+05:30",
+            }
+        },
+        birth_profile={"source": "llm", "birth_place": "Mumbai"},
+    )
+    assert out.normalized_birth_input["birth_place"] == "Mumbai"
+    assert out.normalized_birth_input["latitude"] == 19.076  # re-resolved for Mumbai

@@ -165,6 +165,13 @@ def _default_policy(config: dict[str, Any]) -> dict[str, Any]:
                 "planner_model": config.get("planner_model") or "gpt-5.5-low",
                 "required_inputs": [
                     {
+                        "id": "name",
+                        "label": "name",
+                        "type": "name",
+                        "required": False,
+                        "aliases": ["name", "my name"],
+                    },
+                    {
                         "id": "birth_date",
                         "label": "birth date",
                         "type": "date",
@@ -377,7 +384,15 @@ def extract_inputs_for_policy(message: str, policy: dict[str, Any]) -> dict[str,
     extracted: dict[str, Any] = {}
     date_value = _extract_date(text)
     time_value = _extract_time(text)
-    place_value = _extract_place(text, has_date=bool(date_value), has_time=bool(time_value))
+    name_value = _extract_person_name(text)
+    place_value = _extract_place(
+        text,
+        has_date=bool(date_value),
+        has_time=bool(time_value),
+        person_name=name_value,
+    )
+    if place_value and name_value and place_value.strip().lower() == name_value.strip().lower():
+        place_value = None  # never treat the user's own name as the birthplace
     for field in fields:
         field_id = str(field.get("id") or "")
         field_type = str(field.get("type") or "").lower()
@@ -390,6 +405,9 @@ def extract_inputs_for_policy(message: str, policy: dict[str, Any]) -> dict[str,
         elif field_type == "place" or field_id in {"birth_place", "place", "city", "location"}:
             if place_value:
                 extracted[field_id] = place_value
+        elif field_type == "name" or field_id == "name":
+            if name_value:
+                extracted[field_id] = name_value
         elif field_type == "email":
             match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text)
             if match:
@@ -495,7 +513,68 @@ def _extract_time(text: str) -> str | None:
     return None
 
 
-def _extract_place(text: str, *, has_date: bool, has_time: bool) -> str | None:
+_INTENT_FRAGMENT_RE = re.compile(
+    r"\b(what|why|how|when|where|which|who|will|should|can|could|would|"
+    r"career|marriage|finance|relationship|health|remed\w*|predict\w*|"
+    r"kundli|kundali|horoscope|chart|please|question|query)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_intent_fragment(text: str) -> bool:
+    return "?" in (text or "") or bool(_INTENT_FRAGMENT_RE.search(text or ""))
+
+
+def _strip_question_sentences(text: str) -> str:
+    """Drop question/intent sentences so they can never pollute place inference."""
+    sentences = re.split(r"(?<=[.?!])\s+|\n+", text or "")
+    kept = [s for s in sentences if s.strip() and not _looks_like_intent_fragment(s)]
+    return " ".join(kept)
+
+
+_PERSON_NAME_TOKEN = r"([A-Za-z][A-Za-z\s.']{1,60}?)"
+
+_PERSON_NAME_PATTERNS = (
+    rf"\bmy\s+name\s+is\s+{_PERSON_NAME_TOKEN}(?=[,.;\n]|$)",
+    rf"\bname\s*[:=\-–]\s*{_PERSON_NAME_TOKEN}(?=[,.;\n]|\s+dob\b|\s+tob\b|\s+pob\b|$)",
+    rf"\bname\s+{_PERSON_NAME_TOKEN}(?=[,.;\n]|$)",
+    rf"\b{_PERSON_NAME_TOKEN}\s+is\s+my\s+name\b",
+    rf"^\s*{_PERSON_NAME_TOKEN}\s*[,.]\s*(?:dob\b|date\s+of\s+birth|born\b|birth\b|\d)",
+)
+
+
+def _extract_person_name(text: str) -> str | None:
+    """Extract the person's name so it is never mistaken for a place."""
+    for pattern in _PERSON_NAME_PATTERNS:
+        match = re.search(pattern, text or "", re.IGNORECASE)
+        if match:
+            name = re.sub(r"\s+", " ", match.group(1)).strip(" .,-")
+            if (
+                name
+                and not _looks_like_intent_fragment(name)
+                and not re.search(r"\d", name)
+                and not re.search(r"\b(?:born|birth|place|city|dob|tob|pob)\b", name, re.IGNORECASE)
+            ):
+                return name
+    return None
+
+
+def _extract_place(
+    text: str,
+    *,
+    has_date: bool,
+    has_time: bool,
+    person_name: str | None = None,
+) -> str | None:
+    # Remove the name clause so "Sandeep Amar, DOB …" can never yield the name
+    # as a place, and drop question sentences ("How is my health …") entirely.
+    if person_name:
+        text = re.sub(
+            rf"\b(?:my\s+name\s+is\s+)?{re.escape(person_name)}(?:\s+is\s+my\s+name)?\b",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
     born_suffix = re.search(
         r"\b([A-Za-z][A-Za-z\s,.-]{1,80})\s+(?:born|birthplace)\b",
         text,
@@ -503,29 +582,35 @@ def _extract_place(text: str, *, has_date: bool, has_time: bool) -> str | None:
     )
     if born_suffix:
         place = _clean_place(born_suffix.group(1))
-        if place:
+        if place and not _looks_like_intent_fragment(place):
             parts = [part.strip() for part in re.split(r"[.;\n]+", place) if part.strip()]
             return parts[-1] if parts else place
     labeled = re.search(
-        r"\b(?:birth\s*place|birthplace|place\s*of\s*birth|pob|p\.?o\.?b\.?|born\s+in|place|city)\s*[:=]?\s*([A-Za-z][A-Za-z\s,.-]{1,120})",
+        r"\b(?:birth\s*place|birthplace|place\s*of\s*birth|pob|p\.?o\.?b\.?|born\s+in|place|city)\s*[:=\-–]?\s*([A-Za-z][A-Za-z\s,.-]{1,120})",
         text,
         re.IGNORECASE,
     )
     if labeled:
-        return _clean_place(labeled.group(1))
+        place = _clean_place(labeled.group(1))
+        if place and not _looks_like_intent_fragment(place):
+            return place
     if not (has_date and has_time):
         return None
+    inference_text = _strip_question_sentences(text)
     after_time = re.search(
-        r"(?:\b\d{3,4}\s*(?:hrs|hours?|IST|india(?:n)?\s+timezone)?\b|\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b)\s*(?:[,.)-]|\btime\b)?\s*([A-Za-z][A-Za-z\s,.-]{1,120})",
-        text,
+        r"(?:\b\d{3,4}\s*(?:hrs|hours?|IST|india(?:n)?\s+timezone)?\b|"
+        r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b|"
+        r"\b\d{1,2}\s*(?:am|pm)\b)"
+        r"\s*(?:[,.)-]|\btime\b)?\s*([A-Za-z][A-Za-z\s,.-]{1,120})",
+        inference_text,
         re.IGNORECASE,
     )
     if after_time:
         place = _clean_place(after_time.group(1))
-        if place:
+        if place and not _looks_like_intent_fragment(place) and not re.search(r"\d", place):
             return place
     # Infer unlabeled place after removing obvious date/time/name/question fragments.
-    scrubbed = re.sub(r"\b\d{4}-\d{1,2}-\d{1,2}\b", " ", text)
+    scrubbed = re.sub(r"\b\d{4}-\d{1,2}-\d{1,2}\b", " ", inference_text)
     scrubbed = re.sub(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", " ", scrubbed)
     scrubbed = re.sub(
         r"\b\d{1,2}\s*(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+\d{4}\b",
@@ -533,16 +618,21 @@ def _extract_place(text: str, *, has_date: bool, has_time: bool) -> str | None:
         scrubbed,
         flags=re.IGNORECASE,
     )
-    scrubbed = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b|\b\d{3,4}\s*(?:hrs|hours?|ist)?\b", " ", scrubbed, flags=re.IGNORECASE)
+    scrubbed = re.sub(
+        r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b|\b\d{3,4}\s*(?:hrs|hours?|ist)?\b|\b\d{1,2}\s*(?:am|pm)\b",
+        " ",
+        scrubbed,
+        flags=re.IGNORECASE,
+    )
     scrubbed = re.sub(r"\b(?:name|dob|date|time|birth|of|place|question|query|ist|india timezone)\b\s*[:=-]?", " ", scrubbed, flags=re.IGNORECASE)
-    parts = [
-        _clean_place(part)
-        for part in re.split(r"[.;\n]+", scrubbed)
-        if _clean_place(part)
-    ]
+    parts = []
+    for part in re.split(r"[.;\n]+", scrubbed):
+        cleaned = _clean_place(part)
+        if cleaned and not _looks_like_intent_fragment(cleaned) and not re.search(r"\d", cleaned):
+            parts.append(cleaned)
     if parts:
-        # Names tend to be the first free-text fragment; birthplace is usually
-        # the trailing location-like fragment once date/time have been removed.
+        # Birthplace is usually the trailing location-like fragment once
+        # date/time/name/question have been removed.
         return parts[-1]
     return None
 
@@ -583,8 +673,14 @@ def _clean_place(value: str) -> str:
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0]
-    cleaned = re.sub(r"^(?:hrs?|hours?|time|at)\b", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b(?:hrs?|hours?|time|ist|india timezone)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:hrs?|hours?|ist|india\s+timezone)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip(" .,-")
+    cleaned = re.sub(
+        r"^(?:(?:hrs?|hours?|time|at|in|on|around|near)\b[\s.,-]*)+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip(" .,-")
 

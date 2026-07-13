@@ -466,7 +466,8 @@ def _looks_like_question_or_intent(text: str) -> bool:
     return bool(
         re.search(
             r"\b(what|why|how|when|where|which|who|will|should|can|could|would|"
-            r"career|marriage|finance|relationship|health|remedy|prediction|question|query)\b",
+            r"career|marriage|finance|relationship|health|remed\w*|predict\w*|"
+            r"kundli|kundali|horoscope|chart|please|question|query)\b",
             lowered,
         )
     )
@@ -478,6 +479,47 @@ _MONTHS_PATTERN = (
 )
 
 
+def _strip_question_clauses(text: str) -> str:
+    """Drop question/intent sentences so they can never pollute place inference.
+
+    "…, New Delhi. How is my health going to be in 2026" → "…, New Delhi." """
+    sentences = re.split(r"(?<=[.?!])\s+|\n+", text or "")
+    kept = [s for s in sentences if s.strip() and not _looks_like_question_or_intent(s)]
+    return " ".join(kept)
+
+
+_NAME_TOKEN = r"([A-Za-z][A-Za-z\s.']{1,60}?)"
+
+_NAME_PATTERNS = (
+    # "my name is Sandeep Amar" / "name: Priya Sharma" / "name - Anant"
+    rf"\bmy\s+name\s+is\s+{_NAME_TOKEN}(?=[,.;\n]|$)",
+    rf"\bname\s*[:=\-–]\s*{_NAME_TOKEN}(?=[,.;\n]|\s+dob\b|\s+tob\b|\s+pob\b|$)",
+    rf"\bname\s+{_NAME_TOKEN}(?=[,.;\n]|$)",
+    # "Sandeep Amar is my name"
+    rf"\b{_NAME_TOKEN}\s+is\s+my\s+name\b",
+    # Leading "Sandeep Amar, DOB …" / "anant mendiratta. 16july 1987 …"
+    rf"^\s*{_NAME_TOKEN}\s*[,.]\s*(?:dob\b|date\s+of\s+birth|born\b|birth\b|\d)",
+)
+
+
+def _extract_name(text: str) -> str | None:
+    """Extract the person's name so it can never be mistaken for a place."""
+    for pattern in _NAME_PATTERNS:
+        match = re.search(pattern, text or "", re.IGNORECASE)
+        if match:
+            name = re.sub(r"\s+", " ", match.group(1)).strip(" .,-")
+            if (
+                name
+                and not _looks_like_question_or_intent(name)
+                and not re.search(r"\d", name)
+                # A candidate carrying birth/place vocabulary is a mis-split
+                # detail fragment ("Born in Springfield"), not a person.
+                and not re.search(r"\b(?:born|birth|place|city|dob|tob|pob)\b", name, re.IGNORECASE)
+            ):
+                return name
+    return None
+
+
 def _infer_unlabeled_place(text: str) -> str | None:
     """Infer an unlabeled birthplace from free-form input.
 
@@ -486,9 +528,11 @@ def _infer_unlabeled_place(text: str) -> str | None:
     date/time/label fragments — no city lists or keyword hardcoding.
     """
     # 1) Prefer the free-text fragment that follows the birth time.
+    #    Anchors: "1526", "1526 hrs", "15:26", "11 AM" — all real user shapes.
     after_time = re.search(
         r"(?:\b\d{3,4}\s*(?:hrs|hours?|ist|india(?:n)?\s+timezone)?\b|"
-        r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b)"
+        r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b|"
+        r"\b\d{1,2}\s*(?:am|pm)\b)"
         r"\s*(?:[,.)-]|\btime\b)?\s*([A-Za-z][A-Za-z\s,.-]{1,120})",
         text,
         re.IGNORECASE,
@@ -508,7 +552,7 @@ def _infer_unlabeled_place(text: str) -> str | None:
         flags=re.IGNORECASE,
     )
     scrubbed = re.sub(
-        r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b|\b\d{3,4}\s*(?:hrs|hours?|ist)?\b",
+        r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b|\b\d{3,4}\s*(?:hrs|hours?|ist)?\b|\b\d{1,2}\s*(?:am|pm)\b",
         " ",
         scrubbed,
         flags=re.IGNORECASE,
@@ -572,6 +616,7 @@ def extract_lalkitab_birth_input(
         r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b",
         r"\b\d{1,2}\s*(?:am|pm)\b",
         r"\b\d{3,4}\s*(?:hrs|hours?)\b",
+        r"\b(\d{3,4})\s*(?:ist|india(?:n)?\s+timezone)\b",
     ]
     for pattern in time_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -600,15 +645,30 @@ def extract_lalkitab_birth_input(
     elif re.search(r"\bIST\b", text, re.IGNORECASE) or re.search(r"\bindia(?:n)?\s+timezone\b", text, re.IGNORECASE):
         normalized["timezone"] = "+05:30"
 
+    # The person's name is a first-class field so it can never be mistaken
+    # for the birth place ("Sandeep Amar, DOB 25/01/1975, …").
+    extracted_name = _extract_name(text)
+    if extracted_name:
+        normalized["name"] = extracted_name
+
+    # All place matching runs on text with the name clause removed.
+    place_text = text
+    if extracted_name:
+        place_text = re.sub(
+            rf"\b(?:my\s+name\s+is\s+)?{re.escape(extracted_name)}(?:\s+is\s+my\s+name)?\b",
+            " ",
+            place_text,
+            flags=re.IGNORECASE,
+        )
     place_match = re.search(
-        r"\b(?:birth\s*place|birthplace|place\s*of\s*birth|pob|p\.?o\.?b\.?|born\s+in|place|city)\s*[:=]?\s*([A-Za-z][A-Za-z\s,.-]{1,120})",
-        text,
+        r"\b(?:birth\s*place|birthplace|place\s*of\s*birth|pob|p\.?o\.?b\.?|born\s+in|place|city)\s*[:=\-–]?\s*([A-Za-z][A-Za-z\s,.-]{1,120})",
+        place_text,
         re.IGNORECASE,
     )
     if not place_match:
         place_match = re.search(
             r"\b([A-Za-z][A-Za-z\s,.-]{1,80})\s+(?:born|birthplace)\b",
-            text,
+            place_text,
             re.IGNORECASE,
         )
     if place_match:
@@ -617,10 +677,17 @@ def extract_lalkitab_birth_input(
         normalized["birth_place"] = parts[-1] if parts else birth_place
     elif normalized.get("date"):
         # No labelled place, but the message carries birth details — infer the
-        # unlabeled place ("16 July 1987, 15:26, Delhi India").
-        inferred_place = _infer_unlabeled_place(text)
+        # unlabeled place ("16 July 1987, 15:26, Delhi India"). Question
+        # sentences and the person's name are removed first so neither can
+        # ever be inferred as the place.
+        inferred_place = _infer_unlabeled_place(_strip_question_clauses(place_text))
         if inferred_place:
             normalized["birth_place"] = inferred_place
+    if normalized.get("birth_place") and extracted_name and (
+        normalized["birth_place"].strip().lower() == extracted_name.strip().lower()
+    ):
+        # Never geocode the user's own name.
+        normalized.pop("birth_place")
     if normalized.get("birth_place"):
         resolved_place = _resolve_place(normalized["birth_place"]) if resolve_known_places else None
         if resolved_place:
@@ -655,22 +722,28 @@ def format_lalkitab_missing_input_clarification(normalized: dict[str, Any], miss
         if label not in deduped_missing:
             deduped_missing.append(label)
 
+    # Only validated facts are presented as understood: dates/times are
+    # deterministically normalized, and a place counts only once geocoding
+    # confirmed it. An unvalidated guess must never be echoed as fact
+    # ("I understood birth place Sandeep Amar").
     understood = []
+    if normalized.get("name"):
+        understood.append(f"name {normalized['name']}")
     if normalized.get("date"):
         understood.append(f"birth date {normalized['date']}")
     if normalized.get("time"):
         understood.append(f"birth time {normalized['time']}")
     if normalized.get("birth_place_resolved"):
         understood.append(f"birth place {normalized['birth_place_resolved']}")
-    elif normalized.get("birth_place"):
-        understood.append(f"birth place {normalized['birth_place']}")
 
-    prefix = f"I understood {', '.join(understood)}. " if understood else ""
+    prefix = f"I have your {', '.join(understood)}. " if understood else ""
     if "birth place (city and country)" in deduped_missing and normalized.get("birth_place"):
         return (
             f"{prefix}I could not find \"{normalized['birth_place']}\" on the map yet. "
             "Could you confirm the city and country (or the nearest major city, if it is a small town)?"
         )
+    if deduped_missing == ["birth place (city and country)"]:
+        return f"{prefix}Which city (and country) were you born in?"
     return f"{prefix}Please share the missing detail(s): {', '.join(deduped_missing)}."
 
 
@@ -686,12 +759,16 @@ def select_lalkitab_endpoint_ids(message: str) -> list[str]:
         (("debt", "debts", "karmic", "rin"), ("lalkitab_debts",)),
         (("house", "houses", "planet", "placement"), ("lalkitab_houses",)),
         (("prediction", "future", "timing", "career", "marriage", "relationship", "relocation", "foreign"), ("lalkitab_predictions", "lalkitab_varshphal")),
+        (("health", "wellness", "illness", "disease", "medical", "swasthya"), ("lalkitab_predictions",)),
         (("lucky", "favorable", "colour", "color", "number"), ("lalkitab_lucky",)),
         (("varshphal", "annual", "yearly"), ("lalkitab_varshphal",)),
     ]
     for terms, endpoints in rules:
         if any(term in text for term in terms):
             selected.extend(endpoints)
+    # A question about a specific year ("… in 2026") is an annual-chart question.
+    if re.search(r"\b20\d{2}\b", text):
+        selected.append("lalkitab_varshphal")
     if selected == [LAL_KITAB_CHART_ENDPOINT]:
         selected.extend(("lalkitab_predictions", "lalkitab_remedies"))
 
@@ -1062,6 +1139,7 @@ async def build_lalkitab_runtime_context(
     message: str,
     *,
     pending_state: dict[str, Any] | None = None,
+    birth_profile: dict[str, Any] | None = None,
 ) -> LalKitabPlanResult:
     if not is_lalkitab_agent(config):
         return LalKitabPlanResult(handled=False)
@@ -1073,8 +1151,16 @@ async def build_lalkitab_runtime_context(
     )
     has_previous_chart = bool(previous_api_context.get("chart_context"))
     # A message that *is* birth details ("16 July 1987, 15:26, Delhi India")
-    # counts as astrology intent even without any keyword.
-    requires_api = message_requires_lalkitab_api(message) or message_contains_birth_details(message)
+    # counts as astrology intent even without any keyword — whether detected
+    # deterministically or by the LLM understanding layer.
+    requires_api = (
+        message_requires_lalkitab_api(message)
+        or message_contains_birth_details(message)
+        or bool(
+            isinstance(birth_profile, dict)
+            and any(birth_profile.get(key) for key in ("birth_date", "birth_time", "birth_place", "question"))
+        )
+    )
     # A bare follow-up ("Illinois", "10:30 AM") won't trip the intent keywords,
     # so continue any in-flight birth-input / disambiguation collection. Once a
     # chart exists, remembered birth input alone is not enough to rerun Vedika.
@@ -1115,6 +1201,35 @@ async def build_lalkitab_runtime_context(
         normalized_birth_input.update(previous_api_context.get("normalized_birth_input") or {})
     normalized_birth_input.update(pending_state.get("normalized_birth_input") or {})
     normalized_birth_input.update({k: v for k, v in extracted.items() if v not in (None, "")})
+    # The LLM birth profile is the most reliable interpretation of this turn —
+    # it wins over the regex extraction above.
+    question_text: str | None = None
+    if isinstance(birth_profile, dict):
+        profile_date = _normalize_date(str(birth_profile.get("birth_date"))) if birth_profile.get("birth_date") else None
+        profile_time = _normalize_time(str(birth_profile.get("birth_time"))) if birth_profile.get("birth_time") else None
+        if profile_date:
+            normalized_birth_input["date"] = profile_date
+            normalized_birth_input["birth_date"] = profile_date
+        if profile_time:
+            normalized_birth_input["time"] = profile_time
+            normalized_birth_input["birth_time"] = profile_time
+        profile_place = birth_profile.get("birth_place")
+        profile_name = birth_profile.get("name")
+        if profile_name:
+            normalized_birth_input["name"] = str(profile_name)
+        if profile_place and (
+            not profile_name or str(profile_place).strip().lower() != str(profile_name).strip().lower()
+        ):
+            # A new place invalidates any previously resolved coordinates.
+            if str(profile_place).strip().lower() != str(normalized_birth_input.get("birth_place") or "").strip().lower():
+                for stale in ("latitude", "longitude", "timezone", "birth_place_resolved"):
+                    normalized_birth_input.pop(stale, None)
+            normalized_birth_input["birth_place"] = str(profile_place)
+        if birth_profile.get("question"):
+            question_text = str(birth_profile["question"])
+        has_new_birth_input = has_new_birth_input or any(
+            birth_profile.get(key) for key in ("birth_date", "birth_time", "birth_place")
+        )
     if (
         not normalized_birth_input.get("birth_place")
         and normalized_birth_input.get("date")
@@ -1124,8 +1239,10 @@ async def build_lalkitab_runtime_context(
         if followup_place:
             normalized_birth_input["birth_place"] = followup_place
 
+    # Endpoint selection follows the user's actual question when the
+    # understanding layer separated it from the details.
     selected_endpoint_ids = (
-        select_lalkitab_endpoint_ids(message)
+        select_lalkitab_endpoint_ids(question_text or message)
         if requires_api or has_new_birth_input or not has_previous_chart
         else []
     )

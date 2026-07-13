@@ -262,5 +262,5 @@ export interface KundaliChartData {
   style?: string;
   ascendant?: { sign_number: number; name: string; hindi?: string } | null;
   houses: KundaliHouse[];
-  birth?: { date?: string | null; time?: string | null; place?: string | null } | null;
+  birth?: { name?: string | null; date?: string | null; time?: string | null; place?: string | null } | null;
 }

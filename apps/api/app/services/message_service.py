@@ -49,6 +49,7 @@ from .observability_service import ObservabilityService
 from .prompt_assembler import PromptAssembler
 from .skill_registry import BuiltInSkillRegistry
 from .artifact_registry import is_artifact_enabled
+from .birth_profile_extractor import extract_birth_profile
 from .lalkitab_runtime import (
     build_lalkitab_runtime_context,
     extract_kundali_chart_summary,
@@ -777,6 +778,80 @@ class MessageService:
         return {"normalized_birth_input": normalized} if normalized else {}
 
     _LALKITAB_COORD_FIELD_IDS = {"latitude", "longitude", "timezone", "lat", "lon", "lng", "long", "coordinates"}
+    _LALKITAB_PROFILE_TO_INPUT = (
+        ("name", "name"),
+        ("birth_date", "birth_date"),
+        ("birth_time", "birth_time"),
+        ("birth_place", "birth_place"),
+    )
+
+    async def _prepare_lalkitab_turn(
+        self,
+        turn_plan: AgentTurnPlan,
+        message: str,
+        policy_state: dict[str, Any],
+        llm_provider: Any | None = None,
+    ) -> tuple[AgentTurnPlan, dict[str, Any] | None]:
+        """LLM-first understanding for Lal Kitab turns.
+
+        Runs the birth-profile extractor (name / date / time / place /
+        question separated by an LLM, deterministically validated) and uses it
+        to correct the planner's view of the turn, so a person's name or the
+        question can never be treated as the birth place. Returns the adapted
+        plan plus the profile for the chart-first runtime.
+        """
+        if not is_lalkitab_agent(self.agent_config or {}):
+            return turn_plan, None
+
+        prior_profile = {
+            **(policy_state.get("resolved_inputs") if isinstance(policy_state.get("resolved_inputs"), dict) else {}),
+            **(turn_plan.resolved_inputs or {}),
+        }
+        try:
+            profile = await extract_birth_profile(
+                message,
+                prior_profile=prior_profile,
+                llm_provider=llm_provider or self.llm_provider,
+            )
+        except Exception as exc:  # pragma: no cover - extractor is defensive already
+            logger.warning("lalkitab_birth_profile_failed", error=str(exc))
+            profile = None
+
+        if profile:
+            # The profile is the authoritative interpretation of this turn.
+            for profile_key, input_key in self._LALKITAB_PROFILE_TO_INPUT:
+                if profile.get(profile_key):
+                    turn_plan.resolved_inputs[input_key] = profile[profile_key]
+            if profile.get("question"):
+                turn_plan.question = profile["question"]
+            # Re-derive missing inputs now that the profile filled fields the
+            # planner missed (this is what previously forced wrong clarifications).
+            still_missing = [
+                item for item in (turn_plan.missing_inputs or [])
+                if str(item.get("id", "")) not in turn_plan.resolved_inputs
+            ]
+            if still_missing != (turn_plan.missing_inputs or []):
+                turn_plan.missing_inputs = still_missing
+                turn_plan.pending_inputs = still_missing
+                if not still_missing and turn_plan.action == "ask_missing_input":
+                    turn_plan.action = "ready"
+                    turn_plan.intent = "answer"
+                    turn_plan.public_response = None
+                    turn_plan.response_text = ""
+            # Genuine ambiguities (e.g. 03/04/1990 day-month order) are the
+            # only reason to pause and ask.
+            required_missing = any(
+                not turn_plan.resolved_inputs.get(field)
+                for field in ("birth_date", "birth_time", "birth_place")
+            )
+            if profile.get("ambiguities") and required_missing:
+                turn_plan.action = "clarify"
+                turn_plan.intent = "clarify"
+                clarification = " ".join(profile["ambiguities"])
+                turn_plan.public_response = clarification
+                turn_plan.response_text = clarification
+
+        return self._adapt_turn_plan_for_lalkitab(turn_plan), profile
 
     def _adapt_turn_plan_for_lalkitab(self, turn_plan: AgentTurnPlan) -> AgentTurnPlan:
         """Keep Lal Kitab turns on the chart-first runtime.
@@ -1009,6 +1084,7 @@ Updated memory:"""
         lalkitab_plan,
         rag_context: dict,
         rag_tool_result: ToolResult | None,
+        birth_profile: dict | None = None,
     ) -> AgentResult:
         """Generate a Lal Kitab answer grounded in chart-first API context plus RAG."""
         api_context = lalkitab_plan.api_context or {}
@@ -1032,13 +1108,24 @@ Updated memory:"""
             if is_artifact_enabled(self.agent_config or {}, "kundali_chart")
             else None
         )
+        normalized_birth = api_context.get("normalized_birth_input") or {}
+        user_name = normalized_birth.get("name") or (birth_profile or {}).get("name")
         if kundali_chart:
-            normalized_birth = api_context.get("normalized_birth_input") or {}
             kundali_chart["birth"] = {
+                "name": user_name,
                 "date": normalized_birth.get("date"),
                 "time": normalized_birth.get("time"),
                 "place": normalized_birth.get("birth_place_resolved") or normalized_birth.get("birth_place"),
             }
+        name_rule = (
+            f"- Address the user by name ({user_name}) naturally, like an astrologer who knows them.\n"
+            if user_name else ""
+        )
+        profile_question = (birth_profile or {}).get("question")
+        question_rule = (
+            f"- The user's actual question this turn is: \"{profile_question}\" — answer that directly.\n"
+            if profile_question else ""
+        )
         chart_step = (
             "2. The kundali chart itself is rendered as a visual diagram by the app alongside\n"
             "   your reply — do NOT print a chart table, ASCII chart, or house-by-house grid.\n"
@@ -1067,6 +1154,7 @@ Rules:
 - Do not claim certainty beyond the provided sources.
 - Reply in the language the user is writing in (Hindi, Hinglish, or English); use both
   English and Hindi names for rashis and planets (e.g. "Pisces (Meen)", "Shani (Saturn)").
+{name_rule}{question_rule}
 
 Answer format — follow this order strictly (the kundali chart always comes FIRST,
 before any interpretation, prediction, or remedy):
@@ -1117,6 +1205,7 @@ Answer the user directly.
                 "validation_passed": True,
                 "validation_confidence": 0.92,
                 "lalkitab_runtime": True,
+                "extractor_source": (birth_profile or {}).get("source"),
                 "kundali_chart": _sanitize_for_json(kundali_chart) if kundali_chart else None,
                 "api_context": {
                     "normalized_birth_input": api_context.get("normalized_birth_input"),
@@ -1989,7 +2078,9 @@ Rules:
                 system_prompt=self.system_prompt or "",
                 fallback_plan=fallback_turn_plan,
             )
-            turn_plan = self._adapt_turn_plan_for_lalkitab(turn_plan)
+            turn_plan, lalkitab_profile = await self._prepare_lalkitab_turn(
+                turn_plan, runtime_message, policy_state, llm_provider=planner_provider
+            )
 
             if turn_plan.should_short_circuit:
                 response_text = turn_plan.response_text
@@ -2124,7 +2215,10 @@ Rules:
                     **self._lalkitab_pending_from_policy(policy_state, turn_plan),
                 }
                 lalkitab_plan = await build_lalkitab_runtime_context(
-                    self.agent_config or {}, runtime_message, pending_state=lalkitab_pending
+                    self.agent_config or {},
+                    runtime_message,
+                    pending_state=lalkitab_pending,
+                    birth_profile=lalkitab_profile,
                 )
 
             if lalkitab_plan.handled and (
@@ -2171,6 +2265,7 @@ Rules:
                     lalkitab_plan=lalkitab_plan,
                     rag_context=rag_context,
                     rag_tool_result=rag_tool_result,
+                    birth_profile=lalkitab_profile,
                 )
 
             # 4. RUN SOTA ORCHESTRATOR LOOP
@@ -2542,7 +2637,9 @@ Rules:
                 system_prompt=self.system_prompt or "",
                 fallback_plan=fallback_turn_plan,
             )
-            turn_plan = self._adapt_turn_plan_for_lalkitab(turn_plan)
+            turn_plan, lalkitab_profile = await self._prepare_lalkitab_turn(
+                turn_plan, runtime_message, policy_state, llm_provider=planner_provider
+            )
             for activity in turn_plan.activities:
                 if activity.get("visibility") != "hidden":
                     yield StreamingMessageResponse(**activity_stream_response_kwargs(activity, conversation_id))
@@ -2625,7 +2722,10 @@ Rules:
                     **self._lalkitab_pending_from_policy(policy_state, turn_plan),
                 }
                 lalkitab_plan = await build_lalkitab_runtime_context(
-                    self.agent_config or {}, runtime_message, pending_state=lalkitab_pending
+                    self.agent_config or {},
+                    runtime_message,
+                    pending_state=lalkitab_pending,
+                    birth_profile=lalkitab_profile,
                 )
 
             # Surface real runtime activity (geocoding, connector calls) as it happens.
@@ -2850,6 +2950,7 @@ Rules:
                     lalkitab_plan=lalkitab_plan,
                     rag_context=rag_context,
                     rag_tool_result=rag_tool_result,
+                    birth_profile=lalkitab_profile,
                 )
             elif isinstance(self.orchestrator, ShopifyOrchestrator):
                 # Define a queue to capture status updates from the orchestrator
