@@ -199,12 +199,33 @@ function mergeVariant(product: ProductData, variant?: ProductVariantData): Produ
     currency_source: variant.currency_source || product.currency_source,
     image_url: variant.image_url || variant.image || product.image_url || product.image,
     product_url: variant.product_url || product.product_url || product.url,
-    variant_url: variant.variant_url || product.variant_url,
+    // Some catalog sources only provide the parent product URL. Keep the
+    // selected variant in the destination so changing an option cannot send
+    // the shopper back to the default variant.
+    variant_url: getVariantUrl(product, variant),
     in_stock: variant.in_stock ?? product.in_stock,
     variant_id: variant.variant_id || variant.id || product.variant_id,
     variant_title: variant.variant_title || variant.title || product.variant_title,
     variant_options: variant.variant_options || product.variant_options,
   };
+}
+
+function getVariantUrl(product: ProductData, variant: ProductVariantData): string | undefined {
+  if (variant.variant_url) return variant.variant_url;
+
+  const baseUrl = variant.product_url || product.product_url || product.url || product.variant_url;
+  const rawVariantId = variant.variant_id || variant.id;
+  if (!baseUrl || !rawVariantId) return baseUrl;
+
+  const variantId = String(rawVariantId).split('/').pop() || String(rawVariantId);
+  try {
+    const url = new URL(baseUrl);
+    url.searchParams.set('variant', variantId);
+    return url.toString();
+  } catch {
+    const separator = baseUrl.includes('?') ? '&' : '?';
+    return `${baseUrl}${separator}variant=${encodeURIComponent(variantId)}`;
+  }
 }
 
 function VariantSelector({

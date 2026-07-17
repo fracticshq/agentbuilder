@@ -296,6 +296,60 @@ describe('ChatWindow', () => {
       openSpy.mockRestore();
     });
 
+    it('adds the selected variant to the product URL when the catalog omits variant URLs', () => {
+      setBrand();
+      const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+      const productMessages: Message[] = [
+        { id: '1', content: 'Show me the speaker colours', role: 'user', timestamp: new Date() },
+        {
+          id: '2',
+          content: 'Here are the available colours.',
+          role: 'assistant',
+          timestamp: new Date(),
+          products: [
+            {
+              product_group_id: 'shopify:speaker',
+              sku: 'SPEAKER-BLK',
+              name: 'Wireless Speaker',
+              price: 4190000,
+              currency: 'INR',
+              product_url: 'https://soundtrails.in/products/wireless-speaker?ref=chat',
+              has_variants: true,
+              variants: [
+                {
+                  variant_id: '49151795560721',
+                  variant_options: { Color: 'Black' },
+                  price: 4190000,
+                  currency: 'INR',
+                  is_default: true,
+                },
+                {
+                  variant_id: 'gid://shopify/ProductVariant/49151800443153',
+                  variant_options: { Color: 'White' },
+                  price: 4290000,
+                  currency: 'INR',
+                },
+              ],
+            },
+          ],
+        },
+      ];
+
+      render(
+        <ChatWindow messages={productMessages} isTyping={false} onSendMessage={vi.fn()} onClose={noopClose} onToggleExpand={noopExpand} />
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /White/ }));
+      fireEvent.click(screen.getByRole('button', { name: 'Learn more about this product' }));
+
+      expect(openSpy).toHaveBeenCalledWith(
+        'https://soundtrails.in/products/wireless-speaker?ref=chat&variant=49151800443153',
+        '_blank',
+        'noopener,noreferrer'
+      );
+      openSpy.mockRestore();
+    });
+
     it('expands variant tiles inline when more variants are available', () => {
       setBrand();
       const colors = ['Black', 'White', 'Silver', 'Walnut', 'Blue', 'Red'];
