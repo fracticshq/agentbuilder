@@ -6,6 +6,10 @@ Element.prototype.scrollIntoView = () => {};
 
 class MockWebSocket {
   static lastInstance: MockWebSocket | null = null;
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
   url: string;
   readyState = 0; // CONNECTING
   onopen: ((e: Event) => void) | null = null;
@@ -32,9 +36,4 @@ class MockWebSocket {
     this.onclose?.(new CloseEvent('close'));
   }
 }
-(MockWebSocket as any).CONNECTING = 0;
-(MockWebSocket as any).OPEN = 1;
-(MockWebSocket as any).CLOSING = 2;
-(MockWebSocket as any).CLOSED = 3;
-
 globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;

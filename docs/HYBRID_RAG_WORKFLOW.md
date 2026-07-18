@@ -6,16 +6,16 @@ This guide explains how NOVA combines BM25 keyword search and vector search insi
 
 - Message endpoints: `apps/api/app/api/v1/endpoints/messages.py`
 - Message orchestration: `apps/api/app/services/message_service.py`
-- Agent planner/executor: `apps/api/packages/agent_runtime/src/agent_runtime/orchestrator.py`
-- Retrieval tool wrapper: `apps/api/packages/tools/src/tools/builtin/retrieval_tool.py`
-- Retrieval pipeline: `apps/api/packages/retrieval/src/retrieval/pipeline.py`
-- Atlas vector search: `apps/api/packages/retrieval/src/retrieval/vector/atlas_search.py`
-- Qdrant vector search: `apps/api/packages/retrieval/src/retrieval/vector/qdrant_search.py`
-- Voyage embeddings client: `apps/api/packages/retrieval/src/retrieval/vector/voyage_client.py`
-- BM25 text search: `apps/api/packages/retrieval/src/retrieval/bm25/text_search.py`
-- RRF fusion: `apps/api/packages/retrieval/src/retrieval/fusion/rrf.py`
-- Reranker: `apps/api/packages/retrieval/src/retrieval/fusion/reranker.py`
-- Retrieval types: `apps/api/packages/retrieval/src/retrieval/types.py`
+- Agent planner/executor: `packages/agent_runtime/src/agent_runtime/orchestrator.py`
+- Retrieval tool wrapper: `packages/tools/src/tools/builtin/retrieval_tool.py`
+- Retrieval pipeline: `packages/retrieval/src/retrieval/pipeline.py`
+- Atlas vector search: `packages/retrieval/src/retrieval/vector/atlas_search.py`
+- Qdrant vector search: `packages/retrieval/src/retrieval/vector/qdrant_search.py`
+- Voyage embeddings client: `packages/retrieval/src/retrieval/vector/voyage_client.py`
+- BM25 text search: `packages/retrieval/src/retrieval/bm25/text_search.py`
+- RRF fusion: `packages/retrieval/src/retrieval/fusion/rrf.py`
+- Reranker: `packages/retrieval/src/retrieval/fusion/reranker.py`
+- Retrieval types: `packages/retrieval/src/retrieval/types.py`
 
 ## Short Version
 
@@ -189,6 +189,23 @@ The tool then returns:
 - structured `dealers`
 
 Products and dealers are extracted from top-level `DocumentChunk.product_data` and `DocumentChunk.dealer_data`.
+
+### 5.1 Retrieval Availability Contract
+
+Retrieval distinguishes a valid empty search from a backend outage. Its
+metadata has one of four safe statuses:
+
+- `evidence`: at least one grounding chunk is available.
+- `no_evidence`: every attempted backend completed, but no chunk matched.
+- `degraded`: a backend failed while another completed; surviving chunks may
+  still be used.
+- `error`: no backend completed. The tool returns a generic retryable failure
+  instead of presenting an ungrounded answer as retrieved knowledge.
+
+`sources` and bounded citation candidates are returned only from usable
+retrieval output. The message layer deduplicates and sanitizes them before
+exposing response citations. Provider messages, connection details, and raw
+exception text are deliberately not propagated to clients.
 
 ### 6. RetrievalPipeline Detects Intent And Filters Content
 
@@ -474,4 +491,3 @@ Note: `RetrievalTool` calls the pipeline with `max_chunks=5`, so agent tool resp
 - BM25 creates a MongoDB text index automatically if possible.
 - Vector failures do not necessarily break retrieval because BM25 can still return results.
 - Reranker failures do not necessarily break retrieval because fallback reranking is available.
-

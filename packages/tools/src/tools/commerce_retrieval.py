@@ -55,6 +55,117 @@ CURRENCY_CODES = {
     "thb", "try", "usd", "zar",
 }
 
+_MAX_CITATION_CANDIDATES = 5
+_MAX_CITATION_TEXT_CHARS = 300
+
+_RETRIEVAL_STATUSES = {"evidence", "no_evidence", "degraded", "error"}
+_RETRIEVAL_BACKENDS = {"vector", "bm25"}
+_BACKEND_STATUSES = {"success", "unavailable", "error", "disabled"}
+_BACKEND_REASONS = {
+    "authentication_failed",
+    "backend_unavailable",
+    "collection_unavailable",
+    "backend_error",
+}
+_RETRIEVAL_REASONS = {
+    "partial_backend_failure",
+    "no_search_backend_succeeded",
+    "pipeline_error",
+    "retrieval_error",
+}
+
+
+def safe_retrieval_metadata(context: Any) -> Dict[str, Any]:
+    """Return the public-safe subset of a RetrievalContext's diagnostics.
+
+    Commerce may use direct catalog records in addition to RAG, but callers
+    still need to distinguish a valid empty RAG result from a backend outage.
+    Keep this contract intentionally small so provider error details cannot be
+    forwarded through commerce diagnostics.
+    """
+    raw_metadata = getattr(context, "retrieval_metadata", {}) or {}
+    raw_metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+
+    status = raw_metadata.get("status")
+    if status not in _RETRIEVAL_STATUSES:
+        status = "evidence" if getattr(context, "chunks", None) else "no_evidence"
+
+    reason = raw_metadata.get("reason")
+    if reason not in _RETRIEVAL_REASONS:
+        reason = "retrieval_error" if status == "error" else (
+            "partial_backend_failure" if status == "degraded" else None
+        )
+
+    backend_status: Dict[str, Dict[str, str]] = {}
+    raw_backend_status = raw_metadata.get("backend_status")
+    if isinstance(raw_backend_status, dict):
+        for backend, details in raw_backend_status.items():
+            if backend not in _RETRIEVAL_BACKENDS or not isinstance(details, dict):
+                continue
+            backend_state = details.get("status")
+            if backend_state not in _BACKEND_STATUSES:
+                continue
+            safe_details: Dict[str, str] = {"status": backend_state}
+            backend_reason = details.get("reason")
+            if backend_reason in _BACKEND_REASONS:
+                safe_details["reason"] = backend_reason
+            backend_status[backend] = safe_details
+
+    return {
+        "status": status,
+        "reason": reason,
+        "backend_status": backend_status,
+        "successful_backends": [
+            backend
+            for backend, details in backend_status.items()
+            if details["status"] == "success"
+        ],
+        "failed_backends": [
+            backend
+            for backend, details in backend_status.items()
+            if details["status"] in {"error", "unavailable"}
+        ],
+    }
+
+
+def citation_candidates_from_context(context: Any) -> List[Dict[str, Optional[str]]]:
+    """Return bounded source fields suitable for user-facing citations."""
+    candidates: List[Dict[str, Optional[str]]] = []
+    seen_doc_ids = set()
+    for chunk in list(getattr(context, "chunks", []) or []):
+        doc_id = _citation_text(getattr(chunk, "doc_id", None), limit=128)
+        if not doc_id or doc_id in seen_doc_ids:
+            continue
+        seen_doc_ids.add(doc_id)
+        candidates.append({
+            "doc_id": doc_id,
+            "title": _citation_text(getattr(chunk, "title", None), limit=256) or doc_id,
+            "url": _citation_url(getattr(chunk, "url", None)),
+            "snippet": _citation_text(
+                getattr(chunk, "text", None) or getattr(chunk, "content", None),
+                limit=_MAX_CITATION_TEXT_CHARS,
+            ),
+        })
+        if len(candidates) >= _MAX_CITATION_CANDIDATES:
+            break
+    return candidates
+
+
+def _citation_text(value: Any, *, limit: int) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = " ".join(value.split())
+    return normalized[:limit] or None
+
+
+def _citation_url(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    parsed = urlsplit(value.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return urlunsplit(parsed)
+
 
 @dataclass
 class CommerceIntent:
@@ -148,6 +259,8 @@ class CommerceRetrievalPipeline:
                     "direct_catalog": len(direct_products),
                     "retrieval_products": len(retrieval_products),
                 },
+                "retrieval": safe_retrieval_metadata(retrieval_context),
+                "citation_candidates": citation_candidates_from_context(retrieval_context),
                 "retried_with_expanded_query": retried,
                 "invalid_reasons": invalid_reasons[:10],
                 "variant_groups": sum(1 for product in products if product.get("has_variants")),

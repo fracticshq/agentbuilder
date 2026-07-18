@@ -3,9 +3,11 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pymongo.errors import ServerSelectionTimeoutError
 
 from app.api.v1.admin.settings import router
 from app.auth.dependencies import get_db, require_dashboard_access
+from app.connections import connection_manager
 from app.dependencies import get_runtime_settings_service, get_settings
 from app.services.runtime_settings_service import (
     RuntimeSettingsService,
@@ -136,6 +138,63 @@ async def test_update_settings_rejects_unknown_keys():
 
     with pytest.raises(RuntimeSettingsValidationError):
         await service.update_settings({"unknown.setting": "value"})
+
+
+@pytest.mark.asyncio
+async def test_runtime_values_fall_back_to_environment_when_settings_store_is_stubbed(monkeypatch):
+    service = RuntimeSettingsService(
+        build_settings(
+            STRAPI_URL="https://strapi.example.com",
+            STRAPI_API_TOKEN="environment-token",
+        )
+    )
+    monkeypatch.setattr(connection_manager, "get_system_db", lambda: object())
+
+    config = await service.get_strapi_runtime_config()
+
+    assert config == {
+        "base_url": "https://strapi.example.com",
+        "api_token": "environment-token",
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_values_fall_back_to_environment_when_settings_store_is_unavailable(monkeypatch):
+    class UnavailableCollection:
+        def find(self, _query):
+            raise ServerSelectionTimeoutError("runtime settings store unavailable")
+
+    service = RuntimeSettingsService(
+        build_settings(
+            STRAPI_URL="https://strapi.example.com",
+            STRAPI_API_TOKEN="environment-token",
+        )
+    )
+    monkeypatch.setattr(
+        connection_manager,
+        "get_system_db",
+        lambda: {"runtime_settings": UnavailableCollection()},
+    )
+
+    config = await service.get_strapi_runtime_config()
+
+    assert config == {
+        "base_url": "https://strapi.example.com",
+        "api_token": "environment-token",
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_values_do_not_mask_unexpected_database_errors(monkeypatch):
+    service = RuntimeSettingsService(build_settings())
+
+    def raise_unexpected_database_error():
+        raise ValueError("invalid database configuration")
+
+    monkeypatch.setattr(connection_manager, "get_system_db", raise_unexpected_database_error)
+
+    with pytest.raises(ValueError, match="invalid database configuration"):
+        await service.get_strapi_runtime_config()
 
 
 def test_route_rejects_missing_dashboard_auth():

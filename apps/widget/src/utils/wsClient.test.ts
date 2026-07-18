@@ -1,16 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import { WebSocketClient } from './wsClient';
 
 // MockWebSocket is installed globally in src/test/setup.ts
 type MockWS = InstanceType<typeof WebSocket> & {
   url: string;
   readyState: number;
+  send: Mock<(data: string) => void>;
   simulateMessage: (data: object) => void;
   simulateClose: () => void;
 };
 
 function lastWS(): MockWS {
-  const ws = (globalThis.WebSocket as any).lastInstance as MockWS;
+  const ws = (globalThis.WebSocket as typeof WebSocket & { lastInstance: MockWS | null }).lastInstance;
   if (!ws) throw new Error('No MockWebSocket instance created yet');
   return ws;
 }
@@ -78,7 +80,7 @@ describe('WebSocketClient', () => {
       await p;
 
       expect(lastWS().send).toHaveBeenCalledOnce();
-      const sent = JSON.parse((lastWS().send as any).mock.calls[0][0]);
+      const sent = JSON.parse(lastWS().send.mock.calls[0][0]);
       expect(sent).toMatchObject({
         message: 'test msg',
         user_id: 'u1',

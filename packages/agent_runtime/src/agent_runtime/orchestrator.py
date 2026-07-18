@@ -20,6 +20,26 @@ SAFE_FALLBACK_MESSAGE = (
     "I’m not able to answer that reliably right now. Please try again in a moment "
     "or contact the brand team for help."
 )
+RETRIEVAL_UNAVAILABLE_MESSAGE = (
+    "I can’t access the information needed to answer that right now. "
+    "Please try again in a moment."
+)
+
+_RETRIEVAL_STATUSES = {"evidence", "no_evidence", "degraded", "error"}
+_RETRIEVAL_BACKENDS = {"vector", "bm25"}
+_BACKEND_STATUSES = {"success", "unavailable", "error", "disabled"}
+_BACKEND_REASONS = {
+    "authentication_failed",
+    "backend_unavailable",
+    "collection_unavailable",
+    "backend_error",
+}
+_RETRIEVAL_REASONS = {
+    "partial_backend_failure",
+    "no_search_backend_succeeded",
+    "pipeline_error",
+    "retrieval_error",
+}
 
 # Tool, retrieval, and connector output is data, never instructions. Pattern
 # filtering is only a first line of defence; synthesis also establishes an
@@ -49,6 +69,93 @@ def sanitize_untrusted_tool_data(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): sanitize_untrusted_tool_data(item) for key, item in value.items()}
     return value
+
+
+def _safe_retrieval_metadata(tool_result: ToolResult) -> Optional[Dict[str, Any]]:
+    """Read only the stable public retrieval contract from a tool result."""
+    metadata = getattr(tool_result, "metadata", {}) or {}
+    raw_retrieval = metadata.get("retrieval") if isinstance(metadata, dict) else None
+    if not isinstance(raw_retrieval, dict):
+        return None
+
+    status = raw_retrieval.get("status")
+    if status not in _RETRIEVAL_STATUSES:
+        return None
+
+    reason = raw_retrieval.get("reason")
+    if reason not in _RETRIEVAL_REASONS:
+        reason = "retrieval_error" if status == "error" else (
+            "partial_backend_failure" if status == "degraded" else None
+        )
+
+    backend_status: Dict[str, Dict[str, str]] = {}
+    raw_backend_status = raw_retrieval.get("backend_status")
+    if isinstance(raw_backend_status, dict):
+        for backend, details in raw_backend_status.items():
+            if backend not in _RETRIEVAL_BACKENDS or not isinstance(details, dict):
+                continue
+            backend_state = details.get("status")
+            if backend_state not in _BACKEND_STATUSES:
+                continue
+            safe_details: Dict[str, str] = {"status": backend_state}
+            backend_reason = details.get("reason")
+            if backend_reason in _BACKEND_REASONS:
+                safe_details["reason"] = backend_reason
+            backend_status[backend] = safe_details
+
+    return {
+        "status": status,
+        "reason": reason,
+        "backend_status": backend_status,
+        "successful_backends": [
+            backend
+            for backend, details in backend_status.items()
+            if details["status"] == "success"
+        ],
+        "failed_backends": [
+            backend
+            for backend, details in backend_status.items()
+            if details["status"] in {"error", "unavailable"}
+        ],
+    }
+
+
+def _has_usable_grounding(tool_result: ToolResult) -> bool:
+    """Whether a result contains source-backed data independent of an outage."""
+    metadata = getattr(tool_result, "metadata", {}) or {}
+    if not isinstance(metadata, dict):
+        return False
+    if any(bool(metadata.get(key)) for key in ("products", "dealers", "validated_products")):
+        return True
+    retrieval = _safe_retrieval_metadata(tool_result)
+    if retrieval and retrieval["status"] == "error":
+        # Failed retrievals must not make stale chunks or sources look like
+        # independent grounding. Structured catalog results above are an
+        # intentional exception because they come from a separate path.
+        return False
+    if any(bool(metadata.get(key)) for key in ("sources", "citations")):
+        return True
+    try:
+        return int(metadata.get("chunks_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _unavailable_retrieval_without_alternative_grounding(
+    results: Dict[Any, ToolResult],
+) -> Optional[Dict[str, Any]]:
+    """Return an outage diagnostic only when it left no usable grounding path."""
+    unavailable: Optional[Dict[str, Any]] = None
+    for tool_result in results.values():
+        retrieval = _safe_retrieval_metadata(tool_result)
+        if retrieval and retrieval["status"] == "error" and unavailable is None:
+            unavailable = retrieval
+
+    if unavailable is None:
+        return None
+    if any(_has_usable_grounding(tool_result) for tool_result in results.values()):
+        return None
+    return unavailable
 
 
 def _is_product_query(query: str) -> bool:
@@ -245,13 +352,17 @@ Output JSON Format:
                         "metadata": result.metadata,
                         "error": result.error,
                     })
-                scratchpad.append({
+                scratchpad_entry = {
                     "step": step.id,
                     "thought": step.thought,
                     "action": step.tool_name,
                     "input": step.tool_input,
-                    "observation": sanitize_untrusted_tool_data(result.data)
-                })
+                    "observation": sanitize_untrusted_tool_data(result.data),
+                }
+                retrieval_metadata = _safe_retrieval_metadata(result)
+                if retrieval_metadata:
+                    scratchpad_entry["retrieval"] = retrieval_metadata
+                scratchpad.append(scratchpad_entry)
             except Exception as e:
                 logger.error("step_execution_failed", step_id=step.id, error=str(e))
                 results[step.id] = ToolResult(success=False, data=None, error=str(e))
@@ -262,6 +373,26 @@ Output JSON Format:
                         "step_id": step.id,
                         "tool_name": step.tool_name,
                     })
+
+        unavailable_retrieval = _unavailable_retrieval_without_alternative_grounding(results)
+        if unavailable_retrieval:
+            logger.warning(
+                "orchestrator_retrieval_unavailable",
+                reason=unavailable_retrieval["reason"],
+            )
+            return AgentResult(
+                answer=RETRIEVAL_UNAVAILABLE_MESSAGE,
+                metadata={
+                    "fallback": True,
+                    "fallback_stage": "retrieval_unavailable",
+                    "fallback_reason": "retrieval_unavailable",
+                    "retryable": True,
+                    "retrieval": unavailable_retrieval,
+                    "tool_results": results,
+                    "validated_product_ids": [],
+                },
+                success=True,
+            )
 
         # 3. SYNTHESIS / REVIEW PHASE
         # Aggregate results into a final answer

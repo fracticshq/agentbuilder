@@ -108,6 +108,50 @@ secondary response produces a deterministic safe abstention. The response has
 remedy from unverified input. Public activity metadata omits birth data,
 precise location, provider endpoints, and provider diagnostic errors.
 
+## Retrieval, citations, and generation failures (P1)
+
+Message responses and stream terminal metadata may include a safe
+`retrieval` object. Its `status` tells clients whether the answer had usable
+grounding; it is not a provider-health diagnostic:
+
+| Status | Meaning | Client behavior |
+| --- | --- | --- |
+| `evidence` | One or more grounded chunks were retrieved. | Render the answer and its citations. |
+| `no_evidence` | The available retrieval backends completed successfully but found no applicable chunks. | Treat this as a valid no-match result; do not claim a backend outage. |
+| `degraded` | At least one backend was unavailable, while another completed. | Results may be usable; show citations when supplied and offer retry where grounding is important. |
+| `error` | No retrieval backend completed successfully. | Treat as retryable unavailability; do not present an ungrounded factual answer as evidence-backed. |
+
+The metadata may also contain bounded `successful_backends` and
+`failed_backends` lists and a stable, non-sensitive `reason`. It never exposes
+provider credentials, raw exception text, or infrastructure addresses.
+
+Responses may include `citations`, each with the safe shape
+`{doc_id, title, url, snippet, confidence}`. URLs are limited to HTTP(S),
+citations are deduplicated and bounded, and snippets are abbreviated. Clients
+must tolerate a response without citations, especially for `no_evidence` or
+commerce-only results.
+
+For a terminal LLM generation failure, the streaming endpoint emits one
+terminal `error` event rather than a successful `final_answer`/`done` sequence:
+
+```json
+{
+  "type": "error",
+  "content": "I’m sorry, I couldn’t generate a response right now. Please try again.",
+  "metadata": {"code": "generation_failed", "retryable": true}
+}
+```
+
+Treat it as retryable and do not display any provider-supplied failure detail.
+
+### Runtime settings and Azure deployment discovery
+
+Runtime settings use environment defaults only when the settings persistence
+layer is unavailable. Invalid or unexpected persistence data is an error rather
+than a silent fallback. Azure deployment discovery requires its configured ARM
+settings; missing ARM configuration returns `503 Service Unavailable` instead
+of a synthetic successful deployment list.
+
 ## Production configuration required by this contract
 
 Production API startup requires, at minimum, `SECRET_KEY`, `ADMIN_API_KEY`,
@@ -116,4 +160,6 @@ and `MCP_SERVICE_AUTH_TOKEN`. The Shopify MCP service additionally requires
 `SESSION_SECRET`, `REDIS_URL`, and the same `MCP_SERVICE_AUTH_TOKEN`.
 
 See [P0 security migration](./P0_SECURITY_MIGRATION.md) for rollout order,
-client-impact checklist, and operational verification.
+client-impact checklist, and operational verification, and the
+[P1 reliability contract](./P1_RELIABILITY_CONTRACT.md) for client migration
+and deployment checks.

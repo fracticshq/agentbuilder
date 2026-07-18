@@ -175,12 +175,15 @@ class AzureOpenAIDeploymentService:
     async def list_deployments(self) -> dict[str, Any]:
         arm_config = await self.runtime_settings_service.get_azure_arm_config()
         self._arm_config = arm_config
+        # A configured runtime deployment is not evidence that ARM discovery is
+        # available. Surface missing ARM metadata to the operator instead of
+        # presenting the configured deployment as a discovered one.
+        self._ensure_arm_config(arm_config)
         fallback_response = await self._fallback_deployment_response(arm_config)
 
         try:
-            self._ensure_arm_config(arm_config)
             payload = await self._fetch_deployments_payload()
-        except (AzureDeploymentConfigError, AzureDeploymentAuthError, AzureDeploymentRequestError) as exc:
+        except (AzureDeploymentAuthError, AzureDeploymentRequestError) as exc:
             logger.warning(
                 "azure_deployments_discovery_fallback",
                 error=str(exc),

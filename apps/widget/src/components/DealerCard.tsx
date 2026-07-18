@@ -13,8 +13,8 @@ export const DealerCard: React.FC<DealerCardProps> = ({ dealer, onViewMap }) => 
     setIsExpanded(!isExpanded);
     
     // Track card interaction
-    if (typeof window !== 'undefined' && (window as any).agentAnalytics) {
-      (window as any).agentAnalytics.track('dealer_card_click', {
+    if (typeof window !== 'undefined' && window.agentAnalytics) {
+      window.agentAnalytics.track('dealer_card_click', {
         dealer_id: dealer.dealer_id,
         name: dealer.name,
         city: dealer.city,
@@ -27,8 +27,8 @@ export const DealerCard: React.FC<DealerCardProps> = ({ dealer, onViewMap }) => 
     e.stopPropagation();
     
     // Track map view
-    if (typeof window !== 'undefined' && (window as any).agentAnalytics) {
-      (window as any).agentAnalytics.track('dealer_view_map', {
+    if (typeof window !== 'undefined' && window.agentAnalytics) {
+      window.agentAnalytics.track('dealer_view_map', {
         dealer_id: dealer.dealer_id,
         name: dealer.name,
         city: dealer.city
@@ -50,8 +50,8 @@ export const DealerCard: React.FC<DealerCardProps> = ({ dealer, onViewMap }) => 
     e.stopPropagation();
     
     // Track phone click
-    if (typeof window !== 'undefined' && (window as any).agentAnalytics) {
-      (window as any).agentAnalytics.track('dealer_phone_click', {
+    if (typeof window !== 'undefined' && window.agentAnalytics) {
+      window.agentAnalytics.track('dealer_phone_click', {
         dealer_id: dealer.dealer_id,
         name: dealer.name
       });
@@ -62,8 +62,8 @@ export const DealerCard: React.FC<DealerCardProps> = ({ dealer, onViewMap }) => 
     e.stopPropagation();
     
     // Track email click
-    if (typeof window !== 'undefined' && (window as any).agentAnalytics) {
-      (window as any).agentAnalytics.track('dealer_email_click', {
+    if (typeof window !== 'undefined' && window.agentAnalytics) {
+      window.agentAnalytics.track('dealer_email_click', {
         dealer_id: dealer.dealer_id,
         name: dealer.name
       });

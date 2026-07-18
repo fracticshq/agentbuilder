@@ -62,9 +62,9 @@ handling.
 ## Remaining work after P0
 
 - Migrate legacy PII envelopes and unscoped ingestion jobs.
-- Add CI gates for API, widget, MCP, image build, dependency/SAST scanning, and
-  tenant-isolation integration tests.
 - Replace response filtering as the only prompt-injection defense with
   structured tool outputs, source attribution, and claim-level grounding.
-- Implement outage-vs-no-evidence retrieval status, citation completeness, and
-  durable cross-instance job progress as the next production wave.
+- Add dependency/SAST scanning and tenant-isolation integration tests to the
+  CI gates introduced in P1.
+- Implement durable cross-instance job progress and claim-level evidence
+  validation as the next production wave.

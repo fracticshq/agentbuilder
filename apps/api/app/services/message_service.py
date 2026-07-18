@@ -7,6 +7,7 @@ Phase 4: Response validation to prevent hallucinations.
 import asyncio
 import inspect
 import json
+import math
 import re
 import uuid
 from types import SimpleNamespace
@@ -100,11 +101,38 @@ LOW_CONFIDENCE_MESSAGE = (
     "I don’t have enough verified information in the knowledge base to answer that reliably. "
     "Please share a little more detail or contact the brand team for confirmation."
 )
+STREAM_GENERATION_ERROR_MESSAGE = (
+    "I’m sorry, but I can’t complete that response right now. Please try again in a moment."
+)
+STREAM_GENERATION_ERROR_METADATA = {
+    "code": "generation_failed",
+    "retryable": True,
+}
 INTERNAL_SOURCE_TERMS = re.compile(
     r"\b(api|rag|chunk|chunks|connector|connectors|endpoint|endpoints|tool call|tool calls|tool-backed|"
     r"execution history|observation|observations|geocode lookup|runtime|mcp)\b",
     re.IGNORECASE,
 )
+
+
+def _is_unrecoverable_generation_failure(agent_result: AgentResult) -> bool:
+    """Identify terminal generation failures without reclassifying safe abstentions.
+
+    The orchestrator deliberately converts a second failed generation attempt
+    into its ``safe_canned`` fallback so synchronous callers still receive a
+    safe response.  In a stream, clients need an explicit terminal error to
+    distinguish that failure from a completed answer.  Lal Kitab's validated
+    chart abstention does not use this fallback marker and must remain a normal
+    response.
+    """
+    metadata = getattr(agent_result, "metadata", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    return (
+        getattr(agent_result, "success", True) is False
+        or metadata.get("fallback_stage") == "safe_canned"
+    )
 
 
 def _sanitize_for_json(data: dict) -> dict:
@@ -477,45 +505,269 @@ def _prepare_commerce_products_for_response(products: list[dict], agent_config: 
     return _group_commerce_products_for_cards(normalized)
 
 
+_MAX_PUBLIC_CITATIONS = 5
+_PUBLIC_RETRIEVAL_STATUSES = {"evidence", "no_evidence", "degraded", "error"}
+_PUBLIC_RETRIEVAL_REASONS = {
+    "partial_backend_failure",
+    "no_search_backend_succeeded",
+    "pipeline_error",
+    "retrieval_error",
+}
+_PUBLIC_RETRIEVAL_BACKEND_STATUSES = {"success", "unavailable", "error", "disabled"}
+_PUBLIC_RETRIEVAL_BACKEND_REASONS = {
+    "authentication_failed",
+    "backend_unavailable",
+    "collection_unavailable",
+    "backend_error",
+}
+# Retrieval backends are implementation categories, not provider names.  Keep
+# this deliberately closed so a provider hostname or arbitrary tool key cannot
+# be reflected through public response metadata.
+_PUBLIC_RETRIEVAL_BACKENDS = {"vector", "bm25", "catalog"}
+
+
+def _safe_citation_text(value: Any, *, limit: int) -> Optional[str]:
+    """Return one bounded citation field, never an arbitrary tool payload."""
+    if not isinstance(value, str):
+        return None
+    normalized = " ".join(value.split())
+    if not normalized or any(pattern.search(normalized) for pattern in SENSITIVE_DATA_PATTERNS):
+        return None
+    return normalized[:limit] or None
+
+
+def _safe_citation_url(value: Any) -> Optional[str]:
+    """Allow only ordinary web document URLs without credentials or query secrets."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlsplit(value.strip())
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+        ):
+            return None
+        # Query strings and fragments frequently contain signed URLs or tokens;
+        # citations need the stable document location only.
+        normalized = urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path, "", ""))
+    except (TypeError, ValueError):
+        return None
+    if len(normalized) > 2_048 or any(pattern.search(normalized) for pattern in SENSITIVE_DATA_PATTERNS):
+        return None
+    return normalized
+
+
+def _normalized_citation_confidence(value: Any, *, default: float) -> float:
+    """Clamp citation confidence so malformed tool values cannot break responses."""
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        confidence = default
+    if not math.isfinite(confidence):
+        confidence = default
+    return min(1.0, max(0.0, confidence))
+
+
+def _citation_from_metadata(value: Any, *, default_confidence: float) -> Optional[dict]:
+    """Normalize one explicit citation candidate or legacy source value."""
+    if isinstance(value, str):
+        raw_doc_id = value
+        raw_title = value
+        raw_url = None
+        raw_snippet = None
+        raw_confidence = default_confidence
+    elif isinstance(value, dict):
+        raw_doc_id = value.get("doc_id") or value.get("source_id") or value.get("id") or value.get("title")
+        raw_title = value.get("title") or value.get("document_title") or value.get("name") or raw_doc_id
+        raw_url = value.get("url") or value.get("source_url") or value.get("document_url")
+        # Do not promote raw chunk bodies (`content`, `text`, `data`) to public
+        # citations.  The retrieval tool is responsible for emitting a bounded
+        # `snippet` when it is safe to do so.
+        raw_snippet = value.get("snippet") or value.get("excerpt") or value.get("summary")
+        raw_confidence = value.get("confidence", default_confidence)
+    else:
+        return None
+
+    doc_id = _safe_citation_text(raw_doc_id, limit=128)
+    if not doc_id:
+        return None
+    return {
+        "doc_id": doc_id,
+        "title": _safe_citation_text(raw_title, limit=256) or doc_id,
+        "url": _safe_citation_url(raw_url),
+        "snippet": _safe_citation_text(raw_snippet, limit=300),
+        "confidence": _normalized_citation_confidence(raw_confidence, default=default_confidence),
+    }
+
+
+def _merge_citation(existing: dict, candidate: dict) -> dict:
+    """Prefer detailed candidate fields while keeping the highest confidence."""
+    merged = dict(existing)
+    if (not merged.get("title") or merged.get("title") == merged.get("doc_id")) and candidate.get("title"):
+        merged["title"] = candidate["title"]
+    for key in ("url", "snippet"):
+        if not merged.get(key) and candidate.get(key):
+            merged[key] = candidate[key]
+    merged["confidence"] = max(
+        _normalized_citation_confidence(merged.get("confidence"), default=0.0),
+        _normalized_citation_confidence(candidate.get("confidence"), default=0.0),
+    )
+    return merged
+
+
+def _safe_retrieval_health(value: Any) -> Optional[dict]:
+    """Read the retrieval tool's stable, public-safe health contract only."""
+    if not isinstance(value, dict):
+        return None
+
+    status = value.get("status")
+    if status not in _PUBLIC_RETRIEVAL_STATUSES:
+        return None
+
+    reason = value.get("reason")
+    if reason not in _PUBLIC_RETRIEVAL_REASONS:
+        reason = "retrieval_error" if status == "error" else (
+            "partial_backend_failure" if status == "degraded" else None
+        )
+
+    backend_status: dict[str, dict[str, str]] = {}
+    raw_backend_status = value.get("backend_status")
+    if isinstance(raw_backend_status, dict):
+        for backend, details in raw_backend_status.items():
+            if backend not in _PUBLIC_RETRIEVAL_BACKENDS or not isinstance(details, dict):
+                continue
+            backend_state = details.get("status")
+            if backend_state not in _PUBLIC_RETRIEVAL_BACKEND_STATUSES:
+                continue
+            safe_details = {"status": backend_state}
+            backend_reason = details.get("reason")
+            if backend_reason in _PUBLIC_RETRIEVAL_BACKEND_REASONS:
+                safe_details["reason"] = backend_reason
+            backend_status[backend] = safe_details
+
+    return {
+        "status": status,
+        "reason": reason,
+        "backend_status": backend_status,
+        "successful_backends": [
+            backend for backend, details in backend_status.items() if details["status"] == "success"
+        ],
+        "failed_backends": [
+            backend
+            for backend, details in backend_status.items()
+            if details["status"] in {"error", "unavailable"}
+        ],
+    }
+
+
+def _retrieval_health_from_tool_results(tool_results: Any) -> Optional[dict]:
+    """Aggregate safe retrieval health when one or more retrieval tools ran."""
+    if not isinstance(tool_results, dict):
+        return None
+
+    health_records = []
+    for tool_result in tool_results.values():
+        metadata = getattr(tool_result, "metadata", None)
+        if not isinstance(metadata, dict):
+            continue
+        health = _safe_retrieval_health(metadata.get("retrieval"))
+        if health:
+            health_records.append(health)
+    if not health_records:
+        return None
+    if len(health_records) == 1:
+        return health_records[0]
+
+    statuses = [record["status"] for record in health_records]
+    if "error" in statuses and any(status != "error" for status in statuses):
+        status, reason = "degraded", "partial_backend_failure"
+    elif "error" in statuses:
+        status = "error"
+        reason = next(record["reason"] for record in health_records if record["status"] == "error")
+    elif "degraded" in statuses:
+        status, reason = "degraded", "partial_backend_failure"
+    elif "evidence" in statuses:
+        status, reason = "evidence", None
+    else:
+        status, reason = "no_evidence", None
+
+    severity = {"success": 0, "disabled": 1, "unavailable": 2, "error": 3}
+    backend_status: dict[str, dict[str, str]] = {}
+    for record in health_records:
+        for backend, details in record["backend_status"].items():
+            previous = backend_status.get(backend)
+            if previous and severity[previous["status"]] >= severity[details["status"]]:
+                continue
+            backend_status[backend] = dict(details)
+
+    return {
+        "status": status,
+        "reason": reason,
+        "backend_status": backend_status,
+        "successful_backends": [
+            backend for backend, details in backend_status.items() if details["status"] == "success"
+        ],
+        "failed_backends": [
+            backend
+            for backend, details in backend_status.items()
+            if details["status"] in {"error", "unavailable"}
+        ],
+    }
+
+
+def _response_retrieval_health(tool_results: Any, agent_metadata: Any = None) -> Optional[dict]:
+    """Prefer the tool result health, with an orchestrator fallback for retries."""
+    health = _retrieval_health_from_tool_results(tool_results)
+    if health:
+        return health
+    if isinstance(agent_metadata, dict):
+        return _safe_retrieval_health(agent_metadata.get("retrieval"))
+    return None
+
+
 def _extract_tool_result_metadata(tool_results: dict) -> tuple[list[dict], list[dict], list[dict]]:
     """Normalize citations, products, and dealers from orchestrator tool metadata."""
-    citations: list[dict] = []
+    citations_by_doc_id: dict[str, dict] = {}
     products: list[dict] = []
     dealers: list[dict] = []
 
-    for step_id, tool_result in tool_results.items():
-        if not hasattr(tool_result, "metadata") or not tool_result.metadata:
+    for step_id, tool_result in (tool_results.items() if isinstance(tool_results, dict) else []):
+        result_metadata = getattr(tool_result, "metadata", None)
+        if not isinstance(result_metadata, dict) or not result_metadata:
             continue
 
-        result_metadata = tool_result.metadata
+        if isinstance(result_metadata.get("products"), list):
+            products.extend(product for product in result_metadata["products"] if isinstance(product, dict))
+        if isinstance(result_metadata.get("dealers"), list):
+            dealers.extend(dealer for dealer in result_metadata["dealers"] if isinstance(dealer, dict))
 
-        if "products" in result_metadata:
-            products.extend(result_metadata["products"])
-        if "dealers" in result_metadata:
-            dealers.extend(result_metadata["dealers"])
-
-        if "sources" not in result_metadata:
-            continue
-
-        confidence = min(1.0, max(0.0, float(result_metadata.get("confidence", 1.0))))
-        for source in result_metadata["sources"][:5]:
-            doc_id = source if isinstance(source, str) else source.get("title", str(source))
-            citations.append({
-                "doc_id": doc_id,
-                "title": doc_id,
-                "confidence": confidence,
-                "url": None,
-                "snippet": None,
-            })
+        confidence = _normalized_citation_confidence(result_metadata.get("confidence"), default=1.0)
+        candidates = result_metadata.get("citation_candidates")
+        sources = result_metadata.get("sources")
+        for source in [
+            *(candidates[:20] if isinstance(candidates, list) else []),
+            *(sources[:20] if isinstance(sources, list) else []),
+        ]:
+            citation = _citation_from_metadata(source, default_confidence=confidence)
+            if not citation:
+                continue
+            identity = citation["doc_id"].casefold()
+            citations_by_doc_id[identity] = (
+                _merge_citation(citations_by_doc_id[identity], citation)
+                if identity in citations_by_doc_id else citation
+            )
 
         logger.info(
             "tool_result_metadata",
             step_id=step_id,
-            products_count=len(result_metadata.get("products", [])),
-            dealers_count=len(result_metadata.get("dealers", [])),
-            sources_count=len(result_metadata.get("sources", [])),
+            products_count=len(result_metadata.get("products", [])) if isinstance(result_metadata.get("products"), list) else 0,
+            dealers_count=len(result_metadata.get("dealers", [])) if isinstance(result_metadata.get("dealers"), list) else 0,
+            sources_count=len(sources) if isinstance(sources, list) else 0,
         )
 
+    citations = list(citations_by_doc_id.values())[:_MAX_PUBLIC_CITATIONS]
     safe_products = [_sanitize_for_json(product) for product in products]
     safe_dealers = [_sanitize_for_json(dealer) for dealer in dealers]
     return citations, safe_products, safe_dealers
@@ -2514,6 +2766,7 @@ Rules:
                 saved_cart_id = session_state["cart_id"]
 
             tool_results = agent_metadata.get("tool_results", {})
+            retrieval_health = _response_retrieval_health(tool_results, agent_metadata)
             cart_state = _safe_commerce_cart(
                 agent_metadata,
                 tool_results,
@@ -2559,6 +2812,11 @@ Rules:
                 "resolved_reference": _sanitize_for_json(agent_metadata.get("resolved_reference") or {}),
                 "cart": _sanitize_for_json(cart_state) if cart_state else None,
             } if is_commerce_agent or unique_products or unique_dealers or cart_state else None
+            if retrieval_health:
+                response_metadata = {
+                    **(response_metadata or {}),
+                    "retrieval": retrieval_health,
+                }
             if agent_metadata.get("kundali_chart"):
                 response_metadata = {
                     **(response_metadata or {}),
@@ -3222,6 +3480,27 @@ Rules:
 
                 agent_result = await orchestrator_task
 
+            if _is_unrecoverable_generation_failure(agent_result):
+                # ``safe_canned`` means every generation path failed. Do not
+                # stream the canned fallback as a successful final answer:
+                # clients use ``error`` as their terminal event.  Provider
+                # diagnostics stay in server logs and are never sent to users.
+                failure_metadata = getattr(agent_result, "metadata", None)
+                if not isinstance(failure_metadata, dict):
+                    failure_metadata = {}
+                logger.warning(
+                    "stream_generation_unrecoverable",
+                    conversation_id=conversation_id,
+                    fallback_stage=failure_metadata.get("fallback_stage"),
+                )
+                yield StreamingMessageResponse(
+                    type="error",
+                    content=STREAM_GENERATION_ERROR_MESSAGE,
+                    conversation_id=conversation_id,
+                    metadata=dict(STREAM_GENERATION_ERROR_METADATA),
+                )
+                return
+
             # Extract final answer
             full_response, agent_metadata = self._apply_post_response_guardrails(
                 agent_result.answer,
@@ -3237,6 +3516,7 @@ Rules:
                 }
 
             tool_results = agent_metadata.get("tool_results", {})
+            retrieval_health = _response_retrieval_health(tool_results, agent_metadata)
             is_commerce_agent = is_commerce_agent_config(self.agent_config or {})
             for tool_name, tool_result in tool_results.items():
                 if not hasattr(tool_result, "metadata") or not tool_result.metadata:
@@ -3354,6 +3634,8 @@ Rules:
                 "api_context": _sanitize_for_json(agent_metadata.get("api_context") or {}),
                 "rag_context": _sanitize_for_json(agent_metadata.get("rag_context") or {}),
             }
+            if retrieval_health:
+                final_answer_metadata["retrieval"] = retrieval_health
             if agent_metadata.get("kundali_chart"):
                 # Structured chart payload the widget renders as the visual
                 # kundali artifact above the reading.
@@ -3422,6 +3704,7 @@ Rules:
                         "products": _sanitize_for_json(agent_metadata.get("active_product_focus") or []),
                         "response_metadata": {
                             "cart": _sanitize_for_json(cart_state) if cart_state else None,
+                            **({"retrieval": retrieval_health} if retrieval_health else {}),
                         },
                         "captured_ids": agent_metadata.get("captured_ids"),
                         "last_searched": agent_metadata.get("last_searched"),
@@ -3536,6 +3819,30 @@ Rules:
                 "name",
             )
 
+            stream_response_metadata = {
+                "commerce_intent": _sanitize_for_json(agent_metadata.get("commerce_intent") or agent_metadata.get("last_constraints") or {}),
+                "active_product_focus": _sanitize_for_json(
+                    _normalize_commerce_products_currency(
+                        agent_metadata.get("active_product_focus") or [],
+                        self.agent_config or {},
+                    )
+                ),
+                "product_reference_map": _sanitize_for_json(agent_metadata.get("product_reference_map") or {}),
+                "original_query": agent_metadata.get("original_query") or agent_metadata.get("last_user_query"),
+                "search_query": agent_metadata.get("search_query") or agent_metadata.get("last_search_query"),
+                "rerank_results": _sanitize_for_json(agent_metadata.get("rerank_results") or []),
+                "resolved_reference": _sanitize_for_json(agent_metadata.get("resolved_reference") or {}),
+                "api_context": _sanitize_for_json(agent_metadata.get("api_context") or {}),
+                "rag_context": _sanitize_for_json(agent_metadata.get("rag_context") or {}),
+                "cart": _sanitize_for_json({
+                    "cart_id": cart_state.get("cart_id") if cart_state else saved_cart_id,
+                    "checkout_url": cart_state.get("checkout_url") if cart_state else None,
+                    "cart_lines": cart_state.get("cart_lines") if cart_state else [],
+                }),
+            }
+            if retrieval_health:
+                stream_response_metadata["retrieval"] = retrieval_health
+
             yield StreamingMessageResponse(
                 type="metadata",
                 content="",
@@ -3545,39 +3852,22 @@ Rules:
                 confidence_score=min(1.0, max(0.0, float(agent_metadata.get("validation_confidence", 1.0)))),
                 products=unique_products,
                 dealers=unique_dealers,
-                metadata={
-                    "commerce_intent": _sanitize_for_json(agent_metadata.get("commerce_intent") or agent_metadata.get("last_constraints") or {}),
-                    "active_product_focus": _sanitize_for_json(
-                        _normalize_commerce_products_currency(
-                            agent_metadata.get("active_product_focus") or [],
-                            self.agent_config or {},
-                        )
-                    ),
-                    "product_reference_map": _sanitize_for_json(agent_metadata.get("product_reference_map") or {}),
-                    "original_query": agent_metadata.get("original_query") or agent_metadata.get("last_user_query"),
-                    "search_query": agent_metadata.get("search_query") or agent_metadata.get("last_search_query"),
-                    "rerank_results": _sanitize_for_json(agent_metadata.get("rerank_results") or []),
-                    "resolved_reference": _sanitize_for_json(agent_metadata.get("resolved_reference") or {}),
-                    "api_context": _sanitize_for_json(agent_metadata.get("api_context") or {}),
-                    "rag_context": _sanitize_for_json(agent_metadata.get("rag_context") or {}),
-                    "cart": _sanitize_for_json({
-                        "cart_id": cart_state.get("cart_id") if cart_state else saved_cart_id,
-                        "checkout_url": cart_state.get("checkout_url") if cart_state else None,
-                        "cart_lines": cart_state.get("cart_lines") if cart_state else [],
-                    }),
-                },
+                metadata=stream_response_metadata,
                 commerce={"cart": cart_state} if cart_state else None,
             )
 
+            done_metadata = {
+                "latency_ms": int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000),
+                "context_used": len(tool_results),
+                "citations_count": len(citations),
+            }
+            if retrieval_health:
+                done_metadata["retrieval"] = retrieval_health
             yield StreamingMessageResponse(
                 type="done",
                 content="Run complete.",
                 conversation_id=conversation_id,
-                metadata={
-                    "latency_ms": int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000),
-                    "context_used": len(tool_results),
-                    "citations_count": len(citations),
-                },
+                metadata=done_metadata,
             )
 
             duration = (datetime.now(timezone.utc) - start_time).total_seconds()
@@ -3641,8 +3931,9 @@ Rules:
             logger.error("message_streaming_error", error=str(e), exc_info=True)
             yield StreamingMessageResponse(
                 type="error",
-                content=f"Error: {str(e)}",
-                conversation_id=conversation_id or str(uuid.uuid4())
+                content=STREAM_GENERATION_ERROR_MESSAGE,
+                conversation_id=conversation_id,
+                metadata=dict(STREAM_GENERATION_ERROR_METADATA),
             )
 
     async def inject_history(self, conversation_id: str, agent_id: str, messages: list) -> None:

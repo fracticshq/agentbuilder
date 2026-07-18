@@ -303,7 +303,7 @@ function App({ config }: AppProps) {
       controlChannelRef.current = null;
       setHumanInControl(false);
     };
-  }, [conversationId, agentId, humanTakeoverEnabled, setHumanInControl]);
+  }, [conversationId, agentId, humanTakeoverEnabled, setHumanInControl, addMessage]);
 
   // ── Establish/resume a server-issued, signed session ─────────
   // The signed token is retained only in tab-scoped sessionStorage. The API

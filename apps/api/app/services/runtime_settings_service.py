@@ -10,6 +10,7 @@ from typing import Any, Iterable
 import structlog
 import httpx
 from cryptography.fernet import Fernet
+from pymongo.errors import PyMongoError
 
 from llm.factory import create_provider_from_env
 from retrieval.vector.voyage_client import VoyageClient
@@ -67,9 +68,15 @@ class RuntimeSettingsService:
     def _get_collection(self):
         try:
             system_db = connection_manager.get_system_db()
-        except Exception as exc:
+        except RuntimeError as exc:
             raise RuntimeSettingsUnavailableError("System database is not connected.") from exc
-        return system_db[RUNTIME_SETTINGS_COLLECTION]
+
+        try:
+            return system_db[RUNTIME_SETTINGS_COLLECTION]
+        except (AttributeError, KeyError, TypeError) as exc:
+            raise RuntimeSettingsUnavailableError(
+                "System database does not provide the runtime settings collection."
+            ) from exc
 
     def _encrypt(self, value: str) -> str:
         return self._fernet.encrypt(value.encode("utf-8")).decode("utf-8")
@@ -133,10 +140,17 @@ class RuntimeSettingsService:
             return {}
 
         documents: dict[str, dict[str, Any]] = {}
-        async for document in collection.find({}):
-            key = document.get("key")
-            if isinstance(key, str):
-                documents[key] = document
+        try:
+            async for document in collection.find({}):
+                key = document.get("key")
+                if isinstance(key, str):
+                    documents[key] = document
+        except PyMongoError as exc:
+            logger.warning(
+                "runtime_settings_store_unavailable_using_environment",
+                error_type=type(exc).__name__,
+            )
+            return {}
         return documents
 
     async def get_effective_values(self, overrides: dict[str, Any] | None = None) -> dict[str, str | None]:

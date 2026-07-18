@@ -116,6 +116,9 @@ class RetrievalPipeline:
         Returns:
             RetrievalContext with matched chunks and metadata
         """
+        backend_status: Dict[str, Dict[str, str]] = {}
+        search_results = []
+
         try:
             logger.info("Starting retrieval", query=query[:100], user_id=user_id)
             import time
@@ -138,31 +141,42 @@ class RetrievalPipeline:
                 filters["content_type"] = {"$in": content_types}
                 logger.debug("Content type filter applied", content_types=content_types)
             
-            # Step 1: Perform vector and BM25 searches concurrently.
+            # Step 1: Perform vector and BM25 searches concurrently.  Keep a
+            # separate backend state so an outage cannot be mistaken for a
+            # successful search that found no documents.
             search_tasks = []
 
-            if self.vector_search and self.config.vector_enabled:
-                search_tasks.append((
-                    "Vector",
-                    self.vector_search.search(
-                        query=query,
-                        top_k=self.config.vector_top_k,
-                        filters=filters,
-                        similarity_threshold=self.config.similarity_threshold
-                    )
-                ))
+            if self.config.vector_enabled:
+                if self.vector_search:
+                    search_tasks.append((
+                        "vector",
+                        self.vector_search.search(
+                            query=query,
+                            top_k=self.config.vector_top_k,
+                            filters=filters,
+                            similarity_threshold=self.config.similarity_threshold
+                        )
+                    ))
+                else:
+                    backend_status["vector"] = self._unavailable_backend_status()
+            else:
+                backend_status["vector"] = {"status": "disabled"}
 
-            if self.bm25_search and self.config.bm25_enabled:
-                search_tasks.append((
-                    "BM25",
-                    self.bm25_search.search(
-                        query=query,
-                        top_k=self.config.bm25_top_k,
-                        filters=filters
-                    )
-                ))
+            if self.config.bm25_enabled:
+                if self.bm25_search:
+                    search_tasks.append((
+                        "bm25",
+                        self.bm25_search.search(
+                            query=query,
+                            top_k=self.config.bm25_top_k,
+                            filters=filters
+                        )
+                    ))
+                else:
+                    backend_status["bm25"] = self._unavailable_backend_status()
+            else:
+                backend_status["bm25"] = {"status": "disabled"}
 
-            search_results = []
             if search_tasks:
                 results = await asyncio.gather(
                     *(task for _, task in search_tasks),
@@ -171,20 +185,46 @@ class RetrievalPipeline:
 
                 for (search_name, _), result in zip(search_tasks, results):
                     if isinstance(result, Exception):
+                        # The exception is retained in internal logs only.  It
+                        # is deliberately not copied to response metadata,
+                        # where it could expose provider or connection detail.
                         logger.warning("Retrieval search failed", search_type=search_name, error=str(result))
+                        backend_status[search_name] = {
+                            "status": "error",
+                            "reason": "backend_error",
+                        }
+                    elif self._search_result_is_unavailable(result):
+                        backend_status[search_name] = {
+                            "status": "unavailable",
+                            "reason": self._safe_backend_reason(result),
+                        }
                     else:
                         search_results.append(result)
+                        backend_status[search_name] = {"status": "success"}
                         logger.debug("Retrieval search completed", search_type=search_name, chunks=len(result.chunks))
 
-            # If no searches succeeded, return empty result
+            # A response without any successful backend has no evidence on
+            # which to ground an answer.  It is an operational error, not a
+            # valid empty retrieval result.
             if not search_results:
-                logger.warning("No search results available")
+                logger.warning("No retrieval backends succeeded", backends=backend_status)
                 return RetrievalContext(
                     chunks=[],
                     confidence=0.0,
                     sources=[],
                     query=query,
-                    retrieval_metadata={"error": "No search backends available"}
+                    filters_applied=filters,
+                    query_intent=query_intent,
+                    content_types_found=[],
+                    retrieval_metadata=self._retrieval_metadata(
+                        status="error",
+                        backend_status=backend_status,
+                        search_results=[],
+                        execution_time_ms=(time.time() - start_time) * 1000,
+                        query_intent=query_intent,
+                        content_types=content_types,
+                        reason="no_search_backend_succeeded",
+                    ),
                 )
             
             # Step 2: Apply RRF fusion
@@ -247,6 +287,22 @@ class RetrievalPipeline:
             
             # Build retrieval context
             execution_time = (time.time() - start_time) * 1000
+            retrieval_status = self._overall_retrieval_status(
+                chunks=reranked_chunks,
+                backend_status=backend_status,
+            )
+            retrieval_metadata = self._retrieval_metadata(
+                status=retrieval_status,
+                backend_status=backend_status,
+                search_results=search_results,
+                execution_time_ms=execution_time,
+                query_intent=query_intent,
+                content_types=content_types,
+            )
+            retrieval_metadata.update({
+                "reranked": bool(self.reranker and self.config.rerank_enabled),
+                "deduped": self.config.dedup_enabled,
+            })
             
             result = RetrievalContext(
                 chunks=reranked_chunks,
@@ -262,15 +318,7 @@ class RetrievalPipeline:
                     "filters_applied": bool(filters),
                     "content_type_filtering": bool(content_types)  # Phase 2
                 },
-                retrieval_metadata={
-                    "search_methods": [r.search_type for r in search_results],
-                    "total_candidates": sum(r.total_found for r in search_results),
-                    "execution_time_ms": execution_time,
-                    "reranked": bool(self.reranker and self.config.rerank_enabled),
-                    "deduped": self.config.dedup_enabled,
-                    "intent_detected": query_intent,  # Phase 2
-                    "content_types_requested": content_types  # Phase 2
-                }
+                retrieval_metadata=retrieval_metadata,
             )
             
             logger.info("Retrieval completed", 
@@ -287,8 +335,106 @@ class RetrievalPipeline:
                 confidence=0.0,
                 sources=[],
                 query=query,
-                retrieval_metadata={"error": str(e)}
+                retrieval_metadata=self._retrieval_metadata(
+                    status="error",
+                    backend_status=backend_status,
+                    search_results=search_results,
+                    reason="pipeline_error",
+                ),
             )
+
+    @staticmethod
+    def _unavailable_backend_status() -> Dict[str, str]:
+        """Return a safe status for a backend that could not be initialized."""
+        return {"status": "unavailable", "reason": "backend_unavailable"}
+
+    @staticmethod
+    def _search_result_is_unavailable(result: Any) -> bool:
+        """Whether a backend intentionally returned no executable result."""
+        if getattr(result, "backend_status", "success") != "success":
+            return True
+
+        # ``disabled_reason`` predates the explicit SearchResult contract.
+        # Continue honoring it so older implementations cannot silently turn
+        # an unavailable backend into a no-evidence result.
+        metadata = getattr(result, "metadata", {})
+        return isinstance(metadata, dict) and bool(metadata.get("disabled_reason"))
+
+    @staticmethod
+    def _safe_backend_reason(result: Any) -> str:
+        """Map backend diagnostics to the small public-safe reason vocabulary."""
+        reason = getattr(result, "backend_reason", None)
+        if reason in {"authentication_failed", "backend_unavailable", "collection_unavailable"}:
+            return reason
+
+        metadata = getattr(result, "metadata", {})
+        if isinstance(metadata, dict) and metadata.get("disabled_reason") == "voyage_auth_failed":
+            return "authentication_failed"
+        return "backend_unavailable"
+
+    @staticmethod
+    def _overall_retrieval_status(
+        chunks: List[DocumentChunk],
+        backend_status: Dict[str, Dict[str, str]],
+    ) -> str:
+        """Classify retrieval without equating backend failure to no evidence."""
+        states = [state.get("status") for state in backend_status.values()]
+        has_success = "success" in states
+        has_failure = any(state in {"error", "unavailable"} for state in states)
+
+        if not has_success:
+            return "error"
+        if has_failure:
+            return "degraded"
+        return "evidence" if chunks else "no_evidence"
+
+    @staticmethod
+    def _retrieval_metadata(
+        *,
+        status: str,
+        backend_status: Dict[str, Dict[str, str]],
+        search_results: List[Any],
+        execution_time_ms: Optional[float] = None,
+        query_intent: Optional[str] = None,
+        content_types: Optional[List[str]] = None,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build stable, provider-safe metadata for callers of the pipeline."""
+        safe_backend_status = {
+            backend: dict(details)
+            for backend, details in backend_status.items()
+        }
+        successful_backends = [
+            backend
+            for backend, details in safe_backend_status.items()
+            if details.get("status") == "success"
+        ]
+        failed_backends = [
+            backend
+            for backend, details in safe_backend_status.items()
+            if details.get("status") in {"error", "unavailable"}
+        ]
+
+        metadata: Dict[str, Any] = {
+            "status": status,
+            "backend_status": safe_backend_status,
+            "successful_backends": successful_backends,
+            "failed_backends": failed_backends,
+            "search_methods": [result.search_type for result in search_results],
+            "total_candidates": sum(result.total_found for result in search_results),
+            "intent_detected": query_intent,
+            "content_types_requested": content_types,
+        }
+        if execution_time_ms is not None:
+            metadata["execution_time_ms"] = execution_time_ms
+        if status == "degraded":
+            metadata["reason"] = reason or "partial_backend_failure"
+        elif status == "error":
+            metadata["reason"] = reason or "retrieval_error"
+            # Preserve the existing error key without surfacing exception text.
+            metadata["error"] = "retrieval_unavailable" if reason == "no_search_backend_succeeded" else "retrieval_error"
+
+        return metadata
     
     def _deduplicate(self, chunks: List[DocumentChunk]) -> List[DocumentChunk]:
         """Deduplicate chunks using structured entity identity before content fallback."""
