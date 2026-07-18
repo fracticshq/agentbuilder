@@ -6,6 +6,7 @@ import asyncio
 import io
 import uuid
 import json
+import math
 from typing import List, Optional, Tuple
 from datetime import datetime
 from fastapi import UploadFile
@@ -22,6 +23,14 @@ from .qdrant_vector_service import QdrantVectorService
 from .runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger()
+
+
+class IngestionEmbeddingError(RuntimeError):
+    """Raised when Voyage cannot produce a valid embedding."""
+
+
+class IngestionStorageError(RuntimeError):
+    """Raised when a chunk cannot be durably stored in every configured backend."""
 
 
 class IngestionService:
@@ -91,18 +100,30 @@ class IngestionService:
             await self.job_store.update(job_id, {"status": "error", "error": str(e)})
             logger.error("Error processing documents", job_id=job_id, error=str(e))
     
-    async def process_chunk(self, request: IngestionRequest) -> IngestionResponse:
+    async def process_chunk(
+        self,
+        request: IngestionRequest,
+        *,
+        agent_id: Optional[str] = None,
+    ) -> IngestionResponse:
         """Process a single text chunk."""
         try:
             # Generate embeddings
             embeddings = await self._generate_embeddings(request.text)
             
             # Create chunk document
+            metadata = dict(request.metadata or {})
+            if agent_id:
+                # The route has already authorized this agent. Persist that
+                # canonical scope rather than trusting caller-supplied metadata.
+                metadata["agent_id"] = agent_id
+
             chunk_doc = {
                 "doc_id": request.doc_id or str(uuid.uuid4()),
                 "content": request.text,
                 "embeddings": embeddings,
-                "metadata": request.metadata,
+                "metadata": metadata,
+                "agent_id": agent_id,
                 "created_at": datetime.utcnow().isoformat()
             }
             
@@ -451,9 +472,9 @@ class IngestionService:
         model = voyage_config["model"]
 
         if not api_key:
-            logger.warning("voyage_api_key_not_configured", text_length=len(text))
-            return [0.0] * 1024  # Voyage uses 1024 dimensions
-        
+            logger.error("voyage_api_key_not_configured", text_length=len(text))
+            raise IngestionEmbeddingError("Voyage embedding API key is not configured")
+
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -468,19 +489,47 @@ class IngestionService:
                     },
                     timeout=30.0
                 )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    embeddings = result["data"][0]["embedding"]
-                    logger.debug("Generated embeddings", dimensions=len(embeddings))
-                    return embeddings
-                else:
-                    logger.error("Voyage API error", status_code=response.status_code, response=response.text)
-                    return [0.0] * 1024
-                    
-        except Exception as e:
-            logger.error("Error generating embeddings", error=str(e))
-            return [0.0] * 1024
+        except httpx.HTTPError as exc:
+            logger.error("voyage_embedding_request_failed", error_type=type(exc).__name__)
+            raise IngestionEmbeddingError("Voyage embedding request failed") from exc
+
+        if response.status_code != 200:
+            logger.error("voyage_embedding_request_rejected", status_code=response.status_code)
+            raise IngestionEmbeddingError(
+                f"Voyage embedding request failed with HTTP {response.status_code}"
+            )
+
+        try:
+            embeddings = response.json()["data"][0]["embedding"]
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
+            logger.error("voyage_embedding_response_invalid", error_type=type(exc).__name__)
+            raise IngestionEmbeddingError("Voyage returned an invalid embeddings response") from exc
+
+        self._validate_embedding(embeddings)
+        logger.debug("Generated embeddings", dimensions=len(embeddings))
+        return embeddings
+
+    def _validate_embedding(self, embeddings: object) -> None:
+        """Reject malformed or placeholder vectors before any storage write."""
+        if not isinstance(embeddings, list):
+            raise IngestionEmbeddingError("Voyage returned an embedding with an invalid type")
+
+        if len(embeddings) != self.settings.VECTOR_DIMENSIONS:
+            raise IngestionEmbeddingError(
+                "Voyage returned an embedding with unexpected dimensions "
+                f"({len(embeddings)}; expected {self.settings.VECTOR_DIMENSIONS})"
+            )
+
+        if any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            for value in embeddings
+        ):
+            raise IngestionEmbeddingError("Voyage returned an embedding with invalid values")
+
+        if not any(embeddings):
+            raise IngestionEmbeddingError("Voyage returned an all-zero embedding")
     
     async def _store_chunks(self, chunks: List[dict], job_id: str, filename: str, agent_id: Optional[str] = None):
         """Store chunks in vector database with structured data."""
@@ -531,6 +580,8 @@ class IngestionService:
     async def _store_chunk(self, chunk_doc: dict) -> str:
         """Store a single chunk in brand-specific MongoDB database."""
         try:
+            self._validate_embedding(chunk_doc.get("embeddings"))
+
             # Get brand-specific database
             agent_id = chunk_doc.get("agent_id")
             if agent_id:
@@ -548,14 +599,20 @@ class IngestionService:
             
             # Insert the chunk
             result = await chunks_collection.insert_one(chunk_doc)
-            chunk_id = str(result.inserted_id)
+            inserted_id = getattr(result, "inserted_id", None)
+            if inserted_id is None:
+                raise IngestionStorageError("MongoDB did not return an inserted chunk ID")
+
+            chunk_id = str(inserted_id)
             if self.qdrant:
                 brand_slug = (chunk_doc.get("metadata") or {}).get("brand_slug")
                 await self.qdrant.upsert_chunk(chunk_doc, brand_slug)
             
             logger.debug("Stored chunk in MongoDB", chunk_id=chunk_id, agent_id=chunk_doc.get("agent_id"))
             return chunk_id
-            
-        except Exception as e:
-            logger.error("Error storing chunk in MongoDB", error=str(e))
-            return str(uuid.uuid4())  # Return fake ID on error
+
+        except IngestionStorageError:
+            raise
+        except Exception as exc:
+            logger.error("chunk_storage_failed", error_type=type(exc).__name__)
+            raise IngestionStorageError("Failed to store knowledge-base chunk") from exc

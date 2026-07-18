@@ -22,14 +22,40 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from pydantic import BaseModel
 import structlog
 
-from app.auth.dependencies import require_dashboard_access
+from app.auth.dependencies import ensure_brand_access, get_user_from_token_or_api_key
+from app.auth.models import User, UserRole
 from app.connections import connection_manager
 from app.dependencies import get_runtime_settings_service
 from app.services import catalog_service
 from app.services.runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger()
-router = APIRouter(dependencies=[Depends(require_dashboard_access)])
+router = APIRouter()
+
+
+CATALOG_MANAGE_ROLES = {
+    UserRole.SUPER_ADMIN,
+    UserRole.ADMIN,
+    UserRole.ORG_ADMIN,
+    UserRole.BRAND_ADMIN,
+}
+
+
+async def _require_catalog_brand_access(brand_id: str, user: User) -> User:
+    """Require a catalog-managing role and canonical brand scope."""
+    if user.role not in CATALOG_MANAGE_ROLES:
+        raise HTTPException(status_code=403, detail="Catalog administration access is required")
+    # Global roles intentionally have all-tenant scope; tenant roles receive a
+    # not-found response for a foreign brand so resource existence is not leaked.
+    ensure_brand_access(user, brand_id)
+    return user
+
+
+async def _require_catalog_path_brand_access(
+    brand_id: str,
+    user: User = Depends(get_user_from_token_or_api_key),
+) -> User:
+    return await _require_catalog_brand_access(brand_id, user)
 
 
 def _firecrawl_key() -> str:
@@ -129,10 +155,14 @@ async def import_shopify(
     req: ShopifyImportRequest,
     background_tasks: BackgroundTasks,
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+    user: User = Depends(get_user_from_token_or_api_key),
 ):
     """Start async Shopify product fetch. Paginates /products.json. Returns job_id."""
     try:
+        await _require_catalog_brand_access(req.brand_id, user)
         store_url = catalog_service.normalize_shopify_store_url(req.store_url)
+        if req.access_token and req.access_token.strip():
+            store_url = catalog_service.normalize_authenticated_shopify_store_url(store_url)
         fallback_currency = catalog_service.normalize_currency_code(req.fallback_currency)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -173,11 +203,18 @@ async def import_shopify(
 # ── Import: JSON feed ─────────────────────────────────────────────────────────
 
 @router.post("/import/json-feed")
-async def import_json_feed(req: JsonFeedRequest):
+async def import_json_feed(
+    req: JsonFeedRequest,
+    user: User = Depends(get_user_from_token_or_api_key),
+):
     """Fetch a JSON feed URL and auto-detect its format. Synchronous."""
     try:
+        await _require_catalog_brand_access(req.brand_id, user)
+        feed_url = await catalog_service.validate_json_feed_url(req.url)
         fallback_currency = await catalog_service._resolve_configured_default_currency(req.brand_id)
-        result = await catalog_service.fetch_json_feed(req.url, fallback_currency=fallback_currency)
+        result = await catalog_service.fetch_json_feed(feed_url, fallback_currency=fallback_currency)
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -185,7 +222,7 @@ async def import_json_feed(req: JsonFeedRequest):
 
     await _upsert_sync_config(req.brand_id, {
         "source_type": "json_feed",
-        "source_url": req.url,
+        "source_url": feed_url,
     })
     return result  # { items, detected_format, raw_count }
 
@@ -196,8 +233,10 @@ async def import_json_feed(req: JsonFeedRequest):
 async def import_csv(
     file: UploadFile = File(...),
     brand_id: str = Form(...),
+    user: User = Depends(get_user_from_token_or_api_key),
 ):
     """Parse an uploaded CSV file and return rows as JSON. Synchronous."""
+    await _require_catalog_brand_access(brand_id, user)
     raw = await file.read()
     try:
         text = raw.decode("utf-8-sig")
@@ -215,8 +254,13 @@ async def import_csv(
 # ── Import: Firecrawl scrape ──────────────────────────────────────────────────
 
 @router.post("/import/scrape")
-async def import_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
+async def import_scrape(
+    req: ScrapeRequest,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_user_from_token_or_api_key),
+):
     """Start async Firecrawl-based product extraction. Returns job_id."""
+    await _require_catalog_brand_access(req.brand_id, user)
     api_key = _firecrawl_key()
     if not api_key:
         raise HTTPException(
@@ -245,19 +289,28 @@ async def import_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
 # ── Job status ────────────────────────────────────────────────────────────────
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str, brand_id: Optional[str] = None):
+async def get_job(
+    job_id: str,
+    brand_id: Optional[str] = None,
+    user: User = Depends(get_user_from_token_or_api_key),
+):
     job = await catalog_service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
-    if brand_id and job.get("brand_id") and job.get("brand_id") != brand_id:
+    job_brand_id = job.get("brand_id")
+    if not job_brand_id or (brand_id and job_brand_id != brand_id):
         raise HTTPException(status_code=404, detail="Job not found.")
+    await _require_catalog_brand_access(str(job_brand_id), user)
     return job
 
 
 # ── Sync config ───────────────────────────────────────────────────────────────
 
 @router.get("/sync-config/{brand_id}")
-async def get_sync_config(brand_id: str):
+async def get_sync_config(
+    brand_id: str,
+    _: User = Depends(_require_catalog_path_brand_access),
+):
     db = connection_manager.get_system_db()
     brand = await db.brands.find_one({"id": brand_id})
     if not brand:
@@ -271,14 +324,24 @@ async def update_sync_config(
     brand_id: str,
     update: SyncConfigUpdate,
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+    _: User = Depends(_require_catalog_path_brand_access),
 ):
     db = connection_manager.get_system_db()
     brand = await db.brands.find_one({"id": brand_id})
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found.")
 
+    existing = dict(brand.get("catalog_sync") or {})
     try:
-        source_url = catalog_service.normalize_shopify_store_url(update.source_url) if update.source_type == "shopify" else update.source_url.strip()
+        if update.source_type == "shopify":
+            source_url = catalog_service.normalize_shopify_store_url(update.source_url)
+            has_saved_access_token = bool(existing.get("access_token_encrypted") or existing.get("access_token"))
+            if (update.access_token and update.access_token.strip()) or has_saved_access_token:
+                source_url = catalog_service.normalize_authenticated_shopify_store_url(source_url)
+        elif update.source_type == "json_feed":
+            source_url = await catalog_service.validate_json_feed_url(update.source_url)
+        else:
+            source_url = update.source_url.strip()
         fields_set = getattr(update, "model_fields_set", getattr(update, "__fields_set__", set()))
         fallback_currency = None
         if "fallback_currency" in fields_set:
@@ -286,7 +349,6 @@ async def update_sync_config(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    existing = dict(brand.get("catalog_sync") or {})
     sync_patch = {
         **existing,
         "source_type": update.source_type,
@@ -318,6 +380,7 @@ async def manual_sync(
     brand_id: str,
     background_tasks: BackgroundTasks,
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+    _: User = Depends(_require_catalog_path_brand_access),
 ):
     """Trigger an immediate resync from the brand's stored sync config."""
     db = connection_manager.get_system_db()
@@ -337,6 +400,8 @@ async def manual_sync(
     if source_type == "shopify":
         try:
             source_url = catalog_service.normalize_shopify_store_url(config.get("source_url"))
+            if config.get("access_token") and str(config.get("access_token")).strip():
+                source_url = catalog_service.normalize_authenticated_shopify_store_url(source_url)
             fallback_currency = catalog_service.normalize_currency_code(config.get("fallback_currency"))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -372,6 +437,8 @@ async def manual_sync(
                 }},
             )
             return {"status": "completed", **result}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 

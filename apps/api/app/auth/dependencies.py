@@ -14,7 +14,14 @@ from ..config import Settings
 from ..connections import connection_manager
 from .jwt import decode_and_verify_token
 from .api_keys import verify_api_key, extract_key_id
-from .models import User, UserRole, Permission, APIKey, ROLE_PERMISSIONS
+from .models import (
+    GLOBAL_ADMIN_ROLES,
+    User,
+    UserRole,
+    Permission,
+    APIKey,
+    ROLE_PERMISSIONS,
+)
 from .admin_key import is_admin_key_authorized
 
 logger = structlog.get_logger()
@@ -217,6 +224,13 @@ async def get_api_key_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is inactive"
         )
+
+    if user.is_locked():
+        logger.warning("locked_user_api_key", user_id=user.id)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Account is locked until {user.locked_until.isoformat()}",
+        )
     
     return user
 
@@ -245,7 +259,7 @@ async def get_user_from_token_or_api_key(
     # Try JWT first
     if credentials is not None:
         try:
-            return await get_current_user(credentials, db)
+            return await get_current_active_user(await get_current_user(credentials, db))
         except HTTPException:
             # If JWT fails and no API key, raise error
             if x_api_key is None:
@@ -273,9 +287,25 @@ async def require_dashboard_access(
     The admin key path remains as a compatibility fallback for operator scripts.
     """
     if credentials is not None:
-        return await get_current_active_user(await get_current_user(credentials, db))
+        user = await get_current_active_user(await get_current_user(credentials, db))
+        # Widget users must not receive control-plane access merely because
+        # they hold a valid JWT. Individual routes still enforce permissions
+        # and brand scope for the remaining operational roles.
+        if user.role in {UserRole.USER, UserRole.VIEWER}:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Dashboard access is restricted to operator roles",
+            )
+        return user
 
-    if x_admin_key and is_admin_key_authorized(x_admin_key, settings):
+    # A global admin key cannot bypass tenant RBAC in production. Keep this
+    # narrow compatibility path for explicitly enabled local operator flows.
+    if (
+        x_admin_key
+        and not settings.is_production
+        and settings.ALLOW_ADMIN_KEY_BYPASS
+        and is_admin_key_authorized(x_admin_key, settings)
+    ):
         return None
 
     raise HTTPException(
@@ -283,6 +313,45 @@ async def require_dashboard_access(
         detail="Authentication required",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+def is_global_admin(user: User | None) -> bool:
+    """Whether an identity has platform-wide, rather than tenant, scope."""
+    # ``None`` only represents the explicitly enabled local admin-key fallback.
+    return user is None or user.role in GLOBAL_ADMIN_ROLES
+
+
+def ensure_permission(user: User | None, *required_permissions: Permission) -> None:
+    """Enforce an operation permission for a dashboard identity."""
+    if is_global_admin(user):
+        return
+    missing = [
+        permission
+        for permission in required_permissions
+        if permission not in ROLE_PERMISSIONS.get(user.role, [])
+    ]
+    if missing:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+
+
+def ensure_brand_access(user: User | None, brand_id: str | None) -> None:
+    """Enforce brand scope without leaking another tenant's resource presence."""
+    if is_global_admin(user):
+        return
+    if not brand_id or not user.has_brand_access(brand_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Brand not found")
+
+
+async def require_system_admin(
+    current_user: User | None = Depends(require_dashboard_access),
+) -> User | None:
+    """Require the platform-level privilege needed for global configuration."""
+    if not is_global_admin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System administration access is required",
+        )
+    return current_user
 
 
 CONSOLE_ACCESS_ROLES = {

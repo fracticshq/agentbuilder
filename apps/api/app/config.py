@@ -38,6 +38,7 @@ def fetch_akv_secrets(vault_name: str) -> dict:
             "QWEN-API-KEY",
             "STRAPI-API-TOKEN",
             "FIRECRAWL-API-KEY",
+            "MCP-SERVICE-AUTH-TOKEN",
             "GOOGLE-CLIENT-ID",
             "ATLAS-PUBLIC-KEY",
             "ATLAS-PRIVATE-KEY",
@@ -251,6 +252,9 @@ class Settings(BaseSettings):
     # Shopify MCP service URL. Store identity and store tokens are per-agent
     # configuration values managed from the dashboard, not global env vars.
     SHOPIFY_MCP_URL: str = "http://localhost:3005/mcp"
+    # Shared service credential for the internal Shopify MCP boundary. This is
+    # not a Shopify credential and must never be returned to clients.
+    MCP_SERVICE_AUTH_TOKEN: str = ""
 
     # Firecrawl (product catalog scraping)
     FIRECRAWL_API_KEY: str = ""
@@ -338,6 +342,7 @@ class Settings(BaseSettings):
                 "PII_ENCRYPTION_KEY",
                 "MONGODB_URI",
                 "REDIS_URL",
+                "MCP_SERVICE_AUTH_TOKEN",
             ]
             if not str(getattr(self, name, "") or "").strip()
         ]

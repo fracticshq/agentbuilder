@@ -9,6 +9,7 @@ import csv
 import io
 import ipaddress
 import re
+import socket
 import uuid
 from datetime import datetime
 from functools import partial
@@ -159,19 +160,109 @@ def _validate_shopify_hostname(hostname: str) -> None:
         raise ValueError
 
 
+def _is_myshopify_hostname(hostname: str) -> bool:
+    host = hostname.rstrip(".").lower()
+    store_name = host.removesuffix(".myshopify.com")
+    return (
+        host.endswith(".myshopify.com")
+        and bool(store_name)
+        and bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", store_name))
+    )
+
+
+def normalize_authenticated_shopify_store_url(value: Any) -> str:
+    """Require the canonical HTTPS Shopify host before sending an Admin token."""
+    base_url = normalize_shopify_store_url(value)
+    parsed = urlsplit(base_url)
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.scheme != "https" or parsed.port is not None or not _is_myshopify_hostname(hostname):
+        raise ValueError(
+            "Authenticated Shopify sync requires the canonical HTTPS store hostname, for example https://store.myshopify.com."
+        )
+    return f"https://{hostname}"
+
+
+def _is_public_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return whether an address is safe to use as an external HTTP destination."""
+    return address.is_global
+
+
+def _validate_public_hostname(hostname: str) -> None:
+    """Reject local, reserved, and metadata hostnames before a DNS lookup."""
+    host = hostname.rstrip(".").lower()
+    blocked_names = {
+        "localhost",
+        "localhost.localdomain",
+        "metadata",
+        "metadata.google.internal",
+        "host.docker.internal",
+        "kubernetes.default.svc",
+    }
+    if host in blocked_names or host.endswith((".localhost", ".local", ".internal", ".test", ".invalid")):
+        raise ValueError("URL must target a public host.")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if not _is_public_ip(address):
+        raise ValueError("URL must target a public host.")
+
+
+async def _resolve_public_hostname(hostname: str) -> None:
+    """Resolve a hostname and reject DNS answers that point into private networks."""
+    try:
+        records = await asyncio.to_thread(
+            socket.getaddrinfo,
+            hostname,
+            None,
+            type=socket.SOCK_STREAM,
+        )
+    except socket.gaierror as exc:
+        raise ValueError("URL hostname could not be resolved.") from exc
+
+    addresses = {record[4][0] for record in records if record[4]}
+    if not addresses:
+        raise ValueError("URL hostname could not be resolved.")
+
+    for raw_address in addresses:
+        try:
+            address = ipaddress.ip_address(raw_address)
+        except ValueError as exc:
+            raise ValueError("URL hostname resolved to an invalid address.") from exc
+        if not _is_public_ip(address):
+            raise ValueError("URL hostname must resolve only to public addresses.")
+
+
+async def validate_json_feed_url(value: Any) -> str:
+    """Validate a JSON feed URL, including its currently-resolved IP addresses."""
+    raw = str(value or "").strip()
+    try:
+        parsed = urlsplit(raw)
+        hostname = parsed.hostname
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not hostname
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+        ):
+            raise ValueError
+        # Accessing .port intentionally validates malformed ports such as :abc.
+        _ = parsed.port
+    except (TypeError, ValueError):
+        raise ValueError("JSON feed URL must be a public http or https URL.") from None
+
+    host = hostname.rstrip(".").lower()
+    _validate_public_hostname(host)
+    await _resolve_public_hostname(host)
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path or "/", parsed.query, ""))
+
+
 def _safe_shopify_redirect(base_host: str, location: str, request_url: str) -> Optional[str]:
     """Resolve one redirect without sending the Admin token to an unrelated host."""
     target = urljoin(request_url, location)
     try:
         original_host = base_host.rstrip(".").lower()
-        host_labels = [label for label in original_host.split(".") if label]
-        if host_labels and host_labels[0] == "www" and len(host_labels) > 1:
-            host_labels = host_labels[1:]
-        canonical_myshopify_host = (
-            original_host
-            if original_host.endswith(".myshopify.com")
-            else f"{host_labels[0]}.myshopify.com" if host_labels else ""
-        )
         parsed = urlsplit(target)
         target_host = (parsed.hostname or "").rstrip(".").lower()
         if parsed.scheme not in {"http", "https"} or not target_host:
@@ -179,7 +270,7 @@ def _safe_shopify_redirect(base_host: str, location: str, request_url: str) -> O
         if parsed.username or parsed.password or parsed.fragment:
             raise ValueError
         _validate_shopify_hostname(target_host)
-        if target_host not in {original_host, canonical_myshopify_host}:
+        if target_host != original_host:
             raise ValueError
         return target
     except (TypeError, ValueError):
@@ -568,7 +659,7 @@ async def _fetch_shopify_default_currency(
         return None
 
     try:
-        base = normalize_shopify_store_url(base_url)
+        base = normalize_authenticated_shopify_store_url(base_url)
         base_host = urlsplit(base).hostname or ""
         url = f"{base.rstrip('/')}/admin/api/2024-01/shop.json"
         response = await client.get(url, headers=headers)
@@ -609,6 +700,8 @@ async def fetch_shopify_products(
     started_at = datetime.utcnow().isoformat()
     try:
         base = normalize_shopify_store_url(store_url)
+        if access_token and access_token.strip():
+            base = normalize_authenticated_shopify_store_url(base)
         explicit_fallback = normalize_currency_code(fallback_currency) if fallback_currency else await _resolve_configured_default_currency(brand_id)
         await _job_store.update(job_id, {
             "brand_id": brand_id,
@@ -670,7 +763,8 @@ async def fetch_shopify_products(
                 resp = await client.get(url, headers=headers)
                 
                 # Manual redirect handling
-                if resp.is_redirect:
+                is_redirect = bool(getattr(resp, "is_redirect", False)) or resp.status_code in {301, 302, 303, 307, 308}
+                if is_redirect:
                     location = str(resp.headers.get("Location", ""))
                     logger.info("shopify_fetch_redirect", location=location)
                     
@@ -680,10 +774,12 @@ async def fetch_shopify_products(
                             "configure Shopify app credentials for the agent MCP/UCP path, or use a public storefront cache import."
                         )
                     
-                    # Follow other redirects (domain changes, etc) once
-                    # update url for the next check/fetch
-                    url = str(resp.url.join(location))
-                    resp = await client.get(url, headers=headers)
+                    redirect_url = _safe_shopify_redirect(urlsplit(base).hostname or "", location, url)
+                    if not redirect_url:
+                        raise ValueError("Shopify redirected to an untrusted host; update the configured store URL.")
+                    resp = await client.get(redirect_url, headers=headers)
+                    if bool(getattr(resp, "is_redirect", False)) or resp.status_code in {301, 302, 303, 307, 308}:
+                        raise ValueError("Shopify returned too many redirects.")
 
                 if resp.status_code == 401:
                     raise ValueError(
@@ -841,10 +937,25 @@ async def fetch_json_feed(url: str, fallback_currency: Optional[str] = None) -> 
         "User-Agent": "Mozilla/5.0 (compatible; AgentBuilder/1.0)",
         "Accept": "application/json",
     }
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        resp = await client.get(url, headers=headers)
+    request_url = await validate_json_feed_url(url)
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+        for redirect_count in range(4):
+            resp = await client.get(request_url, headers=headers)
+            is_redirect = bool(getattr(resp, "is_redirect", False)) or resp.status_code in {301, 302, 303, 307, 308}
+            if not is_redirect:
+                break
+
+            if redirect_count == 3:
+                raise ValueError("Too many redirects when fetching JSON feed.")
+            location = resp.headers.get("Location")
+            if not location:
+                raise ValueError("JSON feed returned a redirect without a Location header.")
+            request_url = await validate_json_feed_url(urljoin(request_url, location))
+        else:  # pragma: no cover - the loop always breaks or raises
+            raise ValueError("Too many redirects when fetching JSON feed.")
+
         if not resp.is_success:
-            raise ValueError(f"HTTP {resp.status_code} when fetching {url}")
+            raise ValueError(f"HTTP {resp.status_code} when fetching JSON feed")
         data = resp.json()
 
     fmt = _detect_format(data)

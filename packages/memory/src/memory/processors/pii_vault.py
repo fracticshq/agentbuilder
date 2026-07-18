@@ -5,7 +5,7 @@ PII Vault - Detect and encrypt Personally Identifiable Information
 import re
 from typing import List, Dict, Tuple, Optional
 import structlog
-from memory.types import PIIField, ExtractedEntity
+from memory.types import PIIField
 from memory.config import MemoryConfig
 from memory.utils.crypto import get_crypto_utils, CryptoError
 
@@ -95,7 +95,12 @@ class PIIVault:
     Uses AES-256-GCM encryption with key derivation.
     """
     
-    def __init__(self, master_key: Optional[str] = None):
+    def __init__(
+        self,
+        master_key: Optional[str] = None,
+        key_id: Optional[str] = None,
+        key_version: Optional[int] = None,
+    ):
         """
         Initialize PII vault.
         
@@ -103,6 +108,8 @@ class PIIVault:
             master_key: Encryption master key (from config if not provided)
         """
         self.master_key = master_key or MemoryConfig.PII_ENCRYPTION_KEY
+        self.key_id = MemoryConfig.PII_KEY_ID if key_id is None else key_id
+        self.key_version = MemoryConfig.PII_KEY_VERSION if key_version is None else key_version
         
         if not self.master_key:
             logger.warning("PII encryption key not configured - vaulting disabled")
@@ -110,7 +117,11 @@ class PIIVault:
         else:
             self.enabled = True
             try:
-                self.crypto = get_crypto_utils(self.master_key)
+                self.crypto = get_crypto_utils(
+                    self.master_key,
+                    key_id=self.key_id,
+                    key_version=self.key_version,
+                )
                 logger.info("PII vault initialized")
             except CryptoError as e:
                 logger.error("Failed to initialize crypto", error=str(e))
@@ -138,7 +149,14 @@ class PIIVault:
         return PIIField(
             encrypted_value=ciphertext,
             iv=iv,
-            field_name=field_name
+            salt=salt,
+            field_name=field_name,
+            key_id=self.crypto.key_id,
+            key_version=self.crypto.key_version,
+            encryption_version=self.crypto.ENCRYPTION_VERSION,
+            algorithm=self.crypto.ALGORITHM,
+            kdf=self.crypto.KDF,
+            kdf_iterations=self.crypto.KDF_ITERATIONS,
         )
     
     def decrypt_field(self, pii_field: PIIField) -> str:
@@ -156,11 +174,21 @@ class PIIVault:
         """
         if not self.enabled:
             raise CryptoError("PII vaulting not enabled")
-        
+
+        if pii_field.encryption_version != self.crypto.ENCRYPTION_VERSION:
+            raise CryptoError("Unsupported PII encryption version")
+        if pii_field.algorithm != self.crypto.ALGORITHM or pii_field.kdf != self.crypto.KDF:
+            raise CryptoError("Unsupported PII encryption algorithm or KDF")
+        if pii_field.key_id != self.crypto.key_id or pii_field.key_version != self.crypto.key_version:
+            raise CryptoError("PII field was encrypted with an unavailable key version")
+        if pii_field.kdf_iterations != self.crypto.KDF_ITERATIONS:
+            raise CryptoError("Unsupported PBKDF2 iteration count")
+
         return self.crypto.decrypt(
             pii_field.encrypted_value,
             pii_field.iv,
-            pii_field.encrypted_value  # Using as salt for now (should be separate)
+            pii_field.salt,
+            kdf_iterations=pii_field.kdf_iterations,
         )
     
     def vault_dict(self, data: Dict, fields_to_vault: List[str]) -> Dict:
@@ -175,8 +203,7 @@ class PIIVault:
             Dictionary with vaulted fields
         """
         if not self.enabled:
-            logger.warning("PII vaulting disabled - returning unencrypted data")
-            return data
+            raise CryptoError("PII vaulting is not enabled; refusing to return plaintext")
         
         vaulted = data.copy()
         
@@ -188,6 +215,7 @@ class PIIVault:
                     logger.debug("Field vaulted", field=field)
                 except CryptoError as e:
                     logger.error("Failed to vault field", field=field, error=str(e))
+                    raise
         
         return vaulted
     
@@ -229,10 +257,12 @@ class PIIVault:
         Returns:
             Tuple of (text_with_placeholders, list_of_pii_types_found)
         """
-        if not self.enabled:
-            return text, []
-        
         findings = PIIDetector.detect(text)
+
+        if not self.enabled:
+            if findings:
+                raise CryptoError("PII vaulting is not enabled; refusing to return detected PII")
+            return text, []
         
         if not findings:
             return text, []

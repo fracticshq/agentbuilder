@@ -356,6 +356,7 @@ function App({ config }: AppProps) {
       actor_id: userId,
       agent_id: agentId,
       conversation_id: conversationId,
+      sessionToken: apiClient.getSessionToken(),
       page_context: extractPageContext(),
     });
     setConvStartEvent(null);
@@ -422,6 +423,7 @@ function App({ config }: AppProps) {
         actor_id: currentUserId,
         agent_id: agentId,
         conversation_id: currentConvId,
+        sessionToken: apiClient.getSessionToken(),
         page_context: extractPageContext(),
       });
 
@@ -477,6 +479,7 @@ function App({ config }: AppProps) {
         actor_id: agentId,
         agent_id: agentId,
         conversation_id: currentConvId,
+        sessionToken: apiClient.getSessionToken(),
       });
     } catch (err) {
       console.error('[Widget] Chat error:', err);

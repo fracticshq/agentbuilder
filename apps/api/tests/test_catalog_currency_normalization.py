@@ -8,6 +8,7 @@ from app.services.catalog_service import (
     _normalize_schema_org,
     _normalize_shopify,
     _normalize_woocommerce,
+    normalize_authenticated_shopify_store_url,
     normalize_currency_code,
     normalize_shopify_store_url,
 )
@@ -176,6 +177,15 @@ def test_shopify_url_and_explicit_currency_validation():
     with pytest.raises(ValueError):
         normalize_currency_code("USDOLLAR")
 
+    assert normalize_authenticated_shopify_store_url("https://store.myshopify.com") == "https://store.myshopify.com"
+    for unsafe_authenticated_store in (
+        "http://store.myshopify.com",
+        "https://store.myshopify.com:8443",
+        "https://celavilifestyle.com",
+    ):
+        with pytest.raises(ValueError):
+            normalize_authenticated_shopify_store_url(unsafe_authenticated_store)
+
 
 @pytest.mark.asyncio
 async def test_authenticated_shopify_store_currency_success_and_failure():
@@ -208,32 +218,32 @@ async def test_authenticated_shopify_store_currency_success_and_failure():
             return next(self.responses)
 
     client = Client(Response(200, {"shop": {"currency": "inr"}}))
-    assert await _fetch_shopify_default_currency(client, "https://celavilifestyle.com", {"X-Shopify-Access-Token": "secret"}) == "INR"
+    assert await _fetch_shopify_default_currency(client, "https://celavilifestyle.myshopify.com", {"X-Shopify-Access-Token": "secret"}) == "INR"
     assert client.calls[0][0].endswith("/admin/api/2024-01/shop.json")
 
     redirected = SequenceClient([
-        Response(302, {}, {"location": "https://celavilifestyle.myshopify.com/admin/api/2024-01/shop.json"}),
+        Response(302, {}, {"location": "/admin/api/2024-01/shop.json?redirected=true"}),
         Response(200, {"shop": {"currency": "GBP"}}),
     ])
-    assert await _fetch_shopify_default_currency(redirected, "https://celavilifestyle.com", {"X-Shopify-Access-Token": "secret"}) == "GBP"
+    assert await _fetch_shopify_default_currency(redirected, "https://celavilifestyle.myshopify.com", {"X-Shopify-Access-Token": "secret"}) == "GBP"
     assert len(redirected.calls) == 2
 
     unsafe_redirect = SequenceClient([
         Response(302, {}, {"location": "http://127.0.0.1/admin/api/2024-01/shop.json"}),
         Response(200, {"shop": {"currency": "GBP"}}),
     ])
-    assert await _fetch_shopify_default_currency(unsafe_redirect, "https://celavilifestyle.com", {"X-Shopify-Access-Token": "secret"}) is None
+    assert await _fetch_shopify_default_currency(unsafe_redirect, "https://celavilifestyle.myshopify.com", {"X-Shopify-Access-Token": "secret"}) is None
     assert len(unsafe_redirect.calls) == 1
 
     cross_store_redirect = SequenceClient([
         Response(302, {}, {"location": "https://another-store.myshopify.com/admin/api/2024-01/shop.json"}),
         Response(200, {"shop": {"currency": "GBP"}}),
     ])
-    assert await _fetch_shopify_default_currency(cross_store_redirect, "https://celavilifestyle.com", {"X-Shopify-Access-Token": "secret"}) is None
+    assert await _fetch_shopify_default_currency(cross_store_redirect, "https://celavilifestyle.myshopify.com", {"X-Shopify-Access-Token": "secret"}) is None
     assert len(cross_store_redirect.calls) == 1
 
     failed = Client(Response(403, {}))
-    assert await _fetch_shopify_default_currency(failed, "https://celavilifestyle.com", {"X-Shopify-Access-Token": "secret"}) is None
+    assert await _fetch_shopify_default_currency(failed, "https://celavilifestyle.myshopify.com", {"X-Shopify-Access-Token": "secret"}) is None
 
     public = Client(Response(200, {"shop": {"currency": "USD"}}))
     assert await _fetch_shopify_default_currency(public, "https://celavilifestyle.com", {}) is None

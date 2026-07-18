@@ -11,7 +11,9 @@ from commons.types.requests import IngestionRequest
 from commons.types.responses import IngestionResponse, IngestionStatus
 from ....dependencies import get_settings, get_ingestion_service
 from ....services.ingestion_service import IngestionService
-from ....auth.dependencies import require_dashboard_access
+from ....auth.dependencies import ensure_brand_access, ensure_permission, require_dashboard_access
+from ....auth.models import Permission, User
+from ....connections import connection_manager
 
 logger = structlog.get_logger()
 router = APIRouter(dependencies=[Depends(require_dashboard_access)])
@@ -30,14 +32,48 @@ class ChunkRequest(BaseModel):
     text: str
     metadata: dict = {}
     doc_id: Optional[str] = None
+    agent_id: str
+
+
+async def _authorize_agent(
+    current_user: User | None,
+    agent_id: str,
+    permission: Permission,
+) -> dict:
+    """Resolve an agent before authorizing so tenant scope uses its canonical brand ID."""
+    ensure_permission(current_user, permission)
+    agent = await connection_manager.get_system_db().agents.find_one({"id": agent_id})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    ensure_brand_access(current_user, agent.get("brand_id"))
+    return agent
+
+
+async def _authorize_job(
+    current_user: User | None,
+    job_id: str,
+    ingestion_service: IngestionService,
+    permission: Permission,
+) -> dict:
+    """Authorize access to a job before returning or mutating its state."""
+    job = await ingestion_service.job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    agent_id = job.get("agent_id")
+    if not agent_id:
+        # Historical unscoped jobs cannot be safely exposed to a tenant user.
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _authorize_agent(current_user, agent_id, permission)
+    return job
 
 
 @router.post("/documents", response_model=DocumentUploadResponse)
 async def upload_documents(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
-    agent_id: Optional[str] = None,
-    ingestion_service: IngestionService = Depends(get_ingestion_service)
+    agent_id: str = ...,
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Upload and process documents for ingestion.
     
@@ -48,6 +84,7 @@ async def upload_documents(
         ingestion_service: Injected ingestion service
     """
     try:
+        await _authorize_agent(current_user, agent_id, Permission.DOCUMENT_WRITE)
         # Validate file types
         allowed_types = {
             "text/plain", "text/markdown", "application/pdf",
@@ -101,10 +138,12 @@ async def upload_documents(
 @router.post("/chunks", response_model=IngestionResponse)
 async def process_chunk(
     request: ChunkRequest,
-    ingestion_service: IngestionService = Depends(get_ingestion_service)
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Process a single text chunk."""
     try:
+        await _authorize_agent(current_user, request.agent_id, Permission.DOCUMENT_WRITE)
         ingestion_request = IngestionRequest(
             text=request.text,
             metadata=request.metadata,
@@ -113,9 +152,10 @@ async def process_chunk(
             chunk_overlap=None
         )
         
-        response = await ingestion_service.process_chunk(ingestion_request)
+        response = await ingestion_service.process_chunk(ingestion_request, agent_id=request.agent_id)
         return response
-        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error processing chunk", error=str(e))
         raise HTTPException(status_code=500, detail="Error processing chunk")
@@ -124,10 +164,12 @@ async def process_chunk(
 @router.get("/status/{job_id}", response_model=IngestionStatus)
 async def get_ingestion_status(
     job_id: str,
-    ingestion_service: IngestionService = Depends(get_ingestion_service)
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Get the status of an ingestion job."""
     try:
+        await _authorize_job(current_user, job_id, ingestion_service, Permission.DOCUMENT_READ)
         status = await ingestion_service.get_job_status(job_id)
         if not status:
             raise HTTPException(status_code=404, detail="Job not found")
@@ -143,10 +185,12 @@ async def get_ingestion_status(
 @router.delete("/jobs/{job_id}")
 async def cancel_ingestion_job(
     job_id: str,
-    ingestion_service: IngestionService = Depends(get_ingestion_service)
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Cancel an ingestion job."""
     try:
+        await _authorize_job(current_user, job_id, ingestion_service, Permission.DOCUMENT_DELETE)
         result = await ingestion_service.cancel_job(job_id)
         if not result:
             raise HTTPException(status_code=404, detail="Job not found")
@@ -161,17 +205,20 @@ async def cancel_ingestion_job(
 
 @router.get("/documents")
 async def get_documents(
-    agent_id: Optional[str] = None,
-    ingestion_service: IngestionService = Depends(get_ingestion_service)
+    agent_id: str = ...,
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Get uploaded documents, optionally filtered by agent_id."""
     try:
+        await _authorize_agent(current_user, agent_id, Permission.DOCUMENT_READ)
         documents = await ingestion_service.get_documents(agent_id)
         return {
             "documents": documents,
             "count": len(documents)
         }
-        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error retrieving documents", agent_id=agent_id, error=str(e))
         raise HTTPException(status_code=500, detail="Error retrieving documents")

@@ -6,7 +6,13 @@ from datetime import datetime
 import structlog
 
 from app.connections import connection_manager
-from app.auth.dependencies import require_dashboard_access
+from app.auth.dependencies import (
+    ensure_brand_access,
+    ensure_permission,
+    is_global_admin,
+    require_dashboard_access,
+)
+from app.auth.models import Permission, User
 from app.dependencies import get_runtime_settings_service
 from app.services.tool_config_secrets import (
     expose_full_agent_for_admin,
@@ -130,15 +136,25 @@ async def sync_agent_to_strapi_best_effort(
 async def list_agents(
     brand_id: Optional[str] = Query(None),
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     try:
         collection = get_agents_collection()
-        query = {"brand_id": brand_id} if brand_id else {}
+        ensure_permission(current_user, Permission.AGENT_READ)
+        if brand_id:
+            ensure_brand_access(current_user, brand_id)
+            query = {"brand_id": brand_id}
+        elif is_global_admin(current_user):
+            query = {}
+        else:
+            query = {"brand_id": {"$in": current_user.brands or []}}
         agents = await collection.find(query).to_list(length=None)
         return [
             Agent(**{**expose_full_agent_for_admin(agent, runtime_settings_service), "_id": str(agent["_id"])})
             for agent in agents
         ]
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to list agents", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
@@ -148,12 +164,15 @@ async def list_agents(
 async def get_agent(
     agent_id: str,
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     try:
         collection = get_agents_collection()
         agent = await collection.find_one({"id": agent_id})
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
+        ensure_permission(current_user, Permission.AGENT_READ)
+        ensure_brand_access(current_user, agent.get("brand_id"))
         return Agent(**{**expose_full_agent_for_admin(agent, runtime_settings_service), "_id": str(agent["_id"])})
     except HTTPException:
         raise
@@ -167,8 +186,11 @@ async def create_agent(
     agent: AgentCreate,
     background_tasks: BackgroundTasks,
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     try:
+        ensure_permission(current_user, Permission.AGENT_WRITE)
+        ensure_brand_access(current_user, agent.brand_id)
         collection = get_agents_collection()
         brand = await get_brand_or_404(agent.brand_id)
 
@@ -224,6 +246,7 @@ async def update_agent(
     agent_update: AgentUpdate,
     background_tasks: BackgroundTasks,
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     try:
         collection = get_agents_collection()
@@ -231,9 +254,13 @@ async def update_agent(
         if not existing_agent:
             raise HTTPException(status_code=404, detail="Agent not found")
 
+        ensure_permission(current_user, Permission.AGENT_WRITE)
+        ensure_brand_access(current_user, existing_agent.get("brand_id"))
+
         update_data = agent_update.dict(exclude_unset=True)
         target_brand = None
         if "brand_id" in update_data and update_data["brand_id"] != existing_agent.get("brand_id"):
+            ensure_brand_access(current_user, update_data["brand_id"])
             target_brand = await get_brand_or_404(update_data["brand_id"])
             brand_slug = target_brand.get("slug")
             if not brand_slug:
@@ -280,12 +307,16 @@ async def delete_agent(
     agent_id: str,
     background_tasks: BackgroundTasks,
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     try:
         collection = get_agents_collection()
         existing_agent = await collection.find_one({"id": agent_id})
         if not existing_agent:
             raise HTTPException(status_code=404, detail="Agent not found")
+
+        ensure_permission(current_user, Permission.AGENT_DELETE)
+        ensure_brand_access(current_user, existing_agent.get("brand_id"))
 
         brand_doc = await get_brand_for_sync(existing_agent.get("brand_id"))
         await collection.delete_one({"id": agent_id})

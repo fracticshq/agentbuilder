@@ -51,9 +51,11 @@ from .skill_registry import BuiltInSkillRegistry
 from .artifact_registry import is_artifact_enabled
 from .birth_profile_extractor import extract_birth_profile
 from .lalkitab_runtime import (
+    LAL_KITAB_CHART_UNAVAILABLE_MESSAGE,
     build_lalkitab_runtime_context,
     extract_kundali_chart_summary,
     is_lalkitab_agent,
+    is_valid_lalkitab_context_payload,
 )
 from .conversation_policy import (
     activity_stream_response_kwargs,
@@ -116,6 +118,84 @@ def _sanitize_for_json(data: dict) -> dict:
         return json.loads(json.dumps(data, default=str))
     except Exception:
         return {}
+
+
+def _public_lalkitab_api_context(api_context: dict | None, *, chart_validated: bool | None = None) -> dict:
+    """Return the safe public subset of Lal Kitab runtime state.
+
+    The complete chart input and response remain available only in internal
+    short-term state for a later retry.  Public API and stream metadata must not
+    include birth date/time/place, coordinates, provider URLs, or raw payloads.
+    """
+    context = api_context if isinstance(api_context, dict) else {}
+    validated = (
+        is_valid_lalkitab_context_payload(context.get("chart_context"))
+        if chart_validated is None
+        else bool(chart_validated)
+    )
+    provenance = []
+    for item in context.get("source_provenance") or []:
+        if isinstance(item, dict) and item.get("endpoint_id"):
+            provenance.append(
+                {
+                    "endpoint_id": item.get("endpoint_id"),
+                    "endpoint_name": item.get("endpoint_name"),
+                }
+            )
+    return {
+        "chart_available": validated,
+        "chart_validated": validated,
+        "secondary_endpoint_ids": sorted((context.get("secondary_endpoint_results") or {}).keys()),
+        "source_provenance": provenance,
+    }
+
+
+def _public_lalkitab_place_candidates(candidates: list | None) -> list[dict]:
+    """Expose disambiguation labels without precise location data."""
+    return [
+        {
+            "placeId": candidate.get("placeId"),
+            "name": candidate.get("name"),
+            "adminRegion": candidate.get("adminRegion"),
+            "country": candidate.get("country"),
+            "label": candidate.get("label"),
+        }
+        for candidate in (candidates or [])
+        if isinstance(candidate, dict)
+    ]
+
+
+def _public_lalkitab_missing_fields(missing: list | None) -> list[str]:
+    """Hide coordinate fields behind the birth-place prompt shown to users."""
+    public_fields: list[str] = []
+    for field in missing or []:
+        public_field = {
+            "date": "birth_date",
+            "time": "birth_time",
+            "latitude": "birth_place",
+            "longitude": "birth_place",
+            "timezone": "birth_place",
+        }.get(str(field), str(field))
+        if public_field not in public_fields:
+            public_fields.append(public_field)
+    return public_fields
+
+
+def _lalkitab_validation_confidence(lalkitab_plan, api_context: dict) -> float:
+    """Derive confidence from the validated endpoint coverage for this turn."""
+    selected = {
+        str(endpoint_id)
+        for endpoint_id in (getattr(lalkitab_plan, "selected_endpoint_ids", None) or [])
+        if endpoint_id
+    }
+    validated_sources = {
+        str(item.get("endpoint_id"))
+        for item in (api_context.get("source_provenance") or [])
+        if isinstance(item, dict) and item.get("endpoint_id")
+    }
+    if not selected:
+        return 1.0 if is_valid_lalkitab_context_payload(api_context.get("chart_context")) else 0.0
+    return min(1.0, len(selected & validated_sources) / len(selected))
 
 
 def _normalize_commerce_product_currency(product: dict, agent_config: dict | None) -> dict:
@@ -1155,6 +1235,51 @@ Updated memory:"""
     ) -> AgentResult:
         """Generate a Lal Kitab answer grounded in chart-first API context plus RAG."""
         api_context = lalkitab_plan.api_context or {}
+        chart_validated = bool(
+            getattr(lalkitab_plan, "chart_validated", False)
+            and is_valid_lalkitab_context_payload(api_context.get("chart_context"))
+        )
+        requires_safe_abstention = bool(
+            getattr(lalkitab_plan, "requires_safe_abstention", False)
+            or not chart_validated
+        )
+        tool_results = dict(lalkitab_plan.tool_results or {})
+        if rag_tool_result:
+            tool_results["knowledge_search"] = rag_tool_result
+        if requires_safe_abstention:
+            # Never ask the LLM to fill gaps in a chart reading.  A connector
+            # failure, malformed payload, or missing validated chart must be a
+            # deterministic abstention rather than an astrology synthesis.
+            return AgentResult(
+                answer=LAL_KITAB_CHART_UNAVAILABLE_MESSAGE,
+                metadata={
+                    "tool_results": tool_results,
+                    "steps_executed": len(tool_results),
+                    "validation_passed": False,
+                    "validation_confidence": 0.0,
+                    "validation_issues": ["validated_chart_context_unavailable"],
+                    "lalkitab_runtime": True,
+                    "api_context": _public_lalkitab_api_context(
+                        api_context, chart_validated=False
+                    ),
+                    "selected_connector_endpoint_ids": getattr(
+                        lalkitab_plan, "selected_endpoint_ids", []
+                    ),
+                    "used_cached_context": False,
+                    # Retained only in internal short-term metadata so a later
+                    # request can retry with the already-collected birth input.
+                    "lalkitab_api_context_full": _sanitize_for_json(api_context),
+                    "lalkitab_rag_context_full": _sanitize_for_json(rag_context),
+                    "rag_context": {
+                        "chunks_count": len(rag_context.get("chunks") or []),
+                        "sources": rag_context.get("sources") or [],
+                        "confidence": rag_context.get("confidence"),
+                    },
+                },
+            )
+        validation_confidence = _lalkitab_validation_confidence(
+            lalkitab_plan, api_context
+        )
         input_resolution = api_context.get("input_resolution") if isinstance(api_context.get("input_resolution"), dict) else {}
         confirmation_rule = (
             "- Start by briefly confirming the birth details you used. If a detail was inferred from a known place, say so naturally."
@@ -1177,13 +1302,6 @@ Updated memory:"""
         )
         normalized_birth = api_context.get("normalized_birth_input") or {}
         user_name = normalized_birth.get("name") or (birth_profile or {}).get("name")
-        if kundali_chart:
-            kundali_chart["birth"] = {
-                "name": user_name,
-                "date": normalized_birth.get("date"),
-                "time": normalized_birth.get("time"),
-                "place": normalized_birth.get("birth_place_resolved") or normalized_birth.get("birth_place"),
-            }
         name_rule = (
             f"- Address the user by name ({user_name}) naturally, like an astrologer who knows them.\n"
             if user_name else ""
@@ -1261,25 +1379,19 @@ Knowledge Context:
 Answer the user directly.
 """
         response = await self.llm_provider.generate(prompt)
-        tool_results = dict(lalkitab_plan.tool_results or {})
-        if rag_tool_result:
-            tool_results["knowledge_search"] = rag_tool_result
         return AgentResult(
             answer=response.content,
             metadata={
                 "tool_results": tool_results,
                 "steps_executed": len(tool_results),
-                "validation_passed": True,
-                "validation_confidence": 0.92,
+                "validation_passed": chart_validated,
+                "validation_confidence": validation_confidence,
                 "lalkitab_runtime": True,
                 "extractor_source": (birth_profile or {}).get("source"),
                 "kundali_chart": _sanitize_for_json(kundali_chart) if kundali_chart else None,
-                "api_context": {
-                    "normalized_birth_input": api_context.get("normalized_birth_input"),
-                    "chart_available": bool(api_context.get("chart_context")),
-                    "secondary_endpoint_ids": sorted((api_context.get("secondary_endpoint_results") or {}).keys()),
-                    "source_provenance": api_context.get("source_provenance") or [],
-                },
+                "api_context": _public_lalkitab_api_context(
+                    api_context, chart_validated=chart_validated
+                ),
                 "selected_connector_endpoint_ids": lalkitab_plan.selected_endpoint_ids,
                 "used_cached_context": bool(getattr(lalkitab_plan, "used_cached_context", False)),
                 "lalkitab_api_context_full": _sanitize_for_json(api_context),
@@ -1957,6 +2069,13 @@ Rules:
                             "x-shopify-shop-url": str(shopify_url or ""),
                             "x-session-id": f"agent:{agent_id}",
                         }
+                        if self.settings.MCP_SERVICE_AUTH_TOKEN:
+                            mcp_headers["Authorization"] = (
+                                f"Bearer {self.settings.MCP_SERVICE_AUTH_TOKEN}"
+                            )
+                        elif self.settings.is_production:
+                            logger.error("shopify_mcp_service_token_missing", agent_id=agent_id)
+                            raise RuntimeError("Shopify MCP service authentication is not configured")
                         if shopify_client_id:
                             mcp_headers["x-shopify-client-id"] = str(shopify_client_id)
                         if shopify_client_secret:
@@ -2827,8 +2946,9 @@ Rules:
                     "connector_name": "Vedika Lal Kitab",
                     "endpoint_id": "geocode_search",
                     "endpoint_name": "Vedika Geocode Search",
-                    "candidates": lalkitab_plan.place_candidates,
-                    "normalized_birth_input": lalkitab_plan.normalized_birth_input,
+                    "candidates": _public_lalkitab_place_candidates(
+                        lalkitab_plan.place_candidates
+                    ),
                 }
                 yield StreamingMessageResponse(
                     type="place_disambiguation",
@@ -2858,8 +2978,9 @@ Rules:
                     "connector_name": "Vedika Lal Kitab",
                     "endpoint_id": "lalkitab_chart",
                     "endpoint_name": "Lal Kitab Chart",
-                    "missing_input": lalkitab_plan.missing_input,
-                    "normalized_birth_input": lalkitab_plan.normalized_birth_input,
+                    "missing_input": _public_lalkitab_missing_fields(
+                        lalkitab_plan.missing_input
+                    ),
                 }
                 yield StreamingMessageResponse(
                     type="missing_input",

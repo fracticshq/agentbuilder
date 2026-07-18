@@ -11,11 +11,18 @@ from pydantic import BaseModel, Field
 import structlog
 
 from ....dependencies import get_settings, get_knowledge_service
-from ....auth.dependencies import require_dashboard_access
+from ....auth.dependencies import ensure_brand_access, ensure_permission, require_dashboard_access
+from ....auth.models import Permission, User
 from ....services.knowledge_service import KnowledgeService
 
 logger = structlog.get_logger()
 router = APIRouter(dependencies=[Depends(require_dashboard_access)])
+
+
+def _authorize_brand(current_user: User | None, brand_id: str, permission: Permission) -> None:
+    """Enforce document permission and tenant scope before touching a brand DB."""
+    ensure_permission(current_user, permission)
+    ensure_brand_access(current_user, brand_id)
 
 
 # ============================================================================
@@ -178,7 +185,8 @@ async def upload_document(
     folder_path: Optional[str] = Form(None),
     product_data: Optional[str] = Form(None),  # JSON string
     dealer_data: Optional[str] = Form(None),   # JSON string
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     Upload a single document with structured metadata.
@@ -194,6 +202,7 @@ async def upload_document(
     3. Stored in MongoDB with structured metadata
     """
     try:
+        _authorize_brand(current_user, brand_id, Permission.DOCUMENT_WRITE)
         source_type = knowledge_service.detect_source_type(file.content_type, file.filename or "")
 
         if not source_type:
@@ -292,7 +301,8 @@ async def upload_document(
 async def bulk_upload_json(
     background_tasks: BackgroundTasks,
     request: BulkUploadRequest = Body(...),
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     Bulk upload products or dealers from JSON.
@@ -327,6 +337,7 @@ async def bulk_upload_json(
     ```
     """
     try:
+        _authorize_brand(current_user, request.brand_id, Permission.DOCUMENT_WRITE)
         # Validate items based on content_type
         if request.content_type == "product":
             for i, item in enumerate(request.items):
@@ -414,16 +425,20 @@ async def get_knowledge_tree(
     brand_id: str,
     agent_id: Optional[str] = None,
     folder: Optional[str] = None,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Return a filesystem-style folder/file tree for the knowledge base."""
     try:
+        _authorize_brand(current_user, brand_id, Permission.DOCUMENT_READ)
         tree = await knowledge_service.list_knowledge_tree(
             brand_id=brand_id,
             agent_id=agent_id,
             folder=folder,
         )
         return {"success": True, **tree}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to get knowledge tree", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to get knowledge tree: {str(e)}")
@@ -432,10 +447,12 @@ async def get_knowledge_tree(
 @router.post("/folders")
 async def create_folder(
     request: FolderCreateRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Create or ensure a knowledge folder."""
     try:
+        _authorize_brand(current_user, request.brand_id, Permission.DOCUMENT_WRITE)
         folder = await knowledge_service.create_folder(
             brand_id=request.brand_id,
             path=request.path or knowledge_service.folder_path_from_name(
@@ -445,6 +462,8 @@ async def create_folder(
             agent_id=request.agent_id,
         )
         return {"success": True, "folder": folder}
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -455,13 +474,15 @@ async def create_folder(
 @router.patch("/items/move")
 async def move_knowledge_item_by_body(
     request: KnowledgeMoveRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Move a knowledge item (file or folder) — id carried in the body so folder
     paths with slashes route correctly."""
     if not request.item_id:
         raise HTTPException(status_code=400, detail="item_id is required")
     try:
+        _authorize_brand(current_user, request.brand_id, Permission.DOCUMENT_WRITE)
         item = await knowledge_service.move_item(
             brand_id=request.brand_id,
             item_id=request.item_id,
@@ -483,12 +504,14 @@ async def move_knowledge_item_by_body(
 @router.patch("/items/rename")
 async def rename_knowledge_item_by_body(
     request: KnowledgeRenameRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Rename a knowledge item (file or folder) — id carried in the body."""
     if not request.item_id:
         raise HTTPException(status_code=400, detail="item_id is required")
     try:
+        _authorize_brand(current_user, request.brand_id, Permission.DOCUMENT_WRITE)
         item = await knowledge_service.rename_item(
             brand_id=request.brand_id,
             item_id=request.item_id,
@@ -512,11 +535,13 @@ async def delete_knowledge_item_by_query(
     item_id: str,
     brand_id: str,
     agent_id: Optional[str] = None,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Delete a knowledge item (file or folder) — id in query so folder paths
     with slashes route correctly. Folders reparent their documents to the parent."""
     try:
+        _authorize_brand(current_user, brand_id, Permission.DOCUMENT_DELETE)
         result = await knowledge_service.delete_item(item_id, brand_id=brand_id, agent_id=agent_id)
         if not result.get("deleted"):
             raise HTTPException(status_code=404, detail=f"Knowledge item not found: {item_id}")
@@ -532,10 +557,12 @@ async def delete_knowledge_item_by_query(
 async def move_knowledge_item(
     item_id: str,
     request: KnowledgeMoveRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Move a knowledge item to another folder (legacy path-param route)."""
     try:
+        _authorize_brand(current_user, request.brand_id, Permission.DOCUMENT_WRITE)
         item = await knowledge_service.move_item(
             brand_id=request.brand_id,
             item_id=item_id,
@@ -558,10 +585,12 @@ async def move_knowledge_item(
 async def rename_knowledge_item(
     item_id: str,
     request: KnowledgeRenameRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Rename a knowledge file or folder."""
     try:
+        _authorize_brand(current_user, request.brand_id, Permission.DOCUMENT_WRITE)
         item = await knowledge_service.rename_item(
             brand_id=request.brand_id,
             item_id=item_id,
@@ -584,10 +613,12 @@ async def rename_knowledge_item(
 async def delete_knowledge_item(
     item_id: str,
     brand_id: str,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Delete a knowledge item and its chunks (legacy path-param route)."""
     try:
+        _authorize_brand(current_user, brand_id, Permission.DOCUMENT_DELETE)
         result = await knowledge_service.delete_item(item_id, brand_id=brand_id)
         if not result.get("deleted"):
             raise HTTPException(status_code=404, detail=f"Knowledge item not found: {item_id}")
@@ -602,10 +633,12 @@ async def delete_knowledge_item(
 @router.post("/retrieve")
 async def retrieve_knowledge(
     request: KnowledgeRetrieveRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Run an admin retrieval preview across all knowledge or a selected folder."""
     try:
+        _authorize_brand(current_user, request.brand_id, Permission.DOCUMENT_READ)
         chunks = await knowledge_service.retrieve(
             brand_id=request.brand_id,
             query=request.query,
@@ -615,6 +648,8 @@ async def retrieve_knowledge(
             score_threshold=request.score_threshold,
         )
         return {"success": True, "query": request.query, "chunks": chunks, "results": chunks, "count": len(chunks)}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to retrieve knowledge", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to retrieve knowledge: {str(e)}")
@@ -623,7 +658,8 @@ async def retrieve_knowledge(
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(
     job_id: str,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     Get the status of an upload job.
@@ -634,6 +670,10 @@ async def get_job_status(
     - error: error message if status is 'error'
     """
     try:
+        job = await knowledge_service.job_store.get(job_id)
+        if not job or not job.get("brand_id"):
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+        _authorize_brand(current_user, str(job["brand_id"]), Permission.DOCUMENT_READ)
         status_data = await knowledge_service.get_job_status(job_id)
         
         if not status_data:
@@ -654,7 +694,8 @@ async def list_documents(
     content_type: Optional[str] = None,
     limit: int = 50,
     skip: int = 0,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     List documents in knowledge base.
@@ -666,6 +707,7 @@ async def list_documents(
     - skip: Number of documents to skip (default: 0)
     """
     try:
+        _authorize_brand(current_user, brand_id, Permission.DOCUMENT_READ)
         documents = await knowledge_service.list_documents(
             brand_id=brand_id,
             content_type=content_type,
@@ -678,7 +720,8 @@ async def list_documents(
             "documents": documents,
             "count": len(documents)
         }
-        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to list documents", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
@@ -689,7 +732,8 @@ async def get_document_preview(
     doc_id: str,
     brand_id: str,
     limit: int = 8,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     Fetch source metadata and sample chunks/items for preview.
@@ -699,6 +743,7 @@ async def get_document_preview(
     - limit: Maximum number of sample chunks/items to return
     """
     try:
+        _authorize_brand(current_user, brand_id, Permission.DOCUMENT_READ)
         preview = await knowledge_service.get_document_preview(
             doc_id=doc_id,
             brand_id=brand_id,
@@ -723,7 +768,8 @@ async def get_document_preview(
 async def delete_document(
     doc_id: str,
     brand_id: str,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     Delete a document and all its chunks.
@@ -735,6 +781,7 @@ async def delete_document(
     - brand_id: Brand/agent ID for authorization
     """
     try:
+        _authorize_brand(current_user, brand_id, Permission.DOCUMENT_DELETE)
         deleted_count = await knowledge_service.delete_document(
             doc_id=doc_id,
             brand_id=brand_id
@@ -945,7 +992,8 @@ async def _hydrate_product_cards(kb_collection: Any, products: List[Dict[str, An
 @router.post("/products/by-skus")
 async def get_products_by_skus(
     request: ProductsBySkusRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     Fetch full product details by SKUs from the knowledge base.
@@ -962,6 +1010,9 @@ async def get_products_by_skus(
         
         if not agent:
             raise HTTPException(status_code=404, detail=f"Agent not found: {request.agent_id}")
+
+        ensure_permission(current_user, Permission.DOCUMENT_READ)
+        ensure_brand_access(current_user, agent.get("brand_id"))
         
         brand_slug = agent.get('brand_slug')
         if not brand_slug:

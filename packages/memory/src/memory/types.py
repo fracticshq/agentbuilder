@@ -142,7 +142,14 @@ class PIIField(BaseModel):
     """Encrypted PII field."""
     encrypted_value: str = Field(description="Base64-encoded encrypted value")
     iv: str = Field(description="Base64-encoded initialization vector")
+    salt: str = Field(description="Base64-encoded PBKDF2 salt")
     field_name: str = Field(description="Original field name")
+    key_id: str = Field(description="Identifier of the master key used for encryption")
+    key_version: int = Field(ge=1, description="Version of the master key used for encryption")
+    encryption_version: int = Field(ge=1, description="Version of the PII encryption envelope")
+    algorithm: str = Field(description="Authenticated encryption algorithm")
+    kdf: str = Field(description="Key derivation function")
+    kdf_iterations: int = Field(ge=1, description="PBKDF2 iteration count")
     encrypted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
     class Config:

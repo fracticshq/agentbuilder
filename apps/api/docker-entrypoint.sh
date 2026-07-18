@@ -24,6 +24,7 @@ if [ "${ENVIRONMENT:-development}" = "production" ]; then
   require_env PII_ENCRYPTION_KEY
   require_env MONGODB_URI
   require_env REDIS_URL
+  require_env MCP_SERVICE_AUTH_TOKEN
   require_env STRAPI_API_TOKEN
 
   case "${STRAPI_URL:-}" in

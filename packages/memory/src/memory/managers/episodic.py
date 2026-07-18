@@ -160,7 +160,10 @@ class EpisodicMemory:
         fact_doc = fact.dict()
         
         # Encrypt PII if needed
-        if fact.pii_encrypted and self.pii_vault and self.pii_vault.enabled:
+        if fact.pii_encrypted:
+            if not self.pii_vault or not self.pii_vault.enabled:
+                logger.error("PII fact rejected because encryption is unavailable", fact_id=fact.id)
+                return None
             try:
                 # Encrypt the fact value
                 pii_field = self.pii_vault.encrypt_field(fact.fact, "fact")
@@ -169,8 +172,7 @@ class EpisodicMemory:
                 logger.debug("Fact PII encrypted", fact_id=fact.id)
             except Exception as e:
                 logger.error("Failed to encrypt fact PII", error=str(e))
-                # Store unencrypted as fallback (log warning)
-                logger.warning("Storing fact without encryption")
+                return None
         
         # Insert into database
         try:

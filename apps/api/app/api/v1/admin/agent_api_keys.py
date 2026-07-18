@@ -5,8 +5,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.auth.dependencies import require_dashboard_access
-from app.auth.models import GLOBAL_ADMIN_ROLES, User
+from app.auth.dependencies import ensure_permission, require_dashboard_access
+from app.auth.models import GLOBAL_ADMIN_ROLES, Permission, User
 from app.connections import connection_manager
 from app.services.agent_api_keys import AgentApiKeyService, DEFAULT_AGENT_API_SCOPES
 
@@ -74,6 +74,7 @@ async def list_agent_api_keys(
     brand_id: str | None = Query(None),
     current_user: User | None = Depends(require_dashboard_access),
 ) -> dict[str, Any]:
+    ensure_permission(current_user, Permission.API_KEY_READ)
     if not _is_global_admin(current_user) and not agent_id and not brand_id:
         return {"keys": await AgentApiKeyService().list_keys(brand_ids=current_user.brands or [])}
 
@@ -92,6 +93,7 @@ async def create_agent_api_key(
     request: AgentApiKeyCreateRequest,
     current_user: User | None = Depends(require_dashboard_access),
 ) -> dict[str, Any]:
+    ensure_permission(current_user, Permission.API_KEY_WRITE)
     agent_id, brand_id = await _resolve_authorized_scope(
         current_user,
         agent_id=request.agent_id,
@@ -112,6 +114,7 @@ async def revoke_agent_api_key(
     key_id: str,
     current_user: User | None = Depends(require_dashboard_access),
 ) -> dict[str, Any]:
+    ensure_permission(current_user, Permission.API_KEY_DELETE)
     existing = await AgentApiKeyService().get_key(key_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Agent API key not found")

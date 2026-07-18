@@ -5,12 +5,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import re
 from typing import Any
+import structlog
 
 from tools.types import ToolResult
 
 from .artifact_registry import LAL_KITAB_TEMPLATE, normalize_agent_template
 from .context_connector_packs import built_in_geocode_endpoints, default_geocoding_config
 from .tool_registry import ContextConnectorTool
+
+
+logger = structlog.get_logger(__name__)
 
 
 LAL_KITAB_CHART_ENDPOINT = "lalkitab_chart"
@@ -22,6 +26,15 @@ LAL_KITAB_SECONDARY_ENDPOINTS = (
     "lalkitab_remedies",
     "lalkitab_totke",
     "lalkitab_varshphal",
+)
+
+# Public activity events must not disclose the user's full birth profile or a
+# provider's diagnostic response.  The detailed data remains in the runtime
+# context only, where it is needed to make a subsequent chart request.
+LAL_KITAB_CHART_UNAVAILABLE_MESSAGE = (
+    "I can’t safely give a Lal Kitab prediction or remedy until I can verify the "
+    "calculated chart. Please try again shortly; if needed, confirm your birth "
+    "date, time, and birthplace so I can recalculate it."
 )
 
 CITY_GEO_LOOKUP = {
@@ -259,6 +272,12 @@ class LalKitabPlanResult:
     # True when this turn can answer from previously calculated chart/API
     # context without calling Vedika again.
     used_cached_context: bool = False
+    # A chart is usable only after a successful, non-empty structured result
+    # has been checked.  This blocks synthesis from failed, absent, or malformed
+    # connector data.
+    chart_validated: bool = False
+    requires_safe_abstention: bool = False
+    abstention_reason: str | None = None
 
 
 def is_lalkitab_agent(config: dict[str, Any] | None) -> bool:
@@ -970,7 +989,16 @@ async def _call_geocode_endpoint(
     if not endpoint:
         return None
     tool = ContextConnectorTool(connector, endpoint)
-    return await tool.run(query=message, payload=payload)
+    try:
+        return await tool.run(query=message, payload=payload)
+    except Exception as exc:  # pragma: no cover - provider failures are environment-specific
+        logger.warning("lalkitab_geocode_call_failed", endpoint_id=endpoint_id, error=str(exc))
+        return ToolResult(
+            success=False,
+            data=None,
+            error="connector call failed",
+            metadata={"endpoint_id": endpoint_id},
+        )
 
 
 def format_place_disambiguation(birth_place: str, candidates: list[dict[str, Any]]) -> str:
@@ -1003,8 +1031,8 @@ async def resolve_birthplace_via_geocoding(
 
     events.append({
         "type": "geocode_start",
-        "content": f"Resolving birthplace \"{birth_place}\"…",
-        "metadata": {"birth_place": birth_place, "endpoint_id": search_id},
+        "content": "Resolving birthplace…",
+        "metadata": {"endpoint_id": search_id},
     })
     search_result = await _call_geocode_endpoint(
         connector, search_id, {"q": birth_place, "limit": max_candidates}, message
@@ -1012,8 +1040,8 @@ async def resolve_birthplace_via_geocoding(
     if not search_result or not search_result.success:
         events.append({
             "type": "geocode_result",
-            "content": f"Could not look up \"{birth_place}\".",
-            "metadata": {"success": False, "error": getattr(search_result, "error", None)},
+            "content": "I couldn’t verify that birthplace right now.",
+            "metadata": {"success": False},
         })
         return {"status": "failed", "events": events}
 
@@ -1025,7 +1053,7 @@ async def resolve_birthplace_via_geocoding(
     if not candidates:
         events.append({
             "type": "geocode_result",
-            "content": f"No place matched \"{birth_place}\".",
+            "content": "I couldn’t find a matching birthplace.",
             "metadata": {"success": True, "count": 0},
         })
         return {"status": "failed", "events": events}
@@ -1047,7 +1075,7 @@ async def resolve_birthplace_via_geocoding(
             top = narrowed[:max_candidates]
             events.append({
                 "type": "geocode_result",
-                "content": f"\"{birth_place}\" matches {len(top)} places — asking which one.",
+                "content": f"I found {len(top)} possible birthplaces and need your choice.",
                 "metadata": {"success": True, "ambiguous": True, "count": len(top)},
             })
             return {"status": "ambiguous", "candidates": top, "events": events}
@@ -1094,20 +1122,16 @@ async def _finalize_geocode_choice(
     if latitude is None or longitude is None or not timezone_offset:
         events.append({
             "type": "geocode_result",
-            "content": f"Resolved {candidate.get('label')} but could not derive a timezone.",
-            "metadata": {"success": False, "candidate": candidate},
+            "content": "I couldn’t verify the timezone for that birthplace.",
+            "metadata": {"success": False},
         })
         return {"status": "failed", "events": events}
 
     events.append({
         "type": "geocode_result",
-        "content": f"Birthplace resolved to {candidate.get('label')}.",
+        "content": "Birthplace resolved.",
         "metadata": {
             "success": True,
-            "label": candidate.get("label"),
-            "latitude": latitude,
-            "longitude": longitude,
-            "timezone": timezone_offset,
         },
     })
     return {
@@ -1134,6 +1158,32 @@ def _iana_to_offset(iana_zone: str) -> str | None:
     return static.get(iana_zone)
 
 
+def is_valid_lalkitab_context_payload(payload: Any) -> bool:
+    """Return whether a connector supplied usable structured Lal Kitab data.
+
+    The provider payload is intentionally treated as schema-flexible, but a
+    successful HTTP/tool invocation alone is not evidence: it must contain a
+    non-empty JSON object or list and must not carry an explicit failure shape.
+    This gives the runtime a stable boundary for malformed responses without
+    guessing at a provider-specific chart schema.
+    """
+    if isinstance(payload, list):
+        return bool(payload)
+    if not isinstance(payload, dict) or not payload:
+        return False
+
+    for key in ("error", "errors", "exception"):
+        if payload.get(key) not in (None, "", [], {}):
+            return False
+    status = str(payload.get("status") or "").strip().lower()
+    if status in {"error", "failed", "failure", "invalid", "unavailable"}:
+        return False
+    status_code = payload.get("status_code") or payload.get("statusCode")
+    if isinstance(status_code, int) and status_code >= 400:
+        return False
+    return True
+
+
 async def build_lalkitab_runtime_context(
     config: dict[str, Any] | None,
     message: str,
@@ -1149,7 +1199,7 @@ async def build_lalkitab_runtime_context(
         if isinstance(pending_state.get("api_context"), dict)
         else {}
     )
-    has_previous_chart = bool(previous_api_context.get("chart_context"))
+    has_previous_chart = is_valid_lalkitab_context_payload(previous_api_context.get("chart_context"))
     # A message that *is* birth details ("16 July 1987, 15:26, Delhi India")
     # counts as astrology intent even without any keyword — whether detected
     # deterministically or by the LLM understanding layer.
@@ -1174,7 +1224,14 @@ async def build_lalkitab_runtime_context(
 
     connector = find_lalkitab_connector(config)
     if not connector:
-        return LalKitabPlanResult(handled=False)
+        # A Lal Kitab request without a chart connector cannot safely fall
+        # through to the general synthesizer; there is no calculated evidence
+        # to ground a prediction or remedy.
+        return LalKitabPlanResult(
+            handled=True,
+            requires_safe_abstention=True,
+            abstention_reason="chart_connector_unavailable",
+        )
 
     input_resolution = connector.get("input_resolution") if isinstance(connector.get("input_resolution"), dict) else {}
     extracted, _ = extract_lalkitab_birth_input(
@@ -1282,13 +1339,9 @@ async def build_lalkitab_runtime_context(
             result.events.append(
                 {
                     "type": "geocode_result",
-                    "content": f"Birthplace resolved to {resolved_place['label']}.",
+                    "content": "Birthplace resolved.",
                     "metadata": {
                         "success": True,
-                        "label": resolved_place["label"],
-                        "latitude": resolved_place["latitude"],
-                        "longitude": resolved_place["longitude"],
-                        "timezone": resolved_place["timezone"],
                         "source": "known_place_cache",
                     },
                 }
@@ -1396,19 +1449,39 @@ async def build_lalkitab_runtime_context(
         api_context["secondary_endpoint_results"] = {}
         api_context["source_provenance"] = []
 
+    # Never reuse a truthy-but-malformed cached chart.  Secondary results depend
+    # on the chart, so they are not safe to reuse either in that situation.
+    if not is_valid_lalkitab_context_payload(api_context.get("chart_context")):
+        api_context["chart_context"] = None
+        api_context["secondary_endpoint_results"] = {}
+        api_context["source_provenance"] = []
+
     endpoints_to_call: list[str] = []
     existing_secondaries = api_context.get("secondary_endpoint_results") or {}
     for endpoint_id in selected_endpoint_ids:
-        if endpoint_id == LAL_KITAB_CHART_ENDPOINT and api_context.get("chart_context"):
+        if endpoint_id == LAL_KITAB_CHART_ENDPOINT and is_valid_lalkitab_context_payload(api_context.get("chart_context")):
             continue
         if endpoint_id != LAL_KITAB_CHART_ENDPOINT and endpoint_id in existing_secondaries:
-            continue
+            if is_valid_lalkitab_context_payload(existing_secondaries[endpoint_id]):
+                continue
+            # A cached secondary result without usable structured data is not
+            # evidence for a prediction/remedy; retry it rather than synthesize.
+            api_context["secondary_endpoint_results"].pop(endpoint_id, None)
         endpoints_to_call.append(endpoint_id)
 
     for endpoint_id in endpoints_to_call:
         endpoint = endpoints_by_id.get(endpoint_id)
         if not endpoint:
-            continue
+            result.events.append(
+                {
+                    "type": "connector_error",
+                    "content": "The required Lal Kitab calculation is unavailable right now.",
+                    "metadata": {"success": False, "endpoint_id": endpoint_id},
+                }
+            )
+            result.requires_safe_abstention = True
+            result.abstention_reason = "required_endpoint_unavailable"
+            break
         tool = ContextConnectorTool(connector, endpoint)
         endpoint_name = endpoint.get("name") or endpoint_id
         connector_name = connector.get("name") or connector.get("id") or "Lal Kitab Connector"
@@ -1421,37 +1494,49 @@ async def build_lalkitab_runtime_context(
                     "connector_name": connector_name,
                     "endpoint_id": endpoint_id,
                     "endpoint_name": endpoint_name,
-                    "normalized_birth_input": normalized_birth_input,
                 },
             }
         )
-        tool_result = await tool.run(query=message, payload=normalized_birth_input)
+        try:
+            tool_result = await tool.run(query=message, payload=normalized_birth_input)
+        except Exception as exc:  # pragma: no cover - provider failures are environment-specific
+            logger.warning("lalkitab_connector_call_failed", endpoint_id=endpoint_id, error=str(exc))
+            tool_result = ToolResult(
+                success=False,
+                data=None,
+                error="connector call failed",
+                metadata={"endpoint_id": endpoint_id, "endpoint_name": endpoint_name},
+            )
         result.tool_results[tool.name] = tool_result
         metadata = tool_result.metadata or {}
-        event_type = "connector_result" if tool_result.success else "connector_error"
+        payload_valid = tool_result.success and is_valid_lalkitab_context_payload(tool_result.data)
+        event_type = "connector_result" if payload_valid else "connector_error"
         result.events.append(
             {
                 "type": event_type,
                 "content": (
                     f"{endpoint_name} returned calculated context."
-                    if tool_result.success
-                    else f"{endpoint_name} failed: {tool_result.error or 'unknown connector error'}"
+                    if payload_valid
+                    else f"{endpoint_name} could not provide verified context."
                 ),
                 "metadata": {
-                    "success": tool_result.success,
+                    "success": payload_valid,
                     "connector_id": metadata.get("connector_id") or connector.get("id"),
                     "connector_name": metadata.get("connector_name") or connector_name,
                     "endpoint_id": metadata.get("endpoint_id") or endpoint_id,
                     "endpoint_name": metadata.get("endpoint_name") or endpoint_name,
-                    "request_shape": metadata.get("request_shape"),
-                    "response_summary": metadata.get("response_summary"),
                     "latency_ms": metadata.get("latency_ms"),
-                    "error": tool_result.error,
                 },
             }
         )
-        if not tool_result.success:
-            continue
+        if not payload_valid:
+            result.requires_safe_abstention = True
+            result.abstention_reason = (
+                "chart_context_unavailable"
+                if endpoint_id == LAL_KITAB_CHART_ENDPOINT
+                else "required_context_unavailable"
+            )
+            break
         if endpoint_id == LAL_KITAB_CHART_ENDPOINT:
             api_context["chart_context"] = tool_result.data
         else:
@@ -1464,19 +1549,32 @@ async def build_lalkitab_runtime_context(
             }
         )
 
+    result.chart_validated = is_valid_lalkitab_context_payload(api_context.get("chart_context"))
+    if not result.chart_validated:
+        result.requires_safe_abstention = True
+        result.abstention_reason = result.abstention_reason or "chart_context_unavailable"
+        api_context["chart_context"] = None
+        api_context["secondary_endpoint_results"] = {}
+        api_context["source_provenance"] = []
+        result.pending_state = {"normalized_birth_input": normalized_birth_input}
+
     result.api_context = api_context
-    result.used_cached_context = bool(previous_api_context and not endpoints_to_call)
+    result.used_cached_context = bool(
+        previous_api_context and not endpoints_to_call and result.chart_validated
+    )
     if endpoints_to_call:
         result.events.append(
             {
                 "type": "api_context",
-                "content": "Calculated Lal Kitab API context is ready.",
+                "content": (
+                    "Calculated Lal Kitab API context is ready."
+                    if result.chart_validated and not result.requires_safe_abstention
+                    else "Verified Lal Kitab context is unavailable for this request."
+                ),
                 "metadata": {
-                    "normalized_birth_input": normalized_birth_input,
                     "selected_endpoint_ids": selected_endpoint_ids,
-                    "chart_available": bool(api_context.get("chart_context")),
+                    "chart_available": result.chart_validated,
                     "secondary_endpoint_ids": sorted((api_context.get("secondary_endpoint_results") or {}).keys()),
-                    "source_provenance": api_context.get("source_provenance") or [],
                 },
             }
         )

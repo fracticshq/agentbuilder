@@ -69,7 +69,9 @@ Core services:
 | Qdrant | Compose service | http://localhost:6333 | Local/self-hosted vector search |
 | Redis | Compose service | internal | Rate limits, jobs, pub/sub, session state |
 
-Each app has its own Docker build context so API, admin, widget, and Shopify MCP can be built and deployed independently.
+The API image is built from the repository root so it installs the same canonical
+`packages/` source used in development and CI. The admin, widget, and Shopify
+MCP services retain independent build contexts.
 
 ---
 
@@ -96,7 +98,9 @@ agentbuilder/
 └── README.md            # This file
 ```
 
-`apps/api/packages/` intentionally contains vendored copies of shared packages for the API container's isolated Docker build context.
+`packages/` is the single source of truth for shared Python packages. The legacy
+`apps/api/packages/` copies are excluded from image builds and must not be used
+for runtime changes.
 
 ---
 
@@ -116,6 +120,7 @@ SECRET_KEY=<openssl rand -hex 32>
 PII_ENCRYPTION_KEY=<openssl rand -hex 32>
 ADMIN_API_KEY=<openssl rand -hex 32>
 SESSION_SECRET=<openssl rand -hex 32>
+MCP_SERVICE_AUTH_TOKEN=<openssl rand -hex 32>
 MONGODB_URI=mongodb://mongodb:27017
 REDIS_URL=redis://redis:6379
 VECTOR_BACKEND=qdrant

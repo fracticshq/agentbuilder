@@ -3,8 +3,10 @@ services:
   # ── FastAPI Backend ──────────────────────────────────────────────────────────
   api:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      # Build from the repository root so the image installs the same canonical
+      # local packages that development and CI test.
+      context: .
+      dockerfile: apps/api/Dockerfile
     image: agentbuilder-api
     container_name: agentbuilder-api
     ports:
@@ -93,11 +95,16 @@ services:
     container_name: agentbuilder-shopify
     ports:
       - "3005:3005"
+    # Reuse the API's secret source so the internal MCP token is identical on
+    # both sides of the boundary. Do not use compose interpolation with a
+    # fallback here: env_file values are not available to interpolation and a
+    # blank token must make the service fail closed.
+    env_file:
+      - .env.docker
     environment:
       NODE_ENV: production
       PORT: "3005"
       REDIS_URL: "redis://redis:6379"
-      SESSION_SECRET: "${SHOPIFY_SESSION_SECRET:-local-shopify-session-secret-change-me}"
       CORS_ALLOW_ORIGINS: "${SHOPIFY_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://localhost:8000}"
     depends_on:
       redis:

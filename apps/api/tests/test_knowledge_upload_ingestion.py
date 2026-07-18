@@ -226,6 +226,7 @@ async def test_upload_endpoint_accepts_supported_extension_when_mime_is_generic(
         product_data=None,
         dealer_data=None,
         knowledge_service=service,
+        current_user=None,
     )
 
     assert response.job_id == "job-123"
@@ -249,6 +250,7 @@ async def test_upload_endpoint_rejects_unknown_source_type():
             product_data=None,
             dealer_data=None,
             knowledge_service=service,
+            current_user=None,
         )
 
     assert exc_info.value.status_code == 400

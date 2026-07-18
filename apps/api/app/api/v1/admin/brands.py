@@ -6,7 +6,14 @@ from datetime import datetime
 import structlog
 
 from app.connections import connection_manager, get_system_db
-from app.auth.dependencies import require_dashboard_access
+from app.auth.dependencies import (
+    ensure_brand_access,
+    ensure_permission,
+    is_global_admin,
+    require_dashboard_access,
+    require_system_admin,
+)
+from app.auth.models import Permission, User
 
 logger = structlog.get_logger()
 router = APIRouter(dependencies=[Depends(require_dashboard_access)])
@@ -54,20 +61,26 @@ def get_brands_collection():
     return connection_manager.system_db.brands
 
 @router.get("/", response_model=List[Brand])
-async def list_brands():
+async def list_brands(current_user: User | None = Depends(require_dashboard_access)):
     """Get all brands."""
     try:
         collection = get_brands_collection()
-        brands = await collection.find().to_list(length=None)
+        ensure_permission(current_user, Permission.BRAND_READ)
+        query = {} if is_global_admin(current_user) else {"id": {"$in": current_user.brands or []}}
+        brands = await collection.find(query).to_list(length=None)
         return [Brand(**{**brand, "_id": str(brand["_id"])}) for brand in brands]
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to list brands", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to list brands: {str(e)}")
 
 @router.get("/{brand_id}", response_model=Brand)
-async def get_brand(brand_id: str):
+async def get_brand(brand_id: str, current_user: User | None = Depends(require_dashboard_access)):
     """Get a specific brand by ID."""
     try:
+        ensure_permission(current_user, Permission.BRAND_READ)
+        ensure_brand_access(current_user, brand_id)
         collection = get_brands_collection()
         brand = await collection.find_one({"id": brand_id})
         if not brand:
@@ -80,7 +93,7 @@ async def get_brand(brand_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to get brand: {str(e)}")
 
 @router.post("/", response_model=Brand)
-async def create_brand(brand: BrandCreate):
+async def create_brand(brand: BrandCreate, current_user: User | None = Depends(require_system_admin)):
     """Create a new brand."""
     try:
         collection = get_brands_collection()
@@ -117,9 +130,15 @@ async def create_brand(brand: BrandCreate):
         raise HTTPException(status_code=500, detail=f"Failed to create brand: {str(e)}")
 
 @router.put("/{brand_id}", response_model=Brand)
-async def update_brand(brand_id: str, brand_update: BrandUpdate):
+async def update_brand(
+    brand_id: str,
+    brand_update: BrandUpdate,
+    current_user: User | None = Depends(require_dashboard_access),
+):
     """Update an existing brand."""
     try:
+        ensure_permission(current_user, Permission.BRAND_WRITE)
+        ensure_brand_access(current_user, brand_id)
         collection = get_brands_collection()
         
         # Check if brand exists
@@ -153,7 +172,7 @@ async def update_brand(brand_id: str, brand_update: BrandUpdate):
         raise HTTPException(status_code=500, detail=f"Failed to update brand: {str(e)}")
 
 @router.delete("/{brand_id}")
-async def delete_brand(brand_id: str):
+async def delete_brand(brand_id: str, current_user: User | None = Depends(require_system_admin)):
     """Delete a brand."""
     try:
         collection = get_brands_collection()

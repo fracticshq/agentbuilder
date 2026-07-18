@@ -131,9 +131,12 @@ class ShortTermMemory:
         Returns:
             List of Message objects
         """
+        # Fetch the newest messages first, then restore chronological order.
+        # Sorting ascending before applying the limit silently returns the
+        # oldest context and causes the agent to forget recent turns.
         cursor = self.collection.find(
             {"conversation_id": conversation_id}
-        ).sort("timestamp", 1).limit(limit)
+        ).sort("timestamp", -1).limit(limit)
         
         messages = []
         async for doc in cursor:
@@ -144,6 +147,8 @@ class ShortTermMemory:
             except Exception as e:
                 logger.warning("Failed to parse message", error=str(e))
         
+        messages.reverse()
+
         logger.debug("Retrieved recent messages",
                     conversation_id=conversation_id,
                     count=len(messages))
