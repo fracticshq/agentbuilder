@@ -44,3 +44,6 @@ Before promotion, confirm:
 3. `python scripts/generate_postman_collection.py --check` passes.
 4. Any consumer-impacting API change is called out in the release notes and
    exercised with the generated Postman collection.
+
+For digest-pinned deployment, signed release evidence, smoke gates, alerting,
+and recovery drills, see the [GA release and operations contract](../operations/GA_RELEASE_OPERATIONS.md).

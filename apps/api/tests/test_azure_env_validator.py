@@ -37,6 +37,7 @@ def valid_env():
         "VECTOR_INDEX_NAME": "vector_index",
         "VECTOR_DIMENSIONS": "1024",
         "STRAPI_API_TOKEN": "t" * 32,
+        "MCP_SERVICE_AUTH_TOKEN": "c" * 32,
         "SESSION_SECRET": "q" * 32,
         "DATABASE_HOST": "pg.postgres.database.azure.com",
         "DATABASE_NAME": "agentbuilder_strapi",
@@ -109,3 +110,14 @@ def test_validator_can_allow_missing_local_secrets_when_azure_secret_refs_exist(
         for result in results
     )
     assert all(result.status not in {"missing", "invalid"} for result in results)
+
+
+def test_validator_requires_shared_mcp_service_token_for_api_and_shopify():
+    env = valid_env()
+    env["MCP_SERVICE_AUTH_TOKEN"] = ""
+
+    results = validator.build_results("all", env)
+    failures = {(result.service, result.key, result.status) for result in results}
+
+    assert ("api", "MCP_SERVICE_AUTH_TOKEN", "missing") in failures
+    assert ("shopify", "MCP_SERVICE_AUTH_TOKEN", "missing") in failures

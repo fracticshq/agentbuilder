@@ -1,0 +1,131 @@
+name: Protected release deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub protected environment to deploy
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      service:
+        description: Deploy one Agent Builder service (Strapi is released separately)
+        required: true
+        type: choice
+        options:
+          - api
+          - admin
+          - widget
+          - shopify
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: agentbuilder-release-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.service }} to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      ACR_NAME: ${{ vars.AZURE_ACR_NAME }}
+      ACA_ENV: ${{ vars.AZURE_CONTAINERAPPS_ENV }}
+      CONFIG_VERSION: ${{ github.sha }}
+      ENVIRONMENT: production
+      RELEASE_ENVIRONMENT: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Authenticate to Azure with GitHub OIDC
+        run: bash scripts/github_oidc_azure_login.sh
+
+      - name: Create release SBOM and verify immutable inputs
+        run: |
+          python scripts/generate_sbom.py --output "$RUNNER_TEMP/agentbuilder.sbom.cdx.json"
+          python scripts/verify_supply_chain.py --sbom "$RUNNER_TEMP/agentbuilder.sbom.cdx.json"
+
+      - name: Deploy digest-pinned release and run smoke gate
+        env:
+          RELEASE_CI_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          bash scripts/deploy_to_azure.local.sh \
+            --service "${{ inputs.service }}" \
+            --tag "$GITHUB_SHA" \
+            --no-create \
+            --use-existing-secrets \
+            --release-evidence "$RUNNER_TEMP/release-evidence.json" \
+            --sbom "$RUNNER_TEMP/agentbuilder.sbom.cdx.json" \
+            --ci-run-url "$RELEASE_CI_URL" \
+            --approver "$GITHUB_ACTOR"
+
+      - name: Run bounded API readiness capacity probe
+        env:
+          API_APP: ${{ vars.AZURE_API_APP }}
+        run: |
+          api_app="${API_APP:-agentbuilder-api}"
+          api_fqdn="$(az containerapp show --name "$api_app" --resource-group "$RESOURCE_GROUP" --query properties.configuration.ingress.fqdn -o tsv)"
+          test -n "$api_fqdn"
+          python scripts/load_probe.py \
+            --url "https://$api_fqdn/ready" \
+            --requests 100 \
+            --concurrency 10 \
+            --max-p95-ms 3000 \
+            --max-error-rate 0.01 \
+            --report "$RUNNER_TEMP/release-evidence.capacity.json"
+          python scripts/release_evidence.py annotate \
+            --evidence "$RUNNER_TEMP/release-evidence.json" \
+            --capacity-report "$RUNNER_TEMP/release-evidence.capacity.json"
+
+      - name: Sign and attest release evidence with GitHub OIDC
+        env:
+          COSIGN_YES: "true"
+          EVIDENCE: ${{ runner.temp }}/release-evidence.json
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/.*
+          ISSUER: https://token.actions.githubusercontent.com
+          ATTESTATION_TYPE: https://agentbuilder.fractics.com/release-evidence/v1
+        run: |
+          command -v cosign >/dev/null || { echo "cosign must be present on the protected runner" >&2; exit 1; }
+          az acr login --name "$ACR_NAME"
+          python - "$EVIDENCE" <<'PY' > "$RUNNER_TEMP/release-images.tsv"
+          import json
+          import sys
+          for name, image in sorted(json.load(open(sys.argv[1], encoding="utf-8"))["images"].items()):
+              print(f"{name}\t{image['reference']}")
+          PY
+          while IFS=$'\t' read -r name image; do
+            cosign sign --yes "$image"
+            cosign attest --yes --type "$ATTESTATION_TYPE" --predicate "$EVIDENCE" "$image"
+            cosign verify --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$image" >/dev/null
+            cosign verify-attestation --type "$ATTESTATION_TYPE" --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$image" >/dev/null
+            python scripts/release_evidence.py annotate --evidence "$EVIDENCE" \
+              --attestation "$name=signature=cosign://$image" \
+              --attestation "$name=provenance=cosign://$image"
+          done < "$RUNNER_TEMP/release-images.tsv"
+          python scripts/release_evidence.py validate \
+            --evidence "$EVIDENCE" \
+            --expected-commit "$GITHUB_SHA" \
+            --require-attestations \
+            --require-smoke \
+            --require-capacity
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agentbuilder-release-evidence-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/agentbuilder.sbom.cdx.json
+            ${{ runner.temp }}/release-evidence.json
+            ${{ runner.temp }}/release-evidence.smoke.json
+            ${{ runner.temp }}/release-evidence.capacity.json
+          if-no-files-found: error
+          retention-days: 365

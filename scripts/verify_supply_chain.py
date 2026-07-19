@@ -23,10 +23,13 @@ def main() -> int:
     if not args.sbom.is_file() or args.sbom.stat().st_size == 0:
         errors.append("CycloneDX SBOM was not generated")
 
-    workflow = root / ".github/workflows/ci.yml"
-    for line in workflow.read_text(encoding="utf-8").splitlines():
-        if "uses:" in line and not ACTION_REF.match(line):
-            errors.append(f"Unpinned GitHub Action: {line.strip()}")
+    workflows = sorted((root / ".github" / "workflows").glob("*.y*ml"))
+    if not workflows:
+        errors.append("No GitHub Actions workflows found")
+    for workflow in workflows:
+        for line in workflow.read_text(encoding="utf-8").splitlines():
+            if "uses:" in line and not ACTION_REF.match(line):
+                errors.append(f"Unpinned GitHub Action in {workflow.relative_to(root)}: {line.strip()}")
 
     for dockerfile in sorted(root.glob("apps/*/Dockerfile")):
         for line in dockerfile.read_text(encoding="utf-8").splitlines():

@@ -10,7 +10,7 @@ not upload findings to a scanning service or use a scanner token.
 | --- | --- | --- |
 | Dependency vulnerabilities | Trivy filesystem vulnerability scanner, commit-pinned to the reviewed `v0.28.0` Action revision. It scans the API's fully resolved `apps/api/requirements.lock`, the six root `packages/*/pyproject.toml` manifests installed by the API image, and each deployed JavaScript application's lockfile: `apps/admin/package-lock.json`, `apps/widget/package-lock.json`, and `apps/shopify-mcp/package-lock.json`. | Any library vulnerability with severity `HIGH` or `CRITICAL`, or a scanner execution failure. Unfixed findings are included. |
 | SAST | The digest-pinned `semgrep/semgrep:1.91.0` container runs the public `p/default` ruleset only against canonical deployable code: `apps/api/app`, root `packages`, and each deployed JavaScript application's `src` directory. It also scans the four deployment Dockerfiles and `docker-compose.yml`. Test and spec files are excluded because they are not shipped runtime code. | Any SAST finding or scanner/rule-loading failure. `--disable-nosem` prevents inline `nosemgrep` comments from suppressing a finding. |
-| SBOM and immutable inputs | `scripts/generate_sbom.py` creates a deterministic CycloneDX 1.5 inventory for every deployed Python/Node manifest. `scripts/verify_supply_chain.py` requires that output and verifies full-SHA GitHub Action refs plus digest-pinned runtime Docker bases. | Missing/unreadable SBOM, any unpinned action, or any unpinned runtime base image. |
+| SBOM and immutable inputs | `scripts/generate_sbom.py` creates a deterministic CycloneDX 1.5 inventory for every deployed Python/Node manifest. `scripts/verify_supply_chain.py` requires that output and verifies full-SHA GitHub Action refs across **all** repository workflows plus digest-pinned runtime Docker bases. | Missing/unreadable SBOM, any unpinned action, or any unpinned runtime base image. |
 | Canonical source and API contract | `scripts/verify_canonical_packages.py` rejects an API-local copy of shared Python packages. The API job then verifies the committed OpenAPI 3.1 snapshot and Postman collection regenerate identically from FastAPI. | Missing canonical package, duplicate API-local source, or stale generated API artefact. |
 
 Neither job uses `continue-on-error`, `--ignore-unfixed`, a baseline, nor an
@@ -87,8 +87,8 @@ concern.
 
 ## Pinned build inputs
 
-All GitHub Actions in CI are pinned to full commit SHAs, and every runtime
-Docker base image used by the four services and Compose dependencies is pinned
+All GitHub Actions in CI and the protected release workflow are pinned to full
+commit SHAs, and every runtime Docker base image used by the four services and Compose dependencies is pinned
 to a digest. The human-readable tag is retained before the digest for upgrade
 maintenance. Dependabot covers both service Dockerfile directories and the
 repository-root Compose images, and remains responsible for proposing Docker updates;
@@ -103,3 +103,8 @@ release operator must retain that artifact with the release record, alongside
 the source commit, built image digest(s), CI run URL, approver, and deployment
 timestamp. A green CI result proves the evidence was generated and validated;
 it does not itself publish an image or sign an attestation.
+
+The protected release workflow performs that separate promotion step: it
+deploys only resolved `@sha256:` images, runs a dependency-aware smoke gate,
+and signs release evidence with GitHub OIDC. See the [GA release and operations
+contract](operations/GA_RELEASE_OPERATIONS.md).

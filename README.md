@@ -319,6 +319,7 @@ Current docs:
 - [Generated OpenAPI 3.1 Contract](./docs/api/openapi.json)
 - [Generated Postman Collection](./docs/api/Agent_Builder_Platform.postman_collection.json)
 - [Canonical Source and API Contract](./docs/api/P6_CANONICAL_SOURCE_AND_API_CONTRACT.md)
+- [GA Release and Operations Contract](./docs/operations/GA_RELEASE_OPERATIONS.md)
 - [Agent/Coding Contracts](./AGENTS.md)
 
 ---

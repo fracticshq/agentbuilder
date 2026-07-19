@@ -28,6 +28,8 @@ SECRET_KEYS = {
     "ADMIN_API_KEY",
     "SETTINGS_ENCRYPTION_KEY",
     "PII_ENCRYPTION_KEY",
+    "MCP_SERVICE_AUTH_TOKEN",
+    "QDRANT_API_KEY",
     "MONGODB_URI",
     "REDIS_URL",
     "VOYAGE_API_KEY",
@@ -77,12 +79,14 @@ SERVICE_REQUIRED = {
         "VECTOR_INDEX_NAME",
         "VECTOR_DIMENSIONS",
         "STRAPI_API_TOKEN",
+        "MCP_SERVICE_AUTH_TOKEN",
     ],
     "admin": [],
     "widget": [],
     "shopify": [
         "SESSION_SECRET",
         "REDIS_URL",
+        "MCP_SERVICE_AUTH_TOKEN",
     ],
     "strapi": [
         "DATABASE_HOST",
