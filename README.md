@@ -8,7 +8,7 @@
 
 <h1 align="center">NOVA - Agent Builder Platform</h1>
 
-NOVA is Fractics' context-aware conversational agent platform for building, deploying, and operating grounded AI agents across web, commerce, and support workflows.
+NOVA is Fractics' secure, multi-tenant platform for building, deploying, and operating grounded AI agents across web, Hybrid RAG, commerce, Shopify, and support workflows.
 
 The repository name remains `agentbuilder` for engineering purposes, but the product name is **NOVA - Agent Builder Platform**.
 
@@ -22,7 +22,24 @@ The repository name remains `agentbuilder` for engineering purposes, but the pro
 
 ## About
 
-NOVA is a context-aware conversational agent platform by Fractics. It helps teams build grounded AI assistants with hybrid search, structured knowledge bases, memory, product catalogs, embeddable web chat, human takeover, and responsible AI observability.
+NOVA is a context-aware conversational agent platform by Fractics. It helps teams build grounded AI assistants with hybrid search, evidence-aware answers, structured knowledge bases, memory, product catalogs, embeddable web chat, human takeover, and responsible AI observability.
+
+## Current Platform Capabilities
+
+| Area | Current capability |
+|---|---|
+| Hybrid RAG | Brand-scoped MongoDB Atlas or Qdrant retrieval, BM25, RRF fusion, reranking, evidence/citation contracts, and explicit no-evidence behavior. |
+| Commerce and Shopify | A canonical catalog contract, product/inventory visibility rules, Admin GraphQL catalogue sync, durable webhook processing, reconciliation, and Shopify MCP actions. |
+| Vertical agents | Controlled capability boundaries for generic, ecommerce, Shopify, and Lal Kitab agents; Lal Kitab connectors abstain deterministically when validated chart/source data is unavailable. |
+| Multi-tenancy | Tenant and brand authorization at API, retrieval, widget-session, WebSocket, and job boundaries. |
+| Knowledge lifecycle | Encrypted durable ingestion with leases, retries, idempotency, cancellation, deletion, re-indexing, upload limits, and archive-bomb controls. |
+| Operations | Rate-limit and takeover failure safety, non-root service images, security CI gates, SBOM/provenance controls, release documentation, and protected evaluation contracts. |
+
+## Production Deployment Posture
+
+NOVA's P0–P6 application controls are implemented in this repository. A broad external multi-tenant launch still requires the deployment owner to complete the environment-specific proof in the operations documentation: private Qdrant network placement, cloud workload identity and secret mounting, malware-scanner operation, real deployment smoke tests and recovery drills, the remote Strapi privacy-deletion contract, and staged human or pinned-model quality review.
+
+See the [GA Release and Operations Contract](./docs/operations/GA_RELEASE_OPERATIONS.md) and [Privacy Lifecycle](./docs/api/PRIVACY_LIFECYCLE.md) before deploying outside a controlled environment.
 
 ---
 
@@ -32,11 +49,14 @@ NOVA helps teams create reliable AI agents with:
 
 - **Multi-agent architecture** for brand-specific and task-specific agents
 - **Hybrid retrieval** using MongoDB Atlas Vector Search or local Qdrant, BM25, RRF fusion, and reranking
+- **Evidence-aware responses** with versioned citations and explicit retrieval-degradation/no-evidence semantics
 - **Session continuity and memory** across conversations
 - **Structured knowledge bases** for products, dealers, FAQs, guides, and documents
+- **Durable ingestion lifecycle** with encryption, idempotency, leases/retries, cancellation, deletion, and re-index support
 - **Embeddable web widget** for deploying agents on external websites
-- **Shopify MCP bridge** for commerce workflows
-- **Human takeover** for live conversations
+- **Shopify Admin GraphQL and MCP bridge** for catalog lifecycle and live commerce workflows
+- **Tenant-bound human takeover** for live conversations with signed widget and authenticated admin sessions
+- **Lal Kitab safety controls** with validated-source requirements and deterministic abstention
 - **Responsible AI observability** for rate limits, guardrails, fallbacks, hallucination signals, Strapi sync health, and latency
 - **Secure data handling** with JWT auth, admin API protection, rate limiting, PII handling, and production CORS controls
 
@@ -65,7 +85,10 @@ Core services:
 | Admin | `apps/admin` | http://localhost:3000 | NOVA dashboard for brands, agents, settings, KB, observability |
 | Widget | `apps/widget` | http://localhost:5174 | Embeddable chat widget |
 | Shopify MCP | `apps/shopify-mcp` | http://localhost:3005 | Shopify OAuth and MCP bridge |
+| Ingestion worker | `apps/api` image | internal | Mongo-leased encrypted knowledge ingestion, retry, cancellation, deletion, and re-index jobs |
 | Catalog sync worker | `apps/api/app/workers/catalog_sync_worker.py` | internal | Mongo-leased Shopify full sync, delete, and uninstall lifecycle work |
+| Privacy retention worker | `apps/api` image | internal | Enforces first-party retention policies across brand data |
+| Strapi privacy worker | `apps/api` image | internal | Processes the separately deployed, signed Strapi privacy-deletion contract when enabled |
 | MongoDB | Compose service | internal | Agent data, knowledge, memory, source of truth |
 | Qdrant | Compose-only internal service | not host-published | Local/self-hosted vector search; requires an API key |
 | Redis | Compose service | internal | Rate limits, jobs, pub/sub, session state |
@@ -115,22 +138,30 @@ Create `.env.docker` in the repository root.
 Minimum local values:
 
 ```env
+# Configure one supported inference provider (OpenAI or Azure OpenAI).
 OPENAI_API_KEY=sk-...
 VOYAGE_API_KEY=pa-...
 VOYAGE_BASE_URL=https://api.voyageai.com/v1
 SECRET_KEY=<openssl rand -hex 32>
 PII_ENCRYPTION_KEY=<openssl rand -hex 32>
+SETTINGS_ENCRYPTION_KEY=<openssl rand -hex 32>
 ADMIN_API_KEY=<openssl rand -hex 32>
 SESSION_SECRET=<openssl rand -hex 32>
 MCP_SERVICE_AUTH_TOKEN=<openssl rand -hex 32>
+STRAPI_PRIVACY_SUBJECT_HMAC_KEY=<openssl rand -hex 32>
 MONGODB_URI=mongodb://mongodb:27017
 REDIS_URL=redis://redis:6379
 VECTOR_BACKEND=qdrant
 QDRANT_URL=http://qdrant:6333
 QDRANT_API_KEY=<openssl rand -hex 32>
 CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost:5174
-ENVIRONMENT=production
+# Local Compose only. Production requires the environment-specific controls
+# described in docs/operations/GA_RELEASE_OPERATIONS.md.
+ENVIRONMENT=development
 DEBUG=false
+USE_AZURE_KEYVAULT=false
+MALWARE_SCAN_MODE=disabled
+STRAPI_PRIVACY_MODE=contract_pending
 ALLOW_ADMIN_KEY_BYPASS=false
 ```
 
@@ -150,8 +181,7 @@ FIRECRAWL_API_KEY=...
 ### 2. Build And Run
 
 ```bash
-docker compose build
-docker compose up -d
+docker compose --env-file .env.docker up -d --build
 ```
 
 ### 3. Verify
@@ -169,6 +199,8 @@ Open:
 - Widget: http://localhost:5174
 - API docs: http://localhost:8000/docs
 - Shopify MCP service info: http://localhost:3005
+
+`--env-file .env.docker` is required because Compose uses the Qdrant API key during service interpolation. The file is local-only and must never be committed. See [.env.docker.example](./.env.docker.example) for the complete supported configuration.
 
 ---
 
@@ -281,7 +313,7 @@ npm test
 Full container build:
 
 ```bash
-docker compose build api admin widget shopify catalog-sync-worker
+docker compose --env-file .env.docker build api admin widget shopify catalog-sync-worker
 ```
 
 ---
