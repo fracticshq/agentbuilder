@@ -27,6 +27,8 @@ KEY_PREFIX = "job:"
 JOBS_COLLECTION = "ingestion_jobs"
 DURABLE_JOB_VERSION = 2
 DURABLE_JOB_KIND = "document_ingestion"
+DURABLE_REINDEX_KIND = "knowledge_reindex"
+DURABLE_JOB_KINDS = (DURABLE_JOB_KIND, DURABLE_REINDEX_KIND)
 TERMINAL_STATUSES = {"completed", "error", "cancelled"}
 CLAIMABLE_STATUSES = {"queued", "running", "publishing"}
 _JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -251,7 +253,13 @@ class JobStore:
         if not await self._cache_set(job_id, fallback_document):
             self._fallback[job_id] = fallback_document
 
-    async def create_durable_job(self, job_id: str, data: Dict[str, Any]) -> None:
+    async def create_durable_job(
+        self,
+        job_id: str,
+        data: Dict[str, Any],
+        *,
+        kind: str = DURABLE_JOB_KIND,
+    ) -> None:
         """Insert a v2 job after its encrypted payloads have been stored.
 
         This intentionally requires MongoDB. A process-local/Redis fallback is
@@ -259,6 +267,8 @@ class JobStore:
         a separate worker must recover after a restart.
         """
         job_id = self._validate_job_id(job_id)
+        if kind not in DURABLE_JOB_KINDS:
+            raise ValueError("Unsupported durable job kind")
         collection = self._get_collection()
         if collection is None:
             raise JobStoreUnavailableError("Durable job storage is unavailable")
@@ -271,7 +281,7 @@ class JobStore:
             "_id": job_id,
             "job_id": job_id,
             "queue_version": DURABLE_JOB_VERSION,
-            "kind": DURABLE_JOB_KIND,
+            "kind": kind,
             "status": "queued",
             "phase": "staging",
             "processed_count": 0,
@@ -301,6 +311,7 @@ class JobStore:
         agent_id: str | None,
         brand_id: str,
         idempotency_key: str,
+        kind: str | None = None,
     ) -> Optional[Dict[str, Any]]:
         """Find a v2 job by its tenant-scoped idempotency key in Mongo."""
         collection = self._get_collection()
@@ -310,7 +321,7 @@ class JobStore:
             document = await collection.find_one(
                 {
                     "queue_version": DURABLE_JOB_VERSION,
-                    "kind": DURABLE_JOB_KIND,
+                    "kind": kind if kind in DURABLE_JOB_KINDS else {"$in": list(DURABLE_JOB_KINDS)},
                     "agent_id": agent_id,
                     "brand_id": brand_id,
                     "idempotency_key": idempotency_key,
@@ -396,7 +407,7 @@ class JobStore:
         lease_expires_at = now + timedelta(seconds=max(5, int(lease_seconds)))
         claim_filter = {
             "queue_version": DURABLE_JOB_VERSION,
-            "kind": DURABLE_JOB_KIND,
+            "kind": {"$in": list(DURABLE_JOB_KINDS)},
             "$or": [
                 {"status": "queued", "next_attempt_at": {"$lte": now}},
                 {"status": {"$in": ["running", "publishing"]}, "lease_expires_at": {"$lte": now}},
@@ -500,7 +511,7 @@ class JobStore:
                 {
                     "_id": job_id,
                     "queue_version": DURABLE_JOB_VERSION,
-                    "kind": DURABLE_JOB_KIND,
+                    "kind": {"$in": list(DURABLE_JOB_KINDS)},
                     "lease_token": lease_token,
                     "status": {"$in": ["running", "publishing"]},
                 },
@@ -572,7 +583,7 @@ class JobStore:
                 {
                     "_id": job_id,
                     "queue_version": DURABLE_JOB_VERSION,
-                    "kind": DURABLE_JOB_KIND,
+                    "kind": {"$in": list(DURABLE_JOB_KINDS)},
                     "status": {"$in": ["queued", "running"]},
                     "publish_started_at": {"$exists": False},
                 },
@@ -630,7 +641,7 @@ class JobStore:
         query: Dict[str, Any] = {
             "_id": job_id,
             "queue_version": DURABLE_JOB_VERSION,
-            "kind": DURABLE_JOB_KIND,
+            "kind": {"$in": list(DURABLE_JOB_KINDS)},
             "lease_token": lease_token,
         }
         query.update(extra_filter)

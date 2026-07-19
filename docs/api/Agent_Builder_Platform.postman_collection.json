@@ -1,6 +1,6 @@
 {
   "info": {
-    "_postman_id": "d6f2f010-1698-534a-6b88-c3b3cff5291f",
+    "_postman_id": "0492190c-865f-ce02-8727-0a9dbd3d311f",
     "description": "Generated from docs/api/openapi.json. Do not edit manually.",
     "name": "Agent Builder Platform API (generated)",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
@@ -2654,6 +2654,31 @@
             ],
             "method": "GET",
             "url": "{{baseUrl}}/api/v1/knowledge/documents/:doc_id/preview"
+          },
+          "response": []
+        },
+        {
+          "name": "reindex_document_api_v1_knowledge_documents__doc_id__reindex_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Queue a durable in-place vector refresh for one document/job batch.\n\nRe-indexing re-embeds already published chunks under their current logical\nIDs. It does not re-upload source bytes or duplicate the document, and it\ndoes not report terminal success until every target chunk is refreshed.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/knowledge/documents/:doc_id/reindex"
           },
           "response": []
         },

@@ -75,6 +75,23 @@ The public upload response is `pending` after the durable write completes.
 Poll `GET /api/v1/knowledge/jobs/{job_id}` until `completed` before treating
 the source as searchable.
 
+### Re-index lifecycle
+
+`POST /api/v1/knowledge/documents/{doc_id}/reindex?brand_id=<brand-id>` queues
+a durable `knowledge_reindex` job. It is tenant-authorized with
+`document:write`, accepts `Idempotency-Key`, and refreshes the embeddings and
+Qdrant payloads of the existing document/job batch in place. It does not retain
+or upload source bytes again, generate a second logical document, or change
+the source/chunk text. Use a new upload—not re-index—for changed source text or
+new chunking configuration.
+
+The existing job-status and cancellation routes apply. A matching idempotency
+retry returns the original job; a different document under the same key returns
+`409`. Cancellation is allowed only before the publish fence. `completed`
+means every target chunk was refreshed; `error` is safe to retry after the
+underlying vector/provider condition is fixed. No raw provider diagnostic is
+returned.
+
 ## Upload and archive limits
 
 | Setting | Default | Applies to |
@@ -90,6 +107,31 @@ ZIP uploads are not an accepted source type. DOCX is validated as a ZIP
 container before extraction so a compressed document cannot exhaust worker
 memory or CPU.
 
+## Malware-scanning policy
+
+Every durable upload is scanned **before** its bytes or structured context are
+encrypted into `system.ingestion_payloads`. Production startup requires:
+
+```env
+MALWARE_SCAN_MODE=clamav
+MALWARE_SCAN_HOST=<private-clamav-service>
+MALWARE_SCAN_PORT=3310
+MALWARE_SCAN_TIMEOUT_SECONDS=15
+```
+
+The scanner uses ClamAV's private `INSTREAM` protocol; source bytes must not
+be sent to a public scanning API. A detected payload returns `422` without a
+signature/detail leak. Scanner transport errors, timeouts, or malformed
+responses return `503`; the upload is not stored, queued, or retried until a
+clean scan can be obtained. Local Compose defaults to development with scanning
+disabled solely for local fixtures—do not carry that setting into a deployed
+environment.
+
+Operate ClamAV as a private, resource-limited service with current signatures,
+monitor freshness and scanner availability, and preserve only a redacted audit
+event (brand scope, opaque upload/job ID, result, and timestamp). Do not retain
+the scanner's raw diagnostic or file bytes in application logs.
+
 ## Qdrant containment and resource limits
 
 The Compose Qdrant service no longer publishes port `6333` to the host. It is
@@ -102,3 +144,24 @@ URL pointing at loopback, or a fail-open rate-limit configuration. Compose
 declares CPU and memory limits for API, worker, frontend, Shopify, MongoDB,
 Redis, and Qdrant; production orchestrators must enforce equivalent or
 stricter limits.
+
+### Production acceptance evidence
+
+Before declaring P4 complete in an environment, attach release evidence that
+proves all of the following rather than relying on Compose alone:
+
+- Qdrant and ClamAV have no public ingress; their DNS names resolve only on
+  the workload private network, and the API/worker have the corresponding
+  egress route.
+- `QDRANT_API_KEY` is mounted as a secret reference and ClamAV runs with
+  current signatures, bounded CPU/memory, and availability/freshness alerts.
+- The deployed API, ingestion worker, and Qdrant/ClamAV resource limits are
+  visible in the cloud control plane and match or exceed the committed
+  baseline.
+- The protected release path uses the P6 GitHub-to-Azure OIDC identity with
+  least-privilege roles; no long-lived Azure client credential or registry
+  admin password is available to the release workflow.
+
+These are cloud-control-plane facts. The repository validates the application
+configuration and provides the release gates, but cannot attest that a cloud
+network or identity has actually been configured.

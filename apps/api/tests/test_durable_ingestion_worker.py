@@ -13,6 +13,7 @@ from app.config import Settings
 from app.connections import connection_manager
 from app.services.ingestion_service import IngestionIdempotencyConflictError, IngestionService
 from app.services.job_store import JobStore
+from app.security.malware_scanner import MalwareDetectedError
 
 
 class _Result:
@@ -176,6 +177,74 @@ async def test_submission_persists_encrypted_payload_and_immutable_scope_snapsho
     assert source not in repr(job).encode()
     assert source not in bytes(payload["content_encrypted"])
     assert (await service.payload_store.load(payload["_id"], job_id=job_id))["content"] == source
+
+
+@pytest.mark.asyncio
+async def test_malware_rejection_happens_before_durable_payload_persistence(durable_mongo):
+    system, _ = durable_mongo
+    service = IngestionService(Settings(VECTOR_BACKEND="atlas"))
+
+    class RejectedScanner:
+        async def scan(self, content, *, filename):
+            raise MalwareDetectedError("test detection")
+
+    service.malware_scanner = RejectedScanner()
+    with pytest.raises(MalwareDetectedError):
+        await service.submit_durable_job(
+            [{"content": b"blocked", "filename": "blocked.txt", "content_type": "text/plain"}],
+            agent_id="agent-a",
+            brand_id="brand-a",
+            brand_slug="brand-a-slug",
+            chunk_size=500,
+            chunk_overlap=60,
+        )
+
+    assert system["ingestion_jobs"].documents == {}
+    assert system["ingestion_payloads"].documents == {}
+
+
+@pytest.mark.asyncio
+async def test_reindex_refreshes_existing_chunks_in_place_through_durable_worker(durable_mongo):
+    system, brands = durable_mongo
+    service = IngestionService(Settings(VECTOR_BACKEND="atlas"))
+    service._generate_embeddings = AsyncMock(return_value=[0.75] * 1024)
+    knowledge = brands.setdefault("brand-a-slug", _SystemDb())["knowledge_base"]
+    knowledge.documents["chunk-1"] = {
+        "_id": "chunk-1",
+        "chunk_id": "chunk-1",
+        "doc_id": "document-1",
+        "content": "Existing knowledge content",
+        "embeddings": [0.1] * 1024,
+        "brand_id": "brand-a",
+        "brand_slug": "brand-a-slug",
+        "metadata": {"job_id": "document-1"},
+    }
+
+    job_id = await service.submit_reindex_job(
+        document_id="document-1",
+        agent_id="agent-a",
+        brand_id="brand-a",
+        brand_slug="brand-a-slug",
+        chunk_size=500,
+        chunk_overlap=60,
+        idempotency_key="reindex-document-1",
+    )
+    retry_id = await service.submit_reindex_job(
+        document_id="document-1",
+        agent_id="agent-a",
+        brand_id="brand-a",
+        brand_slug="brand-a-slug",
+        chunk_size=500,
+        chunk_overlap=60,
+        idempotency_key="reindex-document-1",
+    )
+
+    assert retry_id == job_id
+    assert system["ingestion_jobs"].documents[job_id]["kind"] == "knowledge_reindex"
+    assert await service.process_next_durable_job(worker_id="worker-1") is True
+    assert system["ingestion_jobs"].documents[job_id]["status"] == "completed"
+    assert knowledge.documents["chunk-1"]["embeddings"] == [0.75] * 1024
+    assert knowledge.documents["chunk-1"]["reindex_job_id"] == job_id
 
 
 @pytest.mark.asyncio

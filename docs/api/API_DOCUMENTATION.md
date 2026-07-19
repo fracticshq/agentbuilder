@@ -88,6 +88,7 @@ The permission required matches the operation: `document:read`,
 | `POST /api/v1/knowledge/upload` | Multipart form must include the target `brand_id`; `agent_id` is optional. The route persists encrypted source/context payloads and a durable job before returning `pending`. |
 | `POST /api/v1/knowledge/bulk-upload` | Body contains `brand_id`, optional `agent_id` and `folder_path`; it preserves structured product/dealer fields through the durable worker and returns `pending`. |
 | `GET /api/v1/knowledge/jobs/{job_id}` | The job is authorized through its immutable creation-time brand scope. Poll until `completed` before treating the data as searchable. |
+| `POST /api/v1/knowledge/documents/{doc_id}/reindex` | Requires `brand_id`, optional `agent_id`, `document:write`, and accepts `Idempotency-Key`. Queues a durable in-place embedding/vector refresh without re-uploading source bytes or duplicating the logical document. |
 | `GET /api/v1/knowledge/tree`, document preview/list/delete, folder CRUD, and retrieval preview | Include `brand_id`; cross-tenant access is rejected. |
 | `POST /api/v1/ingest/documents?agent_id=...` | `agent_id` is required and controls the only permitted storage destination. Clients should send `Idempotency-Key` when retrying an upload; same key plus different source returns `409`. |
 | `POST /api/v1/ingest/chunks` | Body must include `agent_id`. User metadata cannot choose the destination tenant. |
@@ -106,6 +107,9 @@ context under that key return `409 Conflict`. Upload limits are enforced before
 the encrypted payload is stored: `MAX_FILE_SIZE_MB` per source,
 `MAX_UPLOAD_FILES` and `MAX_UPLOAD_TOTAL_SIZE_MB` for multi-file ingestion,
 and bounded DOCX ZIP entry, expansion-size, and compression-ratio limits.
+The re-index route has the same idempotency behavior for its document target;
+it refreshes existing vectors only. Re-upload a changed document when its text,
+structured product data, or chunking configuration must change.
 
 ## Commerce catalog and Shopify
 
@@ -204,6 +208,9 @@ and `MCP_SERVICE_AUTH_TOKEN`. `RATE_LIMIT_FAIL_CLOSED` must be true. When
 `VECTOR_BACKEND=qdrant`, `QDRANT_API_KEY` is required and `QDRANT_URL` must
 not point at loopback. The Shopify MCP service additionally requires
 `SESSION_SECRET`, `REDIS_URL`, and the same `MCP_SERVICE_AUTH_TOKEN`.
+Durable uploads additionally require a private ClamAV-compatible scanner
+(`MALWARE_SCAN_MODE=clamav`) in production; an infected source is rejected and
+an unavailable scanner causes a retryable `503`, never an unscanned upload.
 
 See [P0 security migration](./P0_SECURITY_MIGRATION.md) for rollout order,
 client-impact checklist, and operational verification, and the

@@ -19,6 +19,9 @@ def _production_settings(**overrides):
         "VECTOR_BACKEND": "qdrant",
         "QDRANT_URL": "http://qdrant:6333",
         "QDRANT_API_KEY": "test-qdrant-key",
+        "MALWARE_SCAN_MODE": "clamav",
+        "MALWARE_SCAN_HOST": "clamav.internal",
+        "MALWARE_SCAN_PORT": 3310,
     }
     values.update(overrides)
     return Settings(**values)
@@ -35,6 +38,16 @@ def test_production_defaults_to_fail_closed_rate_limits_and_requires_qdrant_auth
 def test_production_rejects_fail_open_rate_limits():
     with pytest.raises(ValidationError, match="RATE_LIMIT_FAIL_CLOSED"):
         _production_settings(RATE_LIMIT_FAIL_CLOSED=False)
+
+
+def test_production_requires_a_clamav_scanner_for_uploads():
+    with pytest.raises(ValidationError, match="MALWARE_SCAN_MODE"):
+        _production_settings(MALWARE_SCAN_MODE="disabled")
+
+
+def test_production_rejects_a_loopback_malware_scanner():
+    with pytest.raises(ValidationError, match="MALWARE_SCAN_HOST"):
+        _production_settings(MALWARE_SCAN_HOST="127.0.0.1")
 
 
 def test_production_requires_a_signing_secret_when_shopify_webhooks_are_enabled():

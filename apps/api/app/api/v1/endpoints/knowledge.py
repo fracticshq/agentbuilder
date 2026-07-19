@@ -23,6 +23,7 @@ from ....services.ingestion_service import (
 )
 from ....services.ingestion_payload_store import IngestionPayloadStoreError
 from ....services.job_store import JobStoreUnavailableError
+from ....security.malware_scanner import MalwareDetectedError, MalwareScannerUnavailableError
 
 logger = structlog.get_logger()
 router = APIRouter(dependencies=[Depends(require_dashboard_access)])
@@ -394,6 +395,10 @@ async def upload_document(
         raise
     except IngestionIdempotencyConflictError:
         raise HTTPException(status_code=409, detail="Idempotency key was already used for a different upload")
+    except MalwareDetectedError:
+        raise HTTPException(status_code=422, detail="Upload rejected by malware scanning policy")
+    except MalwareScannerUnavailableError:
+        raise HTTPException(status_code=503, detail="Upload scanning is temporarily unavailable")
     except InvalidIngestionInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except (JobStoreUnavailableError, IngestionPayloadStoreError):
@@ -554,6 +559,10 @@ async def bulk_upload_json(
         raise
     except IngestionIdempotencyConflictError:
         raise HTTPException(status_code=409, detail="Idempotency key was already used for a different upload")
+    except MalwareDetectedError:
+        raise HTTPException(status_code=422, detail="Upload rejected by malware scanning policy")
+    except MalwareScannerUnavailableError:
+        raise HTTPException(status_code=503, detail="Upload scanning is temporarily unavailable")
     except InvalidIngestionInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except (JobStoreUnavailableError, IngestionPayloadStoreError):
@@ -946,6 +955,76 @@ async def get_document_preview(
     except Exception as e:
         logger.error("Failed to preview document", doc_id=doc_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to preview document: {str(e)}")
+
+
+@router.post(
+    "/documents/{doc_id}/reindex",
+    response_model=UploadResponse,
+    responses={
+        400: {"description": "Invalid durable re-index request"},
+        404: {"description": "Brand, agent, or document not found"},
+        409: {"description": "Idempotency key conflicts with another re-index request"},
+        503: {"description": "Durable job storage is temporarily unavailable"},
+    },
+)
+async def reindex_document(
+    doc_id: str,
+    brand_id: str,
+    agent_id: Optional[str] = None,
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+    current_user: User | None = Depends(require_dashboard_access),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+):
+    """Queue a durable in-place vector refresh for one document/job batch.
+
+    Re-indexing re-embeds already published chunks under their current logical
+    IDs. It does not re-upload source bytes or duplicate the document, and it
+    does not report terminal success until every target chunk is refreshed.
+    """
+    try:
+        scope = await _resolve_durable_knowledge_scope(
+            current_user, brand_id, agent_id, Permission.DOCUMENT_WRITE
+        )
+        preview = await knowledge_service.get_document_preview(
+            doc_id,
+            str(scope["brand_id"]),
+            limit=1,
+        )
+        if not preview:
+            raise HTTPException(status_code=404, detail="Document not found")
+        chunk_size, chunk_overlap = ingestion_service.snapshot_chunking_from_agent(
+            {"configuration": {}}
+            if not scope["agent_id"]
+            else await connection_manager.get_system_db().agents.find_one({"id": scope["agent_id"]}) or {}
+        )
+        job_id = await ingestion_service.submit_reindex_job(
+            document_id=doc_id,
+            agent_id=scope["agent_id"],
+            brand_id=str(scope["brand_id"]),
+            brand_slug=str(scope["brand_slug"]),
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            idempotency_key=idempotency_key,
+        )
+        return UploadResponse(
+            success=True,
+            job_id=job_id,
+            message="Knowledge re-index queued",
+            items_count=1,
+            status="pending",
+        )
+    except HTTPException:
+        raise
+    except IngestionIdempotencyConflictError:
+        raise HTTPException(status_code=409, detail="Idempotency key was already used for a different re-index request")
+    except InvalidIngestionInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except JobStoreUnavailableError:
+        raise HTTPException(status_code=503, detail="Knowledge re-indexing is temporarily unavailable")
+    except Exception as exc:
+        logger.error("knowledge_reindex_submission_failed", doc_id=doc_id, error_type=type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Knowledge re-index request failed")
 
 
 @router.delete("/documents/{doc_id}")

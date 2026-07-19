@@ -220,6 +220,13 @@ class Settings(BaseSettings):
     MAX_ARCHIVE_COMPRESSION_RATIO: int = 100
     ALLOWED_FILE_TYPES: str = "pdf,txt,md,docx,html"
     UPLOAD_DIR: str = "./uploads"
+    # Production durable uploads must be scanned before source bytes enter the
+    # encrypted payload store. ClamAV is deliberately reached over a private
+    # service endpoint; no source bytes are sent to a public malware API.
+    MALWARE_SCAN_MODE: str = "disabled"  # disabled | clamav
+    MALWARE_SCAN_HOST: str = "clamav"
+    MALWARE_SCAN_PORT: int = 3310
+    MALWARE_SCAN_TIMEOUT_SECONDS: float = 15.0
     # Durable ingestion is processed by a separate Mongo-backed worker. Source
     # bytes are encrypted and TTL-bound in Mongo, never held in a job/cache row.
     INGESTION_JOB_TTL_SECONDS: int = 86400
@@ -326,7 +333,7 @@ class Settings(BaseSettings):
             return int(v)
         return v
 
-    @field_validator("INGESTION_WORKER_POLL_SECONDS", "CATALOG_SYNC_WORKER_POLL_SECONDS", "CATALOG_SYNC_SCHEDULER_POLL_SECONDS", mode="before")
+    @field_validator("INGESTION_WORKER_POLL_SECONDS", "CATALOG_SYNC_WORKER_POLL_SECONDS", "CATALOG_SYNC_SCHEDULER_POLL_SECONDS", "MALWARE_SCAN_TIMEOUT_SECONDS", mode="before")
     @classmethod
     def parse_ingestion_worker_poll_seconds(cls, v):
         if isinstance(v, str):
@@ -362,6 +369,14 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return v.lower()
         return v
+
+    @field_validator("MALWARE_SCAN_MODE", mode="before")
+    @classmethod
+    def parse_malware_scan_mode(cls, value):
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"disabled", "clamav"}:
+            raise ValueError("MALWARE_SCAN_MODE must be disabled or clamav")
+        return normalized
 
     @field_validator("SHOPIFY_ADMIN_API_VERSION")
     @classmethod
@@ -406,6 +421,18 @@ class Settings(BaseSettings):
 
         if not self.RATE_LIMIT_FAIL_CLOSED:
             missing.append("RATE_LIMIT_FAIL_CLOSED (must be true in production)")
+
+        if self.MALWARE_SCAN_MODE != "clamav":
+            missing.append("MALWARE_SCAN_MODE (must be clamav in production)")
+        scanner_host = self.MALWARE_SCAN_HOST.strip().lower()
+        if (
+            not scanner_host
+            or scanner_host in {"localhost", "127.0.0.1", "::1"}
+            or self.MALWARE_SCAN_PORT <= 0
+            or self.MALWARE_SCAN_PORT > 65535
+            or self.MALWARE_SCAN_TIMEOUT_SECONDS <= 0
+        ):
+            missing.append("MALWARE_SCAN_HOST, MALWARE_SCAN_PORT, and MALWARE_SCAN_TIMEOUT_SECONDS")
 
         if self.VECTOR_BACKEND == "qdrant":
             if not str(self.QDRANT_API_KEY or "").strip():

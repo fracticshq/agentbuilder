@@ -80,6 +80,10 @@ SERVICE_REQUIRED = {
         "VECTOR_DIMENSIONS",
         "STRAPI_API_TOKEN",
         "MCP_SERVICE_AUTH_TOKEN",
+        "MALWARE_SCAN_MODE",
+        "MALWARE_SCAN_HOST",
+        "MALWARE_SCAN_PORT",
+        "MALWARE_SCAN_TIMEOUT_SECONDS",
     ],
     "admin": [],
     "widget": [],
@@ -206,6 +210,24 @@ def validate_special_shape(key: str, value: str) -> str | None:
                 return "must be a positive integer"
         except ValueError:
             return "must be an integer"
+    if key == "MALWARE_SCAN_MODE" and value.lower() != "clamav":
+        return "must be clamav for a production deployment"
+    if key == "MALWARE_SCAN_PORT":
+        try:
+            if not 1 <= int(value) <= 65535:
+                return "must be a valid TCP port"
+        except ValueError:
+            return "must be an integer"
+    if key == "MALWARE_SCAN_TIMEOUT_SECONDS":
+        try:
+            if float(value) <= 0:
+                return "must be a positive number of seconds"
+        except ValueError:
+            return "must be a number"
+    if key == "MALWARE_SCAN_HOST":
+        host = value.strip().lower()
+        if host in {"localhost", "127.0.0.1", "::1"} or "://" in host or "/" in host:
+            return "must be a private scanner hostname, not a URL or loopback address"
     return validate_url_value(key, value)
 
 

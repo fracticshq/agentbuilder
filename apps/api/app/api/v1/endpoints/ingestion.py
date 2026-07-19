@@ -17,6 +17,7 @@ from ....services.ingestion_service import (
 )
 from ....services.ingestion_payload_store import IngestionPayloadStoreError
 from ....services.job_store import JobStoreUnavailableError
+from ....security.malware_scanner import MalwareDetectedError, MalwareScannerUnavailableError
 from ....auth.dependencies import ensure_brand_access, ensure_permission, require_dashboard_access
 from ....auth.models import Permission, User
 from ....connections import connection_manager
@@ -170,6 +171,10 @@ async def upload_documents(
         raise
     except IngestionIdempotencyConflictError:
         raise HTTPException(status_code=409, detail="Idempotency key was already used for a different document upload")
+    except MalwareDetectedError:
+        raise HTTPException(status_code=422, detail="Upload rejected by malware scanning policy")
+    except MalwareScannerUnavailableError:
+        raise HTTPException(status_code=503, detail="Upload scanning is temporarily unavailable")
     except InvalidIngestionInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except (JobStoreUnavailableError, IngestionPayloadStoreError):

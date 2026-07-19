@@ -9355,6 +9355,123 @@
         ]
       }
     },
+    "/api/v1/knowledge/documents/{doc_id}/reindex": {
+      "post": {
+        "description": "Queue a durable in-place vector refresh for one document/job batch.\n\nRe-indexing re-embeds already published chunks under their current logical\nIDs. It does not re-upload source bytes or duplicate the document, and it\ndoes not report terminal success until every target chunk is refreshed.",
+        "operationId": "reindex_document_api_v1_knowledge_documents__doc_id__reindex_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "brand_id",
+            "required": true,
+            "schema": {
+              "title": "Brand Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-admin-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "Invalid durable re-index request"
+          },
+          "404": {
+            "description": "Brand, agent, or document not found"
+          },
+          "409": {
+            "description": "Idempotency key conflicts with another re-index request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "Durable job storage is temporarily unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reindex Document",
+        "tags": [
+          "knowledge"
+        ]
+      }
+    },
     "/api/v1/knowledge/folders": {
       "post": {
         "description": "Create or ensure a knowledge folder.",

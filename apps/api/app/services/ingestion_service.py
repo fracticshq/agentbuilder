@@ -27,10 +27,20 @@ from .chunking import (
     chunk_text,
     resolve_agent_chunking,
 )
-from .job_store import DuplicateDurableJobError, JobStore, JobStoreUnavailableError
+from .job_store import (
+    DURABLE_REINDEX_KIND,
+    DuplicateDurableJobError,
+    JobStore,
+    JobStoreUnavailableError,
+)
 from .ingestion_payload_store import (
     IngestionPayloadStore,
     InvalidIngestionPayloadError,
+)
+from ..security.malware_scanner import (
+    MalwareDetectedError,
+    MalwareScanner,
+    MalwareScannerUnavailableError,
 )
 from .qdrant_vector_service import QdrantVectorService
 from .runtime_settings_service import RuntimeSettingsService
@@ -97,6 +107,7 @@ class IngestionService:
         self.settings = settings
         self.job_store = JobStore(job_ttl_seconds=settings.INGESTION_JOB_TTL_SECONDS)
         self.payload_store = IngestionPayloadStore(settings)
+        self.malware_scanner = MalwareScanner(settings)
         self.runtime_settings_service = RuntimeSettingsService(settings)
         self.qdrant = QdrantVectorService(settings) if settings.VECTOR_BACKEND == "qdrant" else None
 
@@ -175,6 +186,33 @@ class IngestionService:
                 raise IngestionIdempotencyConflictError(
                     "Idempotency key was already used for a different document upload"
                 )
+        # Source bytes must be scanned before durable encryption/persistence so
+        # an infected payload cannot be retained, leased, or processed later.
+        for file_index, file_data in enumerate(files):
+            try:
+                scan = await self.malware_scanner.scan(
+                    file_data["content"], filename=file_data["filename"]
+                )
+                logger.info(
+                    "durable_upload_malware_scan_completed",
+                    brand_id=brand_id,
+                    file_index=file_index,
+                    result=scan.status,
+                )
+            except MalwareDetectedError:
+                logger.warning(
+                    "durable_upload_malware_detected",
+                    brand_id=brand_id,
+                    file_index=file_index,
+                )
+                raise
+            except MalwareScannerUnavailableError:
+                logger.error(
+                    "durable_upload_malware_scan_unavailable",
+                    brand_id=brand_id,
+                    file_index=file_index,
+                )
+                raise
         job_id = str(uuid.uuid4())
         snapshot = {
             "agent_id": agent_id,
@@ -224,6 +262,84 @@ class IngestionService:
         logger.info("durable_ingestion_job_queued", job_id=job_id, files_count=len(payload_refs))
         return job_id
 
+    async def submit_reindex_job(
+        self,
+        *,
+        document_id: str,
+        agent_id: str | None,
+        brand_id: str,
+        brand_slug: str,
+        chunk_size: int,
+        chunk_overlap: int,
+        idempotency_key: str | None = None,
+    ) -> str:
+        """Queue a durable in-place embedding refresh for one knowledge document.
+
+        A re-index refreshes embeddings and vector-backend payloads from already
+        published chunks; it does not need to retain source bytes or create a
+        second logical document. The immutable target and tenant snapshot make
+        retries, cancellation, and worker recovery use the same protocol as
+        uploads.
+        """
+        if not all(isinstance(value, str) and value for value in (document_id, brand_id, brand_slug)):
+            raise InvalidIngestionInputError("Knowledge document scope is incomplete")
+        if agent_id is not None and (not isinstance(agent_id, str) or not agent_id):
+            raise InvalidIngestionInputError("Agent identifier is invalid")
+        normalized_idempotency_key = self._normalize_idempotency_key(idempotency_key)
+        if normalized_idempotency_key:
+            existing = await self.job_store.find_durable_job_by_idempotency(
+                agent_id=agent_id,
+                brand_id=brand_id,
+                idempotency_key=normalized_idempotency_key,
+                kind=DURABLE_REINDEX_KIND,
+            )
+            if existing:
+                if existing.get("reindex_document_id") == document_id and existing.get("brand_slug") == brand_slug:
+                    return str(existing["job_id"])
+                raise IngestionIdempotencyConflictError(
+                    "Idempotency key was already used for a different re-index request"
+                )
+
+        job_id = str(uuid.uuid4())
+        snapshot = {
+            "agent_id": agent_id,
+            "brand_id": brand_id,
+            "brand_slug": brand_slug,
+            "chunk_size": int(chunk_size),
+            "chunk_overlap": int(chunk_overlap),
+        }
+        try:
+            await self.job_store.create_durable_job(
+                job_id,
+                {
+                    "files_count": 0,
+                    "items_count": 1,
+                    "agent_id": agent_id,
+                    "brand_id": brand_id,
+                    "brand_slug": brand_slug,
+                    "snapshot": snapshot,
+                    "reindex_document_id": document_id,
+                    "submission_kind": "knowledge_reindex",
+                    **({"idempotency_key": normalized_idempotency_key} if normalized_idempotency_key else {}),
+                    "max_attempts": max(1, int(self.settings.INGESTION_MAX_ATTEMPTS)),
+                },
+                kind=DURABLE_REINDEX_KIND,
+            )
+        except DuplicateDurableJobError:
+            existing = await self.job_store.find_durable_job_by_idempotency(
+                agent_id=agent_id,
+                brand_id=brand_id,
+                idempotency_key=normalized_idempotency_key or "",
+                kind=DURABLE_REINDEX_KIND,
+            )
+            if existing and existing.get("reindex_document_id") == document_id and existing.get("brand_slug") == brand_slug:
+                return str(existing["job_id"])
+            raise IngestionIdempotencyConflictError(
+                "Idempotency key was already used for a different re-index request"
+            )
+        logger.info("durable_knowledge_reindex_queued", job_id=job_id, brand_id=brand_id)
+        return job_id
+
     @staticmethod
     def _normalize_idempotency_key(value: str | None) -> str | None:
         if value is None:
@@ -245,7 +361,7 @@ class IngestionService:
         normalized: dict[str, Any] = {}
         if "submission_kind" in value:
             kind = value["submission_kind"]
-            if not isinstance(kind, str) or kind not in {"document", "knowledge_document", "knowledge_bulk"}:
+            if not isinstance(kind, str) or kind not in {"document", "knowledge_document", "knowledge_bulk", "knowledge_reindex"}:
                 raise InvalidIngestionInputError("Job submission kind is invalid")
             normalized["submission_kind"] = kind
         if "items_count" in value:
@@ -308,8 +424,100 @@ class IngestionService:
         )
         if not job:
             return False
-        await self._process_claimed_durable_job(job)
+        if job.get("kind") == DURABLE_REINDEX_KIND:
+            await self._process_claimed_reindex_job(job)
+        else:
+            await self._process_claimed_durable_job(job)
         return True
+
+    async def _process_claimed_reindex_job(self, job: dict) -> None:
+        job_id = str(job.get("job_id") or "")
+        lease_token = str(job.get("lease_token") or "")
+        try:
+            snapshot = self._durable_snapshot(job)
+            document_id = job.get("reindex_document_id")
+            if not isinstance(document_id, str) or not document_id:
+                raise InvalidIngestionInputError("Re-index target is invalid")
+            if not await self.job_store.begin_publish(job_id, lease_token):
+                return
+            refreshed = await self._refresh_document_embeddings(
+                job_id=job_id,
+                lease_token=lease_token,
+                document_id=document_id,
+                snapshot=snapshot,
+            )
+            if not refreshed:
+                raise InvalidIngestionInputError("Knowledge document is no longer available for re-indexing")
+            if await self.job_store.complete(job_id, lease_token):
+                logger.info("durable_knowledge_reindex_completed", job_id=job_id, chunks=refreshed)
+        except Exception as exc:
+            permanent = isinstance(exc, InvalidIngestionInputError)
+            try:
+                await self.job_store.retry_or_fail(
+                    job_id,
+                    lease_token,
+                    error=_public_job_error(exc),
+                    retryable=not permanent,
+                    max_attempts=max(1, int(self.settings.INGESTION_MAX_ATTEMPTS)),
+                    retry_delay_seconds=max(1, int(self.settings.INGESTION_RETRY_DELAY_SECONDS)),
+                )
+            except JobStoreUnavailableError:
+                pass
+            logger.warning(
+                "durable_knowledge_reindex_failed",
+                job_id=job_id,
+                error_type=type(exc).__name__,
+                retryable=not permanent,
+            )
+
+    async def _refresh_document_embeddings(
+        self,
+        *,
+        job_id: str,
+        lease_token: str,
+        document_id: str,
+        snapshot: dict,
+    ) -> int:
+        """Refresh existing document chunks in place, preserving logical IDs."""
+        try:
+            collection = connection_manager.get_brand_db(snapshot["brand_slug"])["knowledge_base"]
+        except Exception as exc:
+            raise IngestionStorageError("Knowledge storage is unavailable") from exc
+
+        refreshed = 0
+        found = False
+        for query in ({"doc_id": document_id}, {"metadata.job_id": document_id}):
+            cursor = collection.find(query)
+            async for document in cursor:
+                found = True
+                if not await self.job_store.renew_lease(
+                    job_id, lease_token, lease_seconds=self.settings.INGESTION_LEASE_SECONDS
+                ):
+                    return refreshed
+                content = document.get("content")
+                chunk_id = document.get("chunk_id") or document.get("_id")
+                if not isinstance(content, str) or not content.strip() or not isinstance(chunk_id, str):
+                    raise InvalidIngestionInputError("Knowledge document has an invalid chunk")
+                embeddings = await self._generate_embeddings(content)
+                self._validate_embedding(embeddings)
+                updated_at = _utc_timestamp()
+                try:
+                    await collection.update_one(
+                        {"_id": document.get("_id")},
+                        {"$set": {"embeddings": embeddings, "reindexed_at": updated_at, "reindex_job_id": job_id, "updated_at": updated_at}},
+                    )
+                    if self.qdrant:
+                        refreshed_document = dict(document)
+                        refreshed_document.update({"embeddings": embeddings, "updated_at": updated_at, "reindexed_at": updated_at, "reindex_job_id": job_id})
+                        await self.qdrant.upsert_chunk(refreshed_document, snapshot["brand_slug"])
+                except Exception as exc:
+                    raise IngestionStorageError("Failed to refresh knowledge document vectors") from exc
+                refreshed += 1
+                if not await self.job_store.mark_progress(job_id, lease_token, refreshed):
+                    return refreshed
+            if found:
+                break
+        return refreshed
 
     async def _process_claimed_durable_job(self, job: dict) -> None:
         job_id = str(job.get("job_id") or "")

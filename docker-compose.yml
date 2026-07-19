@@ -17,12 +17,13 @@ services:
       # Only Docker-internal service URLs that differ from .env.docker defaults
       SHOPIFY_MCP_URL: "http://shopify:3005/mcp"
       QDRANT_URL: "http://qdrant:6333"
-      ENVIRONMENT: "${ENVIRONMENT:-production}"
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
       DEBUG: "${DEBUG:-false}"
       REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
       REQUIRE_REDIS: "${REQUIRE_REDIS:-true}"
       ENABLE_HUMAN_TAKEOVER: "${ENABLE_HUMAN_TAKEOVER:-true}"
       ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+      MALWARE_SCAN_MODE: "${MALWARE_SCAN_MODE:-disabled}"
       STRAPI_URL: "${DOCKER_STRAPI_URL:-http://host.docker.internal:1337}"
     depends_on:
       mongodb:
@@ -63,11 +64,12 @@ services:
       INGESTION_WORKER: "true"
       SHOPIFY_MCP_URL: "http://shopify:3005/mcp"
       QDRANT_URL: "http://qdrant:6333"
-      ENVIRONMENT: "${ENVIRONMENT:-production}"
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
       DEBUG: "${DEBUG:-false}"
       REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
       REQUIRE_REDIS: "false"
       ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+      MALWARE_SCAN_MODE: "${MALWARE_SCAN_MODE:-disabled}"
       STRAPI_URL: "${DOCKER_STRAPI_URL:-http://host.docker.internal:1337}"
     depends_on:
       mongodb:
@@ -101,11 +103,12 @@ services:
       CATALOG_SYNC_WORKER: "true"
       SHOPIFY_MCP_URL: "http://shopify:3005/mcp"
       QDRANT_URL: "http://qdrant:6333"
-      ENVIRONMENT: "${ENVIRONMENT:-production}"
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
       DEBUG: "${DEBUG:-false}"
       REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
       REQUIRE_REDIS: "false"
       ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+      MALWARE_SCAN_MODE: "${MALWARE_SCAN_MODE:-disabled}"
       STRAPI_URL: "${DOCKER_STRAPI_URL:-http://host.docker.internal:1337}"
     depends_on:
       mongodb:
