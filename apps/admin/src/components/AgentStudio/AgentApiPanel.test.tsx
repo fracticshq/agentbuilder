@@ -1,18 +1,19 @@
+import { vi, type Mock } from 'vitest';
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import AgentApiPanel from './AgentApiPanel';
 import { api } from '../../api/client';
 
-jest.mock('../../api/client', () => ({
+vi.mock('../../api/client', () => ({
   api: {
-    getAgentApiKeys: jest.fn(),
-    createAgentApiKey: jest.fn(),
-    revokeAgentApiKey: jest.fn(),
+    getAgentApiKeys: vi.fn(),
+    createAgentApiKey: vi.fn(),
+    revokeAgentApiKey: vi.fn(),
   },
 }));
 
-function renderPanel(onChange = jest.fn()) {
+function renderPanel(onChange = vi.fn()) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -89,7 +90,7 @@ function renderPanel(onChange = jest.fn()) {
           url_context_boost_enabled: false,
         }}
         onChange={onChange}
-        onClose={jest.fn()}
+        onClose={vi.fn()}
       />
     </QueryClientProvider>
   );
@@ -97,8 +98,8 @@ function renderPanel(onChange = jest.fn()) {
 }
 
 test('creates Agent API keys with backend scopes and stores key_id in config', async () => {
-  (api.getAgentApiKeys as jest.Mock).mockResolvedValue([]);
-  (api.createAgentApiKey as jest.Mock).mockResolvedValue({
+  (api.getAgentApiKeys as Mock).mockResolvedValue([]);
+  (api.createAgentApiKey as Mock).mockResolvedValue({
     id: 'uuid-doc-id',
     key_id: 'ab_agent_v1_12345678',
     name: 'Default integration key',

@@ -1,370 +1,3705 @@
 {
-	"info": {
-		"_postman_id": "a9b8c7d6-e5f4-4a3b-2a1c-9d8e7f6a5b4d",
-		"name": "Agent Builder Platform",
-		"description": "Comprehensive API collection for the Agent Builder Platform.",
-		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
-	},
-	"item": [
-		{
-			"name": "Authentication",
-			"item": [
-				{
-					"name": "Login",
-					"request": {
-						"method": "POST",
-						"header": [],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n    \"username\": \"testuser\",\n    \"password\": \"yoursecurepassword\"\n}",
-							"options": {
-								"raw": {
-									"language": "json"
-								}
-							}
-						},
-						"url": {
-							"raw": "{{base_url}}/auth/login",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"auth",
-								"login"
-							]
-						},
-						"description": "Authenticates a user and returns JWT access and refresh tokens."
-					},
-					"response": []
-				},
-				{
-					"name": "Logout",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{access_token}}",
-								"type": "text"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/auth/logout",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"auth",
-								"logout"
-							]
-						},
-						"description": "Logs out a user by revoking their refresh token."
-					},
-					"response": []
-				},
-				{
-					"name": "Get Current User",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{access_token}}",
-								"type": "text"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/auth/me",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"auth",
-								"me"
-							]
-						},
-						"description": "Retrieves the profile of the currently authenticated user."
-					},
-					"response": []
-				}
-			]
-		},
-		{
-			"name": "Messaging",
-			"item": [
-				{
-					"name": "Send Message",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{access_token}}",
-								"type": "text"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n    \"conversation_id\": \"conv_123\",\n    \"message\": {\n      \"role\": \"user\",\n      \"content\": \"Tell me about your return policy.\"\n    },\n    \"agent_id\": \"agent_abc\",\n    \"brand_id\": \"brand_xyz\",\n    \"user_context\": {\n      \"user_id\": \"user_456\",\n      \"session_id\": \"session_789\"\n    }\n  }",
-							"options": {
-								"raw": {
-									"language": "json"
-								}
-							}
-						},
-						"url": {
-							"raw": "{{base_url}}/api/v1/messages",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"api",
-								"v1",
-								"messages"
-							]
-						},
-						"description": "Sends a message to an agent and receives a response."
-					},
-					"response": []
-				},
-				{
-					"name": "Get Conversation History",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{access_token}}",
-								"type": "text"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/api/v1/messages/conv_123",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"api",
-								"v1",
-								"messages",
-								"conv_123"
-							]
-						},
-						"description": "Retrieves the message history for a given conversation."
-					},
-					"response": []
-				}
-			]
-		},
-		{
-			"name": "Document Ingestion",
-			"item": [
-				{
-					"name": "Ingest Document",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{access_token}}",
-								"type": "text"
-							}
-						],
-						"body": {
-							"mode": "formdata",
-							"formdata": [
-								{
-									"key": "file",
-									"type": "file",
-									"src": []
-								},
-								{
-									"key": "brand_id",
-									"value": "brand_xyz",
-									"type": "text"
-								}
-							]
-						},
-						"url": {
-							"raw": "{{base_url}}/api/v1/ingest",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"api",
-								"v1",
-								"ingest"
-							]
-						},
-						"description": "Uploads and ingests a single document for a specific brand."
-					},
-					"response": []
-				},
-				{
-					"name": "Get Ingestion Status",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{access_token}}",
-								"type": "text"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/api/v1/ingest/status/ingest_job_abc",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"api",
-								"v1",
-								"ingest",
-								"status",
-								"ingest_job_abc"
-							]
-						},
-						"description": "Retrieves the status of a document ingestion job."
-					},
-					"response": []
-				}
-			]
-		},
-		{
-			"name": "Admin",
-			"item": [
-				{
-					"name": "Brands",
-					"item": [
-						{
-							"name": "List Brands",
-							"request": {
-								"method": "GET",
-								"header": [],
-								"url": {
-									"raw": "{{base_url}}/api/v1/admin/brands",
-									"host": [
-										"{{base_url}}"
-									],
-									"path": [
-										"api",
-										"v1",
-										"admin",
-										"brands"
-									]
-								}
-							},
-							"response": []
-						}
-					]
-				},
-				{
-					"name": "Agents",
-					"item": [
-						{
-							"name": "List Agents",
-							"request": {
-								"method": "GET",
-								"header": [],
-								"url": {
-									"raw": "{{base_url}}/api/v1/admin/agents?brand_id=brand_xyz",
-									"host": [
-										"{{base_url}}"
-									],
-									"path": [
-										"api",
-										"v1",
-										"admin",
-										"agents"
-									],
-									"query": [
-										{
-											"key": "brand_id",
-											"value": "brand_xyz"
-										}
-									]
-								}
-							},
-							"response": []
-						}
-					]
-				}
-			]
-		},
-		{
-			"name": "Health & Status",
-			"item": [
-				{
-					"name": "Health Check",
-					"request": {
-						"method": "GET",
-						"header": [],
-						"url": {
-							"raw": "{{base_url}}/health",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"health"
-							]
-						},
-						"description": "A simple liveness probe."
-					},
-					"response": []
-				},
-				{
-					"name": "Status Check",
-					"request": {
-						"method": "GET",
-						"header": [],
-						"url": {
-							"raw": "{{base_url}}/api/v1/status",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"api",
-								"v1",
-								"status"
-							]
-						},
-						"description": "A detailed readiness probe that checks dependencies."
-					},
-					"response": []
-				}
-			]
-		}
-	],
-	"event": [
-		{
-			"listen": "prerequest",
-			"script": {
-				"type": "text/javascript",
-				"exec": [
-					""
-				]
-			}
-		},
-		{
-			"listen": "test",
-			"script": {
-				"type": "text/javascript",
-				"exec": [
-					""
-				]
-			}
-		}
-	],
-	"variable": [
-		{
-			"key": "base_url",
-			"value": "http://localhost:8000",
-			"type": "string"
-		},
-		{
-			"key": "access_token",
-			"value": "",
-			"type": "string"
-		}
-	]
+  "info": {
+    "_postman_id": "aedefb40-b2f0-767c-352c-f54ff644d4c3",
+    "description": "Generated from docs/api/openapi.json. Do not edit manually.",
+    "name": "Agent Builder Platform API (generated)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "item": [
+        {
+          "name": "config_check_config_check_get",
+          "request": {
+            "description": "Config Check",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/config-check"
+          },
+          "response": []
+        },
+        {
+          "name": "health_check_health_get",
+          "request": {
+            "description": "Health check endpoint.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/health"
+          },
+          "response": []
+        },
+        {
+          "name": "liveness_check_live_get",
+          "request": {
+            "description": "Liveness Check",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/live"
+          },
+          "response": []
+        },
+        {
+          "name": "get_metrics_metrics_get",
+          "request": {
+            "description": "Prometheus metrics endpoint.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/metrics"
+          },
+          "response": []
+        },
+        {
+          "name": "readiness_check_ready_get",
+          "request": {
+            "description": "Readiness endpoint for deploy orchestration.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/ready"
+          },
+          "response": []
+        }
+      ],
+      "name": "Other"
+    },
+    {
+      "item": [
+        {
+          "name": "get_analytics_api_v1_activity_analytics_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Return aggregate analytics for an agent over a time range.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/activity/analytics"
+          },
+          "response": []
+        },
+        {
+          "name": "get_conversation_events_api_v1_activity_conversations__conversation_id__events_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Return events for a conversation, with optional filtering.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/activity/conversations/:conversation_id/events"
+          },
+          "response": []
+        },
+        {
+          "name": "get_conversation_timeline_api_v1_activity_conversations__conversation_id__timeline_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Return all events for a conversation sorted by timestamp.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/activity/conversations/:conversation_id/timeline"
+          },
+          "response": []
+        },
+        {
+          "name": "track_event_api_v1_activity_events_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"actor_id\": \"value\",\n  \"actor_type\": \"value\",\n  \"agent_id\": \"value\",\n  \"conversation_id\": \"value\",\n  \"event_type\": \"value\",\n  \"page_context\": \"value\",\n  \"payload\": \"value\",\n  \"session_id\": \"value\"\n}"
+            },
+            "description": "Track a single activity event.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/activity/events"
+          },
+          "response": []
+        },
+        {
+          "name": "track_events_batch_api_v1_activity_events_batch_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"events\": [\n    {\n      \"actor_id\": \"value\",\n      \"actor_type\": \"value\",\n      \"agent_id\": \"value\",\n      \"conversation_id\": \"value\",\n      \"event_type\": \"value\",\n      \"page_context\": \"value\",\n      \"payload\": \"value\",\n      \"session_id\": \"value\"\n    }\n  ]\n}"
+            },
+            "description": "Track up to 50 activity events in a single request.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/activity/events/batch"
+          },
+          "response": []
+        },
+        {
+          "name": "get_user_sessions_api_v1_activity_users__user_id__sessions_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Return session summaries for a user (one row per conversation).",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/activity/users/:user_id/sessions"
+          },
+          "response": []
+        }
+      ],
+      "name": "activity"
+    },
+    {
+      "item": [
+        {
+          "name": "list_agent_api_keys_api_v1_admin_agent_api_keys_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Agent Api Keys",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/agent-api/keys"
+          },
+          "response": []
+        },
+        {
+          "name": "create_agent_api_key_api_v1_admin_agent_api_keys_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"brand_id\": \"value\",\n  \"name\": \"value\",\n  \"scopes\": [\n    \"value\"\n  ]\n}"
+            },
+            "description": "Create Agent Api Key",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/agent-api/keys"
+          },
+          "response": []
+        },
+        {
+          "name": "revoke_agent_api_key_api_v1_admin_agent_api_keys__key_id__revoke_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Revoke Agent Api Key",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/agent-api/keys/:key_id/revoke"
+          },
+          "response": []
+        },
+        {
+          "name": "list_agents_api_v1_admin_agents__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Agents",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/agents/"
+          },
+          "response": []
+        },
+        {
+          "name": "create_agent_api_v1_admin_agents__post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"brand_id\": \"value\",\n  \"configuration\": {},\n  \"description\": \"value\",\n  \"metadata\": \"value\",\n  \"name\": \"value\",\n  \"status\": \"draft\",\n  \"system_prompt\": \"value\"\n}"
+            },
+            "description": "Create Agent",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/agents/"
+          },
+          "response": []
+        },
+        {
+          "name": "import_agent_manifest_api_v1_admin_agents_import_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "formdata": [
+                {
+                  "key": "brand_id",
+                  "src": null,
+                  "type": "text",
+                  "value": "value"
+                },
+                {
+                  "key": "file",
+                  "src": "",
+                  "type": "file",
+                  "value": ""
+                }
+              ],
+              "mode": "formdata"
+            },
+            "description": "Import Agent Manifest",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/agents/import"
+          },
+          "response": []
+        },
+        {
+          "name": "list_packs_api_v1_admin_agents_packs_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Packs",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/agents/packs"
+          },
+          "response": []
+        },
+        {
+          "name": "get_pack_api_v1_admin_agents_packs__pack_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Pack",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/agents/packs/:pack_id"
+          },
+          "response": []
+        },
+        {
+          "name": "get_agent_api_v1_admin_agents__agent_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Agent",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/agents/:agent_id"
+          },
+          "response": []
+        },
+        {
+          "name": "update_agent_api_v1_admin_agents__agent_id__put",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"brand_id\": \"value\",\n  \"configuration\": \"value\",\n  \"description\": \"value\",\n  \"metadata\": \"value\",\n  \"name\": \"value\",\n  \"status\": \"value\",\n  \"system_prompt\": \"value\"\n}"
+            },
+            "description": "Update Agent",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": "{{baseUrl}}/api/v1/admin/agents/:agent_id"
+          },
+          "response": []
+        },
+        {
+          "name": "delete_agent_api_v1_admin_agents__agent_id__delete",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Delete Agent",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/admin/agents/:agent_id"
+          },
+          "response": []
+        },
+        {
+          "name": "list_agent_connectors_api_v1_admin_agents__agent_id__connectors_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Agent Connectors",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/agents/:agent_id/connectors"
+          },
+          "response": []
+        },
+        {
+          "name": "upsert_agent_connector_api_v1_admin_agents__agent_id__connectors_put",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{}"
+            },
+            "description": "Upsert Agent Connector",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": "{{baseUrl}}/api/v1/admin/agents/:agent_id/connectors"
+          },
+          "response": []
+        },
+        {
+          "name": "discover_connector_tools_api_v1_admin_agents__agent_id__connectors_discover_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"auth_header\": \"value\",\n  \"endpoint\": \"value\",\n  \"url\": \"value\"\n}"
+            },
+            "description": "Discover Connector Tools",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/agents/:agent_id/connectors/discover"
+          },
+          "response": []
+        },
+        {
+          "name": "attach_connector_pack_api_v1_admin_agents__agent_id__connectors_packs__pack_id__post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Attach Connector Pack",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/agents/:agent_id/connectors/packs/:pack_id"
+          },
+          "response": []
+        },
+        {
+          "name": "revoke_agent_connector_api_v1_admin_agents__agent_id__connectors__connector_id__delete",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Revoke Agent Connector",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/admin/agents/:agent_id/connectors/:connector_id"
+          },
+          "response": []
+        },
+        {
+          "name": "test_agent_connector_api_v1_admin_agents__agent_id__connectors__connector_id__test_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"endpoint_id\": \"value\",\n  \"payload\": \"value\",\n  \"query\": \"Test this configured context connector.\"\n}"
+            },
+            "description": "Test Agent Connector",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/agents/:agent_id/connectors/:connector_id/test"
+          },
+          "response": []
+        },
+        {
+          "name": "toggle_agent_connector_api_v1_admin_agents__agent_id__connectors__connector_id__toggle_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"enabled\": false\n}"
+            },
+            "description": "Toggle Agent Connector",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/agents/:agent_id/connectors/:connector_id/toggle"
+          },
+          "response": []
+        },
+        {
+          "name": "export_agent_manifest_api_v1_admin_agents__agent_id__export_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Export Agent Manifest",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/agents/:agent_id/export"
+          },
+          "response": []
+        },
+        {
+          "name": "list_built_in_artifact_types_api_v1_admin_artifacts__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Built-in chat artifact types the admin can enable per agent.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/artifacts/"
+          },
+          "response": []
+        },
+        {
+          "name": "list_brands_api_v1_admin_brands__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get all brands.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/brands/"
+          },
+          "response": []
+        },
+        {
+          "name": "create_brand_api_v1_admin_brands__post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"colors\": \"value\",\n  \"description\": \"value\",\n  \"industry\": \"value\",\n  \"logo_url\": \"value\",\n  \"name\": \"value\",\n  \"website\": \"value\"\n}"
+            },
+            "description": "Create a new brand.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/brands/"
+          },
+          "response": []
+        },
+        {
+          "name": "get_brand_api_v1_admin_brands__brand_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get a specific brand by ID.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id"
+          },
+          "response": []
+        },
+        {
+          "name": "update_brand_api_v1_admin_brands__brand_id__put",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"colors\": \"value\",\n  \"description\": \"value\",\n  \"industry\": \"value\",\n  \"logo_url\": \"value\",\n  \"name\": \"value\",\n  \"website\": \"value\"\n}"
+            },
+            "description": "Update an existing brand.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id"
+          },
+          "response": []
+        },
+        {
+          "name": "delete_brand_api_v1_admin_brands__brand_id__delete",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Delete a brand.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id"
+          },
+          "response": []
+        },
+        {
+          "name": "list_staging_evaluation_runs_api_v1_admin_brands__brand_id__evaluations_runs_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Staging Evaluation Runs",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/evaluations/runs"
+          },
+          "response": []
+        },
+        {
+          "name": "get_staging_evaluation_run_api_v1_admin_brands__brand_id__evaluations_runs__run_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Staging Evaluation Run",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/evaluations/runs/:run_id"
+          },
+          "response": []
+        },
+        {
+          "name": "submit_staging_evaluation_review_api_v1_admin_brands__brand_id__evaluations_runs__run_id__reviews_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"case_id\": \"value\",\n  \"dimensions\": [\n    {}\n  ],\n  \"outcome\": \"pass\",\n  \"provenance\": {},\n  \"redacted_rationale\": \"value\",\n  \"reviewer_ref\": \"value\",\n  \"reviewer_type\": \"human\"\n}"
+            },
+            "description": "Store a redacted human decision or an optional pinned-model opinion.\n\nHuman review remains primary: a pinned-model record can only be appended\nafter a human review of that case. The endpoint stores declared metadata;\nit never calls a model or provider.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/evaluations/runs/:run_id/reviews"
+          },
+          "response": []
+        },
+        {
+          "name": "get_retention_policy_api_v1_admin_brands__brand_id__privacy_retention_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Retention Policy",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/privacy/retention"
+          },
+          "response": []
+        },
+        {
+          "name": "set_retention_policy_api_v1_admin_brands__brand_id__privacy_retention_put",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"retention_days\": 0\n}"
+            },
+            "description": "Set Retention Policy",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/privacy/retention"
+          },
+          "response": []
+        },
+        {
+          "name": "run_retention_cleanup_api_v1_admin_brands__brand_id__privacy_retention_run_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Run Retention Cleanup",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/privacy/retention/run"
+          },
+          "response": []
+        },
+        {
+          "name": "delete_subject_data_api_v1_admin_brands__brand_id__privacy_subjects__subject_id__delete",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Delete Subject Data",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/privacy/subjects/:subject_id"
+          },
+          "response": []
+        },
+        {
+          "name": "export_subject_data_api_v1_admin_brands__brand_id__privacy_subjects__subject_id__export_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Export Subject Data",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/privacy/subjects/:subject_id/export"
+          },
+          "response": []
+        },
+        {
+          "name": "list_console_agents_api_v1_admin_console_agents_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Console Agents",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/console/agents"
+          },
+          "response": []
+        },
+        {
+          "name": "get_console_agent_api_v1_admin_console_agents__agent_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Console Agent",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/console/agents/:agent_id"
+          },
+          "response": []
+        },
+        {
+          "name": "stream_console_message_api_v1_admin_console_agents__agent_id__messages_stream_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"conversation_id\": \"value\",\n  \"filters\": \"value\",\n  \"message\": \"value\",\n  \"page_context\": \"value\",\n  \"user_id\": \"admin-console\"\n}"
+            },
+            "description": "Stream Console Message",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/console/agents/:agent_id/messages/stream"
+          },
+          "response": []
+        },
+        {
+          "name": "list_console_runs_api_v1_admin_console_agents__agent_id__runs_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Console Runs",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/console/agents/:agent_id/runs"
+          },
+          "response": []
+        },
+        {
+          "name": "ingest_staging_evaluation_run_api_v1_admin_evaluations_runs_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"brand_id\": \"value\",\n  \"report\": {},\n  \"target_profile\": {\n    \"access_mode\": \"value\",\n    \"data_classification\": \"value\",\n    \"profile\": \"value\"\n  }\n}"
+            },
+            "description": "Persist a signed-by-scope, synthetic-only staging summary.\n\nThis endpoint intentionally performs no evaluation work and imports no\nprovider/model adapter. A service has to generate the offline contract\nreport elsewhere and hold the explicit ``evaluations:write`` key scope.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/evaluations/runs"
+          },
+          "response": []
+        },
+        {
+          "name": "list_azure_openai_deployments_api_v1_admin_llm_azure_deployments_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Azure Openai Deployments",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/llm/azure/deployments"
+          },
+          "response": []
+        },
+        {
+          "name": "get_observability_summary_api_v1_admin_observability_summary_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Observability Summary",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/observability/summary"
+          },
+          "response": []
+        },
+        {
+          "name": "validate_admin_session_api_v1_admin_session_validate_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Validate the current authenticated dashboard session.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/session/validate"
+          },
+          "response": []
+        },
+        {
+          "name": "list_runtime_settings_api_v1_admin_settings_runtime_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Runtime Settings",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/settings/runtime"
+          },
+          "response": []
+        },
+        {
+          "name": "update_runtime_settings_api_v1_admin_settings_runtime_put",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"updates\": {}\n}"
+            },
+            "description": "Update Runtime Settings",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": "{{baseUrl}}/api/v1/admin/settings/runtime"
+          },
+          "response": []
+        },
+        {
+          "name": "test_runtime_settings_api_v1_admin_settings_runtime_test_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"overrides\": {},\n  \"sections\": \"value\"\n}"
+            },
+            "description": "Test Runtime Settings",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/settings/runtime/test"
+          },
+          "response": []
+        },
+        {
+          "name": "list_built_in_skills_api_v1_admin_skills__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Built In Skills",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/skills/"
+          },
+          "response": []
+        },
+        {
+          "name": "get_skill_agent_config_shape_api_v1_admin_skills_agent_config_shape_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Skill Agent Config Shape",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/skills/agent-config-shape"
+          },
+          "response": []
+        },
+        {
+          "name": "list_tools_api_v1_admin_tools__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Tools",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/tools/"
+          },
+          "response": []
+        },
+        {
+          "name": "get_tool_agent_config_shape_api_v1_admin_tools_agent_config_shape_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Tool Agent Config Shape",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/tools/agent-config-shape"
+          },
+          "response": []
+        }
+      ],
+      "name": "admin"
+    },
+    {
+      "item": [
+        {
+          "name": "get_agent_api_v1_agent_api_agents__agent_id__get",
+          "request": {
+            "description": "Get Agent",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/agent-api/agents/:agent_id"
+          },
+          "response": []
+        },
+        {
+          "name": "create_message_api_v1_agent_api_messages_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"conversation_id\": \"value\",\n  \"filters\": \"value\",\n  \"message\": \"value\",\n  \"metadata\": {},\n  \"page_context\": \"value\",\n  \"session_id\": \"value\",\n  \"user_id\": \"value\"\n}"
+            },
+            "description": "Create Message",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/agent-api/messages"
+          },
+          "response": []
+        },
+        {
+          "name": "stream_message_api_v1_agent_api_messages_stream_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"conversation_id\": \"value\",\n  \"filters\": \"value\",\n  \"message\": \"value\",\n  \"metadata\": {},\n  \"page_context\": \"value\",\n  \"session_id\": \"value\",\n  \"user_id\": \"value\"\n}"
+            },
+            "description": "Stream Message",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/agent-api/messages/stream"
+          },
+          "response": []
+        },
+        {
+          "name": "create_session_api_v1_agent_api_sessions_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"metadata\": {},\n  \"user_id\": \"value\"\n}"
+            },
+            "description": "Create Session",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/agent-api/sessions"
+          },
+          "response": []
+        },
+        {
+          "name": "get_session_api_v1_agent_api_sessions__session_id__get",
+          "request": {
+            "description": "Get Session",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/agent-api/sessions/:session_id"
+          },
+          "response": []
+        }
+      ],
+      "name": "agent-api"
+    },
+    {
+      "item": [
+        {
+          "name": "auth_config_api_v1_auth_config_get",
+          "request": {
+            "description": "Auth Config",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/auth/config"
+          },
+          "response": []
+        },
+        {
+          "name": "forgot_password_api_v1_auth_forgot_password_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"email\": \"value\"\n}"
+            },
+            "description": "Forgot Password",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/auth/forgot-password"
+          },
+          "response": []
+        },
+        {
+          "name": "google_login_or_signup_api_v1_auth_google_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"credential\": \"value\"\n}"
+            },
+            "description": "Google Login Or Signup",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/auth/google"
+          },
+          "response": []
+        },
+        {
+          "name": "list_api_keys_api_v1_auth_keys_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List all API keys for the current user.\n\nRequires authentication.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/auth/keys"
+          },
+          "response": []
+        },
+        {
+          "name": "create_api_key_api_v1_auth_keys_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"brand_id\": \"value\",\n  \"expires_in_days\": \"value\",\n  \"name\": \"value\",\n  \"permissions\": [\n    \"brand:read\"\n  ]\n}"
+            },
+            "description": "Create a new API key.\n\nRequires authentication. Users can only create keys for themselves.\nAdmins can create keys for any user/brand.\n\n- **name**: Descriptive name for the key\n- **brand_id**: Optional brand scope\n- **permissions**: List of permissions (default: MESSAGE_READ)\n- **expires_in_days**: Optional expiration (max 365 days)",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/auth/keys"
+          },
+          "response": []
+        },
+        {
+          "name": "get_api_key_api_v1_auth_keys__key_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get details of a specific API key.\n\nRequires authentication. Users can only access their own keys.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/auth/keys/:key_id"
+          },
+          "response": []
+        },
+        {
+          "name": "delete_api_key_api_v1_auth_keys__key_id__delete",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Delete (revoke) an API key.\n\nRequires authentication. Users can only delete their own keys.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/auth/keys/:key_id"
+          },
+          "response": []
+        },
+        {
+          "name": "disable_api_key_api_v1_auth_keys__key_id__disable_patch",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Disable an API key (soft delete).\n\nRequires authentication. Users can only disable their own keys.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "PATCH",
+            "url": "{{baseUrl}}/api/v1/auth/keys/:key_id/disable"
+          },
+          "response": []
+        },
+        {
+          "name": "login_api_v1_auth_login_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"password\": \"value\",\n  \"username\": \"value\"\n}"
+            },
+            "description": "User login endpoint.\n\nAuthenticates a user with username/email and password.\nReturns JWT access token and refresh token.\n\nArgs:\n    request: Login credentials\n    db: Database connection\n\nReturns:\n    JWT tokens\n\nRaises:\n    HTTPException: If authentication fails",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/auth/login"
+          },
+          "response": []
+        },
+        {
+          "name": "logout_api_v1_auth_logout_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "User logout endpoint.\n\nRevokes all refresh tokens for the user.\n\nArgs:\n    user: Current authenticated user\n    db: Database connection\n\nReturns:\n    Success message",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/auth/logout"
+          },
+          "response": []
+        },
+        {
+          "name": "get_current_user_info_api_v1_auth_me_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get current user's profile information.\n\nRequires authentication.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/auth/me"
+          },
+          "response": []
+        },
+        {
+          "name": "update_current_user_api_v1_auth_me_patch",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"email\": \"value\",\n  \"full_name\": \"value\",\n  \"password\": \"value\"\n}"
+            },
+            "description": "Update current user's profile.\n\nRequires authentication.\n\n- **email**: New email address\n- **full_name**: New full name\n- **password**: New password (will be hashed)",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PATCH",
+            "url": "{{baseUrl}}/api/v1/auth/me"
+          },
+          "response": []
+        },
+        {
+          "name": "refresh_access_token_api_v1_auth_refresh_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"refresh_token\": \"value\"\n}"
+            },
+            "description": "Refresh an access token using a valid refresh token.\n\n- **refresh_token**: Valid refresh token received during login\n\nReturns a new access token.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/auth/refresh"
+          },
+          "response": []
+        },
+        {
+          "name": "register_user_api_v1_auth_register_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"brand_id\": \"value\",\n  \"email\": \"value\",\n  \"full_name\": \"value\",\n  \"password\": \"value\",\n  \"username\": \"value\"\n}"
+            },
+            "description": "Register a new user.\n\n- **username**: Unique username (3-50 chars)\n- **email**: Valid email address\n- **password**: Strong password (min 8 chars)\n- **full_name**: Optional full name\n- **brand_id**: Optional brand association (for brand-specific users)",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/auth/register"
+          },
+          "response": []
+        },
+        {
+          "name": "reset_password_api_v1_auth_reset_password_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"new_password\": \"value\",\n  \"token\": \"value\"\n}"
+            },
+            "description": "Reset Password",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/auth/reset-password"
+          },
+          "response": []
+        },
+        {
+          "name": "revoke_refresh_token_api_v1_auth_revoke_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"refresh_token\": \"value\"\n}"
+            },
+            "description": "Revoke a refresh token.\n\n- **refresh_token**: The refresh token to revoke",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/auth/revoke"
+          },
+          "response": []
+        },
+        {
+          "name": "list_users_api_v1_auth_users_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List all users (admin only).\n\nRequires admin role.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/auth/users"
+          },
+          "response": []
+        },
+        {
+          "name": "get_user_api_v1_auth_users__user_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get user by ID (admin only).\n\nRequires admin role.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/auth/users/:user_id"
+          },
+          "response": []
+        },
+        {
+          "name": "disable_user_api_v1_auth_users__user_id__disable_patch",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Disable a user account (admin only).\n\nRequires admin role.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "PATCH",
+            "url": "{{baseUrl}}/api/v1/auth/users/:user_id/disable"
+          },
+          "response": []
+        },
+        {
+          "name": "enable_user_api_v1_auth_users__user_id__enable_patch",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Enable a disabled user account (admin only).\n\nRequires admin role.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "PATCH",
+            "url": "{{baseUrl}}/api/v1/auth/users/:user_id/enable"
+          },
+          "response": []
+        },
+        {
+          "name": "update_user_role_api_v1_auth_users__user_id__role_patch",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"role\": \"super_admin\"\n}"
+            },
+            "description": "Update user role (admin only).\n\nRequires admin role.\n\n- **role**: New role (admin, user, viewer)",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PATCH",
+            "url": "{{baseUrl}}/api/v1/auth/users/:user_id/role"
+          },
+          "response": []
+        }
+      ],
+      "name": "authentication"
+    },
+    {
+      "item": [
+        {
+          "name": "import_csv_api_v1_catalog_import_csv_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "formdata": [
+                {
+                  "key": "brand_id",
+                  "src": null,
+                  "type": "text",
+                  "value": "value"
+                },
+                {
+                  "key": "file",
+                  "src": "",
+                  "type": "file",
+                  "value": ""
+                }
+              ],
+              "mode": "formdata"
+            },
+            "description": "Parse an uploaded CSV file and return rows as JSON. Synchronous.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/catalog/import/csv"
+          },
+          "response": []
+        },
+        {
+          "name": "import_json_feed_api_v1_catalog_import_json_feed_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"brand_id\": \"value\",\n  \"url\": \"value\"\n}"
+            },
+            "description": "Fetch a JSON feed URL and auto-detect its format. Synchronous.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/catalog/import/json-feed"
+          },
+          "response": []
+        },
+        {
+          "name": "import_scrape_api_v1_catalog_import_scrape_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"brand_id\": \"value\",\n  \"urls\": [\n    \"value\"\n  ]\n}"
+            },
+            "description": "Start async Firecrawl-based product extraction. Returns job_id.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/catalog/import/scrape"
+          },
+          "response": []
+        },
+        {
+          "name": "import_shopify_api_v1_catalog_import_shopify_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"access_token\": \"value\",\n  \"brand_id\": \"value\",\n  \"fallback_currency\": \"value\",\n  \"store_url\": \"value\"\n}"
+            },
+            "description": "Queue a restart-safe Shopify catalog snapshot for one brand.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/catalog/import/shopify"
+          },
+          "response": []
+        },
+        {
+          "name": "get_job_api_v1_catalog_jobs__job_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Job",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/catalog/jobs/:job_id"
+          },
+          "response": []
+        },
+        {
+          "name": "receive_shopify_webhook_api_v1_catalog_shopify_webhooks_post",
+          "request": {
+            "description": "Verify a Shopify webhook and enqueue only the affected tenant's work.\n\nThis endpoint is intentionally public to Shopify, but never trusts a shop\nheader until the raw request has passed HMAC verification and that canonical\nshop is mapped to exactly one enabled brand configuration.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/catalog/shopify/webhooks"
+          },
+          "response": []
+        },
+        {
+          "name": "get_sync_config_api_v1_catalog_sync_config__brand_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Sync Config",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/catalog/sync-config/:brand_id"
+          },
+          "response": []
+        },
+        {
+          "name": "update_sync_config_api_v1_catalog_sync_config__brand_id__put",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"access_token\": \"value\",\n  \"auto_sync\": false,\n  \"fallback_currency\": \"value\",\n  \"source_type\": \"value\",\n  \"source_url\": \"value\",\n  \"sync_frequency\": \"daily\"\n}"
+            },
+            "description": "Update Sync Config",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": "{{baseUrl}}/api/v1/catalog/sync-config/:brand_id"
+          },
+          "response": []
+        },
+        {
+          "name": "manual_sync_api_v1_catalog_sync__brand_id__post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Queue an immediate resync from the immutable stored Shopify scope.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/catalog/sync/:brand_id"
+          },
+          "response": []
+        }
+      ],
+      "name": "catalog"
+    },
+    {
+      "item": [
+        {
+          "name": "process_chunk_api_v1_ingest_chunks_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"doc_id\": \"value\",\n  \"metadata\": {},\n  \"text\": \"value\"\n}"
+            },
+            "description": "Process a single text chunk.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/ingest/chunks"
+          },
+          "response": []
+        },
+        {
+          "name": "get_documents_api_v1_ingest_documents_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get uploaded documents, optionally filtered by agent_id.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/ingest/documents"
+          },
+          "response": []
+        },
+        {
+          "name": "upload_documents_api_v1_ingest_documents_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "formdata": [
+                {
+                  "key": "files",
+                  "src": null,
+                  "type": "text",
+                  "value": "['value']"
+                }
+              ],
+              "mode": "formdata"
+            },
+            "description": "Upload and process documents for ingestion.\n\nArgs:\n    files: List of files to upload\n    agent_id: Optional agent ID to associate with documents (query parameter)\n    ingestion_service: Injected ingestion service",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/ingest/documents"
+          },
+          "response": []
+        },
+        {
+          "name": "cancel_ingestion_job_api_v1_ingest_jobs__job_id__delete",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Cancel an ingestion job.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/ingest/jobs/:job_id"
+          },
+          "response": []
+        },
+        {
+          "name": "get_ingestion_status_api_v1_ingest_status__job_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get the status of an ingestion job.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/ingest/status/:job_id"
+          },
+          "response": []
+        }
+      ],
+      "name": "ingestion"
+    },
+    {
+      "item": [
+        {
+          "name": "bulk_upload_json_api_v1_knowledge_bulk_upload_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"brand_id\": \"value\",\n  \"content_type\": \"product\",\n  \"folder_path\": \"value\",\n  \"items\": [\n    {\n      \"address\": \"value\",\n      \"category\": \"value\",\n      \"city\": \"value\",\n      \"currency\": \"value\",\n      \"currency_source\": \"value\",\n      \"dealer_id\": \"value\",\n      \"default_variant_id\": \"value\",\n      \"email\": \"value\",\n      \"features\": \"value\",\n      \"handle\": \"value\",\n      \"has_variants\": \"value\",\n      \"image_url\": \"value\",\n      \"in_stock\": \"value\",\n      \"name\": \"value\",\n      \"parent_name\": \"value\",\n      \"phone\": \"value\",\n      \"price\": \"value\",\n      \"price_max\": \"value\",\n      \"price_min\": \"value\",\n      \"product_group_id\": \"value\",\n      \"product_url\": \"value\",\n      \"sku\": \"value\",\n      \"state\": \"value\",\n      \"variant_count\": \"value\",\n      \"variant_id\": \"value\",\n      \"variant_options\": \"value\",\n      \"variant_sku\": \"value\",\n      \"variant_title\": \"value\",\n      \"variant_url\": \"value\"\n    }\n  ]\n}"
+            },
+            "description": "Bulk upload products or dealers from JSON.\n\nAccepts:\n- Up to 1000 items per request\n- Products: Must have sku, name, price, category. Currency is optional and may come from commerce config.\n- Dealers: Must have dealer_id, name, city, phone\n\nEach item will be:\n1. Validated for required fields\n2. Converted to text chunks with structured metadata\n3. Embedded using Voyage AI\n4. Stored in MongoDB knowledge_base collection\n\nExample for products:\n```json\n{\n  \"content_type\": \"product\",\n  \"brand_id\": \"essco-bathware\",\n  \"items\": [\n    {\n      \"sku\": \"FAU-001\",\n      \"name\": \"Chrome Faucet\",\n      \"price\": 3499,\n      \"currency\": \"USD\",\n      \"category\": \"faucets\",\n      \"features\": [\"chrome\", \"ceramic disc\"]\n    }\n  ]\n}\n```",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/knowledge/bulk-upload"
+          },
+          "response": []
+        },
+        {
+          "name": "list_documents_api_v1_knowledge_documents_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List documents in knowledge base.\n\nQuery parameters:\n- brand_id: Filter by brand/agent ID (required)\n- content_type: Filter by content type (optional)\n- limit: Number of documents to return (default: 50)\n- skip: Number of documents to skip (default: 0)",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/knowledge/documents"
+          },
+          "response": []
+        },
+        {
+          "name": "delete_document_api_v1_knowledge_documents__doc_id__delete",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Delete a document and all its chunks.\n\nPath parameters:\n- doc_id: Document ID to delete\n\nQuery parameters:\n- brand_id: Brand/agent ID for authorization",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/knowledge/documents/:doc_id"
+          },
+          "response": []
+        },
+        {
+          "name": "get_document_preview_api_v1_knowledge_documents__doc_id__preview_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Fetch source metadata and sample chunks/items for preview.\n\nQuery parameters:\n- brand_id: Brand/agent ID or slug for authorization and DB resolution\n- limit: Maximum number of sample chunks/items to return",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/knowledge/documents/:doc_id/preview"
+          },
+          "response": []
+        },
+        {
+          "name": "reindex_document_api_v1_knowledge_documents__doc_id__reindex_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Queue a durable in-place vector refresh for one document/job batch.\n\nRe-indexing re-embeds already published chunks under their current logical\nIDs. It does not re-upload source bytes or duplicate the document, and it\ndoes not report terminal success until every target chunk is refreshed.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/knowledge/documents/:doc_id/reindex"
+          },
+          "response": []
+        },
+        {
+          "name": "create_folder_api_v1_knowledge_folders_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"brand_id\": \"value\",\n  \"name\": \"value\",\n  \"parent_path\": \"value\",\n  \"path\": \"value\"\n}"
+            },
+            "description": "Create or ensure a knowledge folder.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/knowledge/folders"
+          },
+          "response": []
+        },
+        {
+          "name": "delete_knowledge_item_by_query_api_v1_knowledge_items_delete",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Delete a knowledge item (file or folder) — id in query so folder paths\nwith slashes route correctly. Folders reparent their documents to the parent.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/knowledge/items"
+          },
+          "response": []
+        },
+        {
+          "name": "move_knowledge_item_by_body_api_v1_knowledge_items_move_patch",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"brand_id\": \"value\",\n  \"folder_path\": \"value\",\n  \"item_id\": \"value\",\n  \"target_folder\": \"value\"\n}"
+            },
+            "description": "Move a knowledge item (file or folder) — id carried in the body so folder\npaths with slashes route correctly.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PATCH",
+            "url": "{{baseUrl}}/api/v1/knowledge/items/move"
+          },
+          "response": []
+        },
+        {
+          "name": "rename_knowledge_item_by_body_api_v1_knowledge_items_rename_patch",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"brand_id\": \"value\",\n  \"item_id\": \"value\",\n  \"name\": \"value\"\n}"
+            },
+            "description": "Rename a knowledge item (file or folder) — id carried in the body.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PATCH",
+            "url": "{{baseUrl}}/api/v1/knowledge/items/rename"
+          },
+          "response": []
+        },
+        {
+          "name": "delete_knowledge_item_api_v1_knowledge_items__item_id__delete",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Delete a knowledge item and its chunks (legacy path-param route).",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/knowledge/items/:item_id"
+          },
+          "response": []
+        },
+        {
+          "name": "move_knowledge_item_api_v1_knowledge_items__item_id__move_patch",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"brand_id\": \"value\",\n  \"folder_path\": \"value\",\n  \"item_id\": \"value\",\n  \"target_folder\": \"value\"\n}"
+            },
+            "description": "Move a knowledge item to another folder (legacy path-param route).",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PATCH",
+            "url": "{{baseUrl}}/api/v1/knowledge/items/:item_id/move"
+          },
+          "response": []
+        },
+        {
+          "name": "rename_knowledge_item_api_v1_knowledge_items__item_id__rename_patch",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"brand_id\": \"value\",\n  \"item_id\": \"value\",\n  \"name\": \"value\"\n}"
+            },
+            "description": "Rename a knowledge file or folder.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PATCH",
+            "url": "{{baseUrl}}/api/v1/knowledge/items/:item_id/rename"
+          },
+          "response": []
+        },
+        {
+          "name": "get_job_status_api_v1_knowledge_jobs__job_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get the status of an upload job.\n\nReturns:\n- status: pending, processing, completed, error\n- progress: details about what's been processed\n- error: error message if status is 'error'",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/knowledge/jobs/:job_id"
+          },
+          "response": []
+        },
+        {
+          "name": "get_products_by_skus_api_v1_knowledge_products_by_skus_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"skus\": [\n    \"value\"\n  ]\n}"
+            },
+            "description": "Fetch full product details by SKUs from the knowledge base.\n\nThis endpoint is used by the widget to build product cards from\n<product_info> tags that contain only product_sku.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/knowledge/products/by-skus"
+          },
+          "response": []
+        },
+        {
+          "name": "retrieve_knowledge_api_v1_knowledge_retrieve_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"brand_id\": \"value\",\n  \"folder\": \"value\",\n  \"folder_path\": \"value\",\n  \"limit\": 10,\n  \"query\": \"value\",\n  \"score_threshold\": 0.0,\n  \"top_k\": \"value\"\n}"
+            },
+            "description": "Run an admin retrieval preview across all knowledge or a selected folder.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/knowledge/retrieve"
+          },
+          "response": []
+        },
+        {
+          "name": "get_knowledge_tree_api_v1_knowledge_tree_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Return a filesystem-style folder/file tree for the knowledge base.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/knowledge/tree"
+          },
+          "response": []
+        },
+        {
+          "name": "upload_document_api_v1_knowledge_upload_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "formdata": [
+                {
+                  "key": "agent_id",
+                  "src": null,
+                  "type": "text",
+                  "value": "value"
+                },
+                {
+                  "key": "brand_id",
+                  "src": null,
+                  "type": "text",
+                  "value": "default"
+                },
+                {
+                  "key": "content_type",
+                  "src": null,
+                  "type": "text",
+                  "value": "guide"
+                },
+                {
+                  "key": "dealer_data",
+                  "src": null,
+                  "type": "text",
+                  "value": "value"
+                },
+                {
+                  "key": "file",
+                  "src": "",
+                  "type": "file",
+                  "value": ""
+                },
+                {
+                  "key": "folder_path",
+                  "src": null,
+                  "type": "text",
+                  "value": "value"
+                },
+                {
+                  "key": "product_data",
+                  "src": null,
+                  "type": "text",
+                  "value": "value"
+                }
+              ],
+              "mode": "formdata"
+            },
+            "description": "Upload a single document with structured metadata.\n\nSupports:\n- PDF, DOCX, TXT, MD, HTML, JSON, CSV files\n- Content types: product, dealer, faq, office, category, guide\n- Structured metadata for products and dealers\n\nThe document will be:\n1. Parsed and chunked\n2. Embedded using Voyage AI\n3. Stored in MongoDB with structured metadata",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/knowledge/upload"
+          },
+          "response": []
+        }
+      ],
+      "name": "knowledge"
+    },
+    {
+      "item": [
+        {
+          "name": "send_message_api_v1_messages__post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"conversation_id\": \"value\",\n  \"filters\": \"value\",\n  \"message\": \"value\",\n  \"page_context\": \"value\",\n  \"stream\": false,\n  \"user_id\": \"value\"\n}"
+            },
+            "description": "Send a message and get a response.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/messages/"
+          },
+          "response": []
+        },
+        {
+          "name": "get_widget_history_api_v1_messages_history_get",
+          "request": {
+            "description": "Return signed-session-bound conversation history for widget hydration.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/messages/history"
+          },
+          "response": []
+        },
+        {
+          "name": "delete_widget_privacy_data_api_v1_messages_privacy_delete",
+          "request": {
+            "description": "Erase first-party data for the signed widget subject and verify stores.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/messages/privacy"
+          },
+          "response": []
+        },
+        {
+          "name": "set_widget_privacy_consent_api_v1_messages_privacy_consent_put",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"long_term_memory_consent\": false,\n  \"policy_version\": \"value\"\n}"
+            },
+            "description": "Set signed-session consent for episodic (long-term) memory.\n\nConsent is intentionally narrower than use of the widget: declining it\nleaves the short-lived conversation available while removing remembered\nfacts and disabling future fact retrieval/extraction.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": "{{baseUrl}}/api/v1/messages/privacy/consent"
+          },
+          "response": []
+        },
+        {
+          "name": "export_widget_privacy_data_api_v1_messages_privacy_export_get",
+          "request": {
+            "description": "Return a no-store portable export for the signed widget subject.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/messages/privacy/export"
+          },
+          "response": []
+        },
+        {
+          "name": "start_session_api_v1_messages_session_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"long_term_memory_consent\": \"value\",\n  \"session_token\": \"value\"\n}"
+            },
+            "description": "Start or resume a widget chat session.\n\nReturns a signed token bound to a server-generated conversation_id and\nuser_id. Presenting a still-valid token resumes the same conversation\n(preserving short-term and episodic memory); otherwise a fresh identity is\nminted. The agent must exist and be active.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/messages/session"
+          },
+          "response": []
+        },
+        {
+          "name": "stream_message_api_v1_messages_stream_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"conversation_id\": \"value\",\n  \"filters\": \"value\",\n  \"message\": \"value\",\n  \"page_context\": \"value\",\n  \"stream\": false,\n  \"user_id\": \"value\"\n}"
+            },
+            "description": "Send a message and get a streaming response.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/messages/stream"
+          },
+          "response": []
+        }
+      ],
+      "name": "messages"
+    },
+    {
+      "item": [
+        {
+          "name": "list_public_agents_api_v1_public_agents_get",
+          "request": {
+            "description": "List Public Agents",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/public/agents"
+          },
+          "response": []
+        },
+        {
+          "name": "get_public_agent_api_v1_public_agents__agent_id__get",
+          "request": {
+            "description": "Get Public Agent",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/public/agents/:agent_id"
+          },
+          "response": []
+        },
+        {
+          "name": "get_public_brand_api_v1_public_brands__brand_id__get",
+          "request": {
+            "description": "Get Public Brand",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/public/brands/:brand_id"
+          },
+          "response": []
+        },
+        {
+          "name": "get_public_catalog_products_api_v1_public_catalog_products_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"skus\": [\n    \"value\"\n  ],\n  \"variant_ids\": [\n    \"value\"\n  ]\n}"
+            },
+            "description": "Hydrate legacy product references using the signed public widget session.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/public/catalog/products"
+          },
+          "response": []
+        }
+      ],
+      "name": "public"
+    },
+    {
+      "item": [
+        {
+          "name": "get_system_status_api_v1_status__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get overall system status.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/status/"
+          },
+          "response": []
+        },
+        {
+          "name": "health_check_api_v1_status_health_get",
+          "request": {
+            "description": "Public, dependency-backed health summary without operational detail.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/status/health"
+          },
+          "response": []
+        },
+        {
+          "name": "get_metrics_api_v1_status_metrics_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get system metrics.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/status/metrics"
+          },
+          "response": []
+        }
+      ],
+      "name": "status"
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    },
+    {
+      "key": "widgetSession",
+      "value": ""
+    }
+  ]
 }

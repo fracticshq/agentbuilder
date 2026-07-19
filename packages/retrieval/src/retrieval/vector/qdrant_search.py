@@ -76,6 +76,8 @@ class QdrantVectorSearch:
 
         start_time = time.time()
         query_embedding = await self.voyage.embed_query(query)
+        backend_status = "success"
+        backend_reason = None
         try:
             result = await self.client.search(
                 collection_name=self.collection_name,
@@ -89,6 +91,8 @@ class QdrantVectorSearch:
             if "Not found" in str(exc) or "doesn't exist" in str(exc):
                 logger.warning("Qdrant collection missing", collection=self.collection_name)
                 result = []
+                backend_status = "unavailable"
+                backend_reason = "collection_unavailable"
             else:
                 raise
 
@@ -101,6 +105,8 @@ class QdrantVectorSearch:
             search_type="qdrant",
             execution_time_ms=execution_time,
             metadata={"top_k": top_k, "threshold": similarity_threshold, "filters": filters or {}},
+            backend_status=backend_status,
+            backend_reason=backend_reason,
         )
 
     def _result_to_chunk(self, point: Any) -> DocumentChunk:

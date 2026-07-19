@@ -37,6 +37,11 @@ def valid_env():
         "VECTOR_INDEX_NAME": "vector_index",
         "VECTOR_DIMENSIONS": "1024",
         "STRAPI_API_TOKEN": "t" * 32,
+        "MCP_SERVICE_AUTH_TOKEN": "c" * 32,
+        "MALWARE_SCAN_MODE": "clamav",
+        "MALWARE_SCAN_HOST": "clamav.internal",
+        "MALWARE_SCAN_PORT": "3310",
+        "MALWARE_SCAN_TIMEOUT_SECONDS": "15",
         "SESSION_SECRET": "q" * 32,
         "DATABASE_HOST": "pg.postgres.database.azure.com",
         "DATABASE_NAME": "agentbuilder_strapi",
@@ -98,6 +103,15 @@ def test_validator_rejects_bad_url_scheme():
     assert any(result.key == "VOYAGE_BASE_URL" and result.status == "invalid" for result in results)
 
 
+def test_validator_rejects_non_private_malware_scanner_target():
+    env = valid_env()
+    env["MALWARE_SCAN_HOST"] = "http://127.0.0.1:3310"
+
+    results = validator.build_results("api", env)
+
+    assert any(result.key == "MALWARE_SCAN_HOST" and result.status == "invalid" for result in results)
+
+
 def test_validator_can_allow_missing_local_secrets_when_azure_secret_refs_exist():
     env = valid_env()
     env["AZURE_OPENAI_API_KEY"] = ""
@@ -109,3 +123,14 @@ def test_validator_can_allow_missing_local_secrets_when_azure_secret_refs_exist(
         for result in results
     )
     assert all(result.status not in {"missing", "invalid"} for result in results)
+
+
+def test_validator_requires_shared_mcp_service_token_for_api_and_shopify():
+    env = valid_env()
+    env["MCP_SERVICE_AUTH_TOKEN"] = ""
+
+    results = validator.build_results("all", env)
+    failures = {(result.service, result.key, result.status) for result in results}
+
+    assert ("api", "MCP_SERVICE_AUTH_TOKEN", "missing") in failures
+    assert ("shopify", "MCP_SERVICE_AUTH_TOKEN", "missing") in failures

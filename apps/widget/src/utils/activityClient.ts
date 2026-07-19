@@ -19,6 +19,7 @@ export interface TrackEventOptions {
   actor_id: string;
   agent_id: string;
   conversation_id: string;
+  sessionToken?: string;
   session_id?: string;
   payload?: Record<string, unknown>;
   page_context?: { url: string; title?: string };
@@ -28,7 +29,10 @@ export async function trackEvent(opts: TrackEventOptions): Promise<void> {
   try {
     await fetch(`${API_BASE}/api/v1/activity/events`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(opts.sessionToken ? { 'X-Widget-Session': opts.sessionToken } : {}),
+      },
       body: JSON.stringify(opts),
     });
   } catch {

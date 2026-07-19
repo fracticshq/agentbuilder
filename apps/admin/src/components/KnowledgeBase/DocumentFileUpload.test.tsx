@@ -1,16 +1,17 @@
+import { vi, type Mock } from 'vitest';
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import DocumentFileUpload from './DocumentFileUpload';
 import { knowledgeApi } from '../../api/knowledge';
 
-jest.mock('../../api/knowledge', () => ({
+vi.mock('../../api/knowledge', () => ({
   knowledgeApi: {
-    uploadDocument: jest.fn(),
+    uploadDocument: vi.fn(),
   },
 }));
 
-const mockUploadDocument = knowledgeApi.uploadDocument as jest.Mock;
+const mockUploadDocument = knowledgeApi.uploadDocument as Mock;
 
 beforeEach(() => {
   mockUploadDocument.mockReset();
@@ -24,9 +25,9 @@ test('accepts document files and uploads them to the knowledge API', async () =>
     items_count: 1,
     status: 'completed',
   });
-  const onComplete = jest.fn();
+  const onComplete = vi.fn();
 
-  render(<DocumentFileUpload brandId="brand-123" onComplete={onComplete} onBack={jest.fn()} />);
+  render(<DocumentFileUpload brandId="brand-123" onComplete={onComplete} onBack={vi.fn()} />);
 
   const file = new File(['hello'], 'guide.pdf', { type: 'application/pdf' });
   fireEvent.change(screen.getByTestId('document-file-input'), {
@@ -62,8 +63,8 @@ test('uploads documents into the selected folder path', async () => {
     <DocumentFileUpload
       brandId="brand-123"
       selectedFolder={{ id: 'folder-guides', path: '/guides', name: 'Guides' }}
-      onComplete={jest.fn()}
-      onBack={jest.fn()}
+      onComplete={vi.fn()}
+      onBack={vi.fn()}
     />
   );
 
@@ -86,7 +87,7 @@ test('uploads documents into the selected folder path', async () => {
 });
 
 test('rejects unsupported file extensions before upload', () => {
-  render(<DocumentFileUpload brandId="brand-123" onComplete={jest.fn()} onBack={jest.fn()} />);
+  render(<DocumentFileUpload brandId="brand-123" onComplete={vi.fn()} onBack={vi.fn()} />);
 
   const file = new File(['{}'], 'data.json', { type: 'application/json' });
   fireEvent.change(screen.getByTestId('document-file-input'), {

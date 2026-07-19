@@ -109,7 +109,7 @@ class GraphMemory:
             metadata=metadata or {}
         )
         
-        await self.rules_collection.insert_one(rule.dict())
+        await self.rules_collection.insert_one(rule.model_dump())
         
         logger.info("Rule added",
                    brand_id=brand_id,
@@ -270,7 +270,7 @@ class GraphMemory:
             enabled=enabled
         )
         
-        await self.escalations_collection.insert_one(trigger.dict())
+        await self.escalations_collection.insert_one(trigger.model_dump())
         
         logger.info("Escalation trigger added",
                    keywords=keywords,

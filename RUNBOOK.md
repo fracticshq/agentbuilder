@@ -91,3 +91,29 @@ one-off script used on 2026-06-23 is in this session's history.
 (live step timeline). Set per agent in Admin → Agent → Features → Activity Display.
 Default `basic`. The timeline is general (any agent) — it maps standard streaming
 events (`context_*`, `tool_*`, `connector_*`, `geocode_*`, `rag_context`, …).
+
+## Shopify catalog worker and webhook incidents
+
+Shopify imports and resyncs are now claimed by `catalog-sync-worker`, not a
+FastAPI background task. Check its logs and the catalog job before retrying:
+
+```bash
+docker compose logs --tail=200 catalog-sync-worker
+curl -H "Authorization: Bearer <dashboard-jwt>" \
+  "http://localhost:8000/api/v1/catalog/jobs/<job-id>?brand_id=<brand-id>"
+```
+
+For a stopped queue, first verify MongoDB health, then restart only the worker:
+
+```bash
+docker compose ps mongodb catalog-sync-worker
+docker compose restart catalog-sync-worker
+```
+
+Never run two manual imports to force a retry; the API deliberately coalesces
+them to one brand-scoped job. If `products/delete` or `app/uninstalled` webhooks
+are not reflected, verify `SHOPIFY_WEBHOOKS_ENABLED=true`, the shared
+`SHOPIFY_WEBHOOK_SECRET`, and the MCP bridge's
+`SHOPIFY_WEBHOOK_FORWARD_URL`. Do not acknowledge a webhook at a proxy unless
+the API queue returned success. The full topic/lifecycle contract is in
+[`docs/api/P5_SHOPIFY_OPERATIONS.md`](docs/api/P5_SHOPIFY_OPERATIONS.md).

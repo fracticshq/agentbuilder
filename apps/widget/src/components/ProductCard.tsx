@@ -35,7 +35,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
   useEffect(() => {
     setSelectedVariantId(getVariantId(defaultVariant));
     setImageError(false);
-  }, [defaultVariant?.variant_id, defaultVariant?.id]);
+  }, [defaultVariant]);
 
   const formatPrice = (price?: number, currency?: string) => {
     if (price === undefined) return 'Price on request';
@@ -84,8 +84,8 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
     e.stopPropagation();
     
     // Track view details
-    if (typeof window !== 'undefined' && (window as any).agentAnalytics) {
-      (window as any).agentAnalytics.track('product_view_details', {
+    if (typeof window !== 'undefined' && window.agentAnalytics) {
+      window.agentAnalytics.track('product_view_details', {
         sku: displayProduct.sku || 'unknown',
         name: displayProduct.name,
         variant_id: displayProduct.variant_id,

@@ -4,18 +4,106 @@ Supports both document uploads and bulk JSON imports with product/dealer data
 """
 
 import re
+import json
 from typing import Any, Dict, List, Optional, Literal
 from urllib.parse import urlsplit, urlunsplit
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, BackgroundTasks, Body
+from fastapi import APIRouter, UploadFile, File, Form, Depends, Header, HTTPException, Body
 from pydantic import BaseModel, Field
 import structlog
 
-from ....dependencies import get_settings, get_knowledge_service
-from ....auth.dependencies import require_dashboard_access
+from ....dependencies import get_ingestion_service, get_settings, get_knowledge_service
+from ....auth.dependencies import ensure_brand_access, ensure_permission, require_dashboard_access
+from ....auth.models import Permission, User
+from ....connections import connection_manager
 from ....services.knowledge_service import KnowledgeService
+from ....services.ingestion_service import (
+    IngestionIdempotencyConflictError,
+    IngestionService,
+    InvalidIngestionInputError,
+)
+from ....services.ingestion_payload_store import IngestionPayloadStoreError
+from ....services.job_store import JobStoreUnavailableError
+from ....security.malware_scanner import MalwareDetectedError, MalwareScannerUnavailableError
 
 logger = structlog.get_logger()
 router = APIRouter(dependencies=[Depends(require_dashboard_access)])
+
+
+def _authorize_brand(current_user: User | None, brand_id: str, permission: Permission) -> None:
+    """Enforce document permission and tenant scope before touching a brand DB."""
+    ensure_permission(current_user, permission)
+    ensure_brand_access(current_user, brand_id)
+
+
+async def _canonical_brand_id(system_db: Any, identifier: str) -> str:
+    """Resolve a brand ID or slug to its canonical ID for scope comparison."""
+    brand = await system_db.brands.find_one({
+        "$or": [
+            {"id": identifier},
+            {"slug": identifier},
+        ]
+    })
+    return str(brand.get("id") or identifier) if brand else identifier
+
+
+async def _authorize_brand_agent_scope(
+    current_user: User | None,
+    brand_id: str,
+    agent_id: Optional[str],
+    permission: Permission,
+) -> None:
+    """Authorize a brand and, when present, bind the agent to that exact tenant.
+
+    Knowledge APIs retain support for callers that use a brand slug, but the
+    agent's canonical brand record remains the authority.  This prevents a
+    valid tenant user from using another tenant's agent ID to scope a write or
+    read inside their own brand database.
+    """
+    ensure_permission(current_user, permission)
+    if not agent_id:
+        ensure_brand_access(current_user, brand_id)
+        return
+
+    system_db = connection_manager.get_system_db()
+    requested_brand_id = await _canonical_brand_id(system_db, brand_id)
+    ensure_brand_access(current_user, requested_brand_id)
+
+    agent = await system_db.agents.find_one({"id": agent_id})
+    if not agent or not agent.get("brand_id"):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    agent_brand_id = await _canonical_brand_id(system_db, str(agent["brand_id"]))
+    if agent_brand_id != requested_brand_id:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Authorize the canonical agent scope as well as the caller-supplied alias.
+    ensure_brand_access(current_user, agent_brand_id)
+
+
+async def _resolve_durable_knowledge_scope(
+    current_user: User | None,
+    brand_identifier: str,
+    agent_id: Optional[str],
+    permission: Permission,
+) -> dict[str, str | None]:
+    """Resolve the immutable brand/agent snapshot needed by a durable job."""
+    system_db = connection_manager.get_system_db()
+    brand = await system_db.brands.find_one({"$or": [{"id": brand_identifier}, {"slug": brand_identifier}]})
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    brand_id = brand.get("id")
+    brand_slug = brand.get("slug")
+    if not isinstance(brand_id, str) or not brand_id or not isinstance(brand_slug, str) or not brand_slug:
+        raise HTTPException(status_code=400, detail="Brand does not have a complete durable scope")
+    ensure_permission(current_user, permission)
+    ensure_brand_access(current_user, brand_id)
+    if agent_id:
+        agent = await system_db.agents.find_one({"id": agent_id}, {"brand_id": 1, "brand_slug": 1})
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if agent.get("brand_id") != brand_id or agent.get("brand_slug") != brand_slug:
+            raise HTTPException(status_code=404, detail="Agent not found")
+    return {"agent_id": agent_id, "brand_id": brand_id, "brand_slug": brand_slug}
 
 
 # ============================================================================
@@ -107,8 +195,10 @@ class BulkUploadItem(BaseModel):
 class BulkUploadRequest(BaseModel):
     """Request for bulk JSON upload."""
     content_type: Literal["product", "dealer"]
-    items: List[BulkUploadItem] = Field(..., min_items=1, max_items=1000)
+    items: List[BulkUploadItem] = Field(..., min_length=1, max_length=1000)
     brand_id: str = Field(..., description="Brand/Agent ID")
+    agent_id: Optional[str] = None
+    folder_path: Optional[str] = None
 
 
 class UploadResponse(BaseModel):
@@ -170,7 +260,6 @@ class KnowledgeRetrieveRequest(BaseModel):
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     content_type: str = Form("guide"),
     brand_id: str = Form("default"),
@@ -178,7 +267,10 @@ async def upload_document(
     folder_path: Optional[str] = Form(None),
     product_data: Optional[str] = Form(None),  # JSON string
     dealer_data: Optional[str] = Form(None),   # JSON string
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+    current_user: User | None = Depends(require_dashboard_access),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     """
     Upload a single document with structured metadata.
@@ -204,6 +296,15 @@ async def upload_document(
                     "Allowed: PDF, DOCX, TXT, MD, HTML, JSON, CSV"
                 )
             )
+
+        if content_type not in {"product", "dealer", "faq", "office", "category", "guide", "document"}:
+            raise HTTPException(status_code=422, detail="Unsupported knowledge content type")
+
+        # Resolve and snapshot canonical scope before the source bytes are
+        # persisted. No background task is allowed to retain request memory.
+        scope = await _resolve_durable_knowledge_scope(
+            current_user, brand_id, agent_id, Permission.DOCUMENT_WRITE
+        )
         
         # Parse structured metadata if provided
         import json
@@ -232,32 +333,41 @@ async def upload_document(
                 detail=f"File {file.filename} exceeds the {get_settings().MAX_FILE_SIZE_MB}MB upload limit"
             )
 
-        # Start ingestion job
-        job_id = await knowledge_service.start_document_upload(
-            content=content,
-            filename=file.filename,
-            content_type_header=file.content_type,
-            kb_content_type=content_type,
-            brand_id=brand_id,
-            agent_id=agent_id,
-            product_data=parsed_product_data,
-            dealer_data=parsed_dealer_data,
-            folder_path=folder_path,
+        normalized_product_data = None
+        if parsed_product_data:
+            configured_default_currency = await knowledge_service._resolve_configured_default_currency(
+                str(scope["brand_id"]), scope
+            )
+            currency, currency_source = knowledge_service._resolve_item_currency(
+                parsed_product_data,
+                configured_default_currency,
+            )
+            normalized_product_data = parsed_product_data.model_dump(exclude_none=True)
+            normalized_product_data["currency"] = currency
+            normalized_product_data["currency_source"] = currency_source
+        context = {
+            "kb_content_type": content_type,
+            "folder_path": folder_path or "/",
+            **({"product_data": normalized_product_data} if normalized_product_data else {}),
+            **({"dealer_data": parsed_dealer_data.model_dump(exclude_none=True)} if parsed_dealer_data else {}),
+        }
+        chunk_size, chunk_overlap = ingestion_service.snapshot_chunking_from_agent(
+            {"configuration": {}} if not scope["agent_id"] else await connection_manager.get_system_db().agents.find_one({"id": scope["agent_id"]}) or {}
         )
-        
-        # Process in background
-        background_tasks.add_task(
-            knowledge_service.process_document_upload,
-            job_id=job_id,
-            content=content,
-            filename=file.filename,
-            content_type_header=file.content_type,
-            kb_content_type=content_type,
-            brand_id=brand_id,
-            agent_id=agent_id,
-            product_data=parsed_product_data,
-            dealer_data=parsed_dealer_data,
-            folder_path=folder_path,
+        job_id = await ingestion_service.submit_durable_job(
+            [{
+                "content": content,
+                "filename": file.filename or "upload",
+                "content_type": file.content_type or "application/octet-stream",
+                "context": context,
+            }],
+            agent_id=scope["agent_id"],
+            brand_id=str(scope["brand_id"]),
+            brand_slug=str(scope["brand_slug"]),
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            idempotency_key=idempotency_key,
+            job_metadata={"submission_kind": "knowledge_document", "items_count": 1},
         )
         
         logger.info(
@@ -265,8 +375,8 @@ async def upload_document(
             job_id=job_id,
             filename=file.filename,
             content_type=content_type,
-            brand_id=brand_id,
-            agent_id=agent_id,
+            brand_id=scope["brand_id"],
+            agent_id=scope["agent_id"],
             folder_path=folder_path,
             source_type=source_type,
             has_product_data=parsed_product_data is not None,
@@ -278,21 +388,33 @@ async def upload_document(
             job_id=job_id,
             message=f"Document upload started: {file.filename}",
             items_count=1,
-            status="processing"
+            status="pending"
         )
         
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error("Document upload failed", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    except IngestionIdempotencyConflictError:
+        raise HTTPException(status_code=409, detail="Idempotency key was already used for a different upload")
+    except MalwareDetectedError:
+        raise HTTPException(status_code=422, detail="Upload rejected by malware scanning policy")
+    except MalwareScannerUnavailableError:
+        raise HTTPException(status_code=503, detail="Upload scanning is temporarily unavailable")
+    except InvalidIngestionInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except (JobStoreUnavailableError, IngestionPayloadStoreError):
+        raise HTTPException(status_code=503, detail="Knowledge ingestion is temporarily unavailable")
+    except Exception as exc:
+        logger.error("knowledge_document_submission_failed", error_type=type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Document upload failed")
 
 
 @router.post("/bulk-upload", response_model=UploadResponse)
 async def bulk_upload_json(
-    background_tasks: BackgroundTasks,
     request: BulkUploadRequest = Body(...),
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     """
     Bulk upload products or dealers from JSON.
@@ -327,12 +449,15 @@ async def bulk_upload_json(
     ```
     """
     try:
+        scope = await _resolve_durable_knowledge_scope(
+            current_user, request.brand_id, request.agent_id, Permission.DOCUMENT_WRITE
+        )
         # Validate items based on content_type
         if request.content_type == "product":
             for i, item in enumerate(request.items):
                 missing = []
                 # Convert to dict for easier validation
-                item_dict = item.dict() if hasattr(item, 'dict') else item
+                item_dict = item.model_dump() if hasattr(item, "model_dump") else item
                 
                 if not item_dict.get("sku"):
                     missing.append("sku")
@@ -353,7 +478,7 @@ async def bulk_upload_json(
             for i, item in enumerate(request.items):
                 missing = []
                 # Convert to dict for easier validation
-                item_dict = item.dict() if hasattr(item, 'dict') else item
+                item_dict = item.model_dump() if hasattr(item, "model_dump") else item
                 
                 if not item_dict.get("dealer_id"):
                     missing.append("dealer_id")
@@ -370,20 +495,48 @@ async def bulk_upload_json(
                         detail=f"Item {i + 1}: Missing required dealer fields: {', '.join(missing)}"
                     )
         
-        # Start bulk ingestion job
-        job_id = await knowledge_service.start_bulk_upload(
-            content_type=request.content_type,
-            items=request.items,
-            brand_id=request.brand_id
+        configured_default_currency = await knowledge_service._resolve_configured_default_currency(
+            str(scope["brand_id"]), scope
+        ) if request.content_type == "product" else None
+        normalized_items = []
+        for item in request.items:
+            normalized_item = item.model_dump(exclude_none=True)
+            if request.content_type == "product":
+                currency, currency_source = knowledge_service._resolve_item_currency(item, configured_default_currency)
+                normalized_item["currency"] = currency
+                normalized_item["currency_source"] = currency_source
+            normalized_items.append(normalized_item)
+        serialized_items = json.dumps(
+            normalized_items,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        max_file_bytes = get_settings().MAX_FILE_SIZE_MB * 1024 * 1024
+        if len(serialized_items) > max_file_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Bulk upload exceeds the {get_settings().MAX_FILE_SIZE_MB}MB upload limit",
+            )
+        chunk_size, chunk_overlap = ingestion_service.snapshot_chunking_from_agent(
+            {"configuration": {}} if not scope["agent_id"] else await connection_manager.get_system_db().agents.find_one({"id": scope["agent_id"]}) or {}
         )
-        
-        # Process in background
-        background_tasks.add_task(
-            knowledge_service.process_bulk_upload,
-            job_id=job_id,
-            content_type=request.content_type,
-            items=request.items,
-            brand_id=request.brand_id
+        job_id = await ingestion_service.submit_durable_job(
+            [{
+                "content": serialized_items,
+                "filename": f"bulk-{request.content_type}.json",
+                "content_type": "application/json",
+                "context": {
+                    "kb_content_type": request.content_type,
+                    "folder_path": request.folder_path or "/",
+                },
+            }],
+            agent_id=scope["agent_id"],
+            brand_id=str(scope["brand_id"]),
+            brand_slug=str(scope["brand_slug"]),
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            idempotency_key=idempotency_key,
+            job_metadata={"submission_kind": "knowledge_bulk", "items_count": len(request.items)},
         )
         
         logger.info(
@@ -391,7 +544,7 @@ async def bulk_upload_json(
             job_id=job_id,
             content_type=request.content_type,
             items_count=len(request.items),
-            brand_id=request.brand_id
+            brand_id=scope["brand_id"],
         )
         
         return UploadResponse(
@@ -399,14 +552,24 @@ async def bulk_upload_json(
             job_id=job_id,
             message=f"Bulk upload started: {len(request.items)} {request.content_type}s",
             items_count=len(request.items),
-            status="processing"
+            status="pending"
         )
         
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error("Bulk upload failed", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Bulk upload failed: {str(e)}")
+    except IngestionIdempotencyConflictError:
+        raise HTTPException(status_code=409, detail="Idempotency key was already used for a different upload")
+    except MalwareDetectedError:
+        raise HTTPException(status_code=422, detail="Upload rejected by malware scanning policy")
+    except MalwareScannerUnavailableError:
+        raise HTTPException(status_code=503, detail="Upload scanning is temporarily unavailable")
+    except InvalidIngestionInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except (JobStoreUnavailableError, IngestionPayloadStoreError):
+        raise HTTPException(status_code=503, detail="Knowledge ingestion is temporarily unavailable")
+    except Exception as exc:
+        logger.error("knowledge_bulk_submission_failed", error_type=type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Bulk upload failed")
 
 
 @router.get("/tree")
@@ -414,16 +577,22 @@ async def get_knowledge_tree(
     brand_id: str,
     agent_id: Optional[str] = None,
     folder: Optional[str] = None,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Return a filesystem-style folder/file tree for the knowledge base."""
     try:
+        await _authorize_brand_agent_scope(
+            current_user, brand_id, agent_id, Permission.DOCUMENT_READ
+        )
         tree = await knowledge_service.list_knowledge_tree(
             brand_id=brand_id,
             agent_id=agent_id,
             folder=folder,
         )
         return {"success": True, **tree}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to get knowledge tree", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to get knowledge tree: {str(e)}")
@@ -432,10 +601,14 @@ async def get_knowledge_tree(
 @router.post("/folders")
 async def create_folder(
     request: FolderCreateRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Create or ensure a knowledge folder."""
     try:
+        await _authorize_brand_agent_scope(
+            current_user, request.brand_id, request.agent_id, Permission.DOCUMENT_WRITE
+        )
         folder = await knowledge_service.create_folder(
             brand_id=request.brand_id,
             path=request.path or knowledge_service.folder_path_from_name(
@@ -445,6 +618,8 @@ async def create_folder(
             agent_id=request.agent_id,
         )
         return {"success": True, "folder": folder}
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -455,13 +630,17 @@ async def create_folder(
 @router.patch("/items/move")
 async def move_knowledge_item_by_body(
     request: KnowledgeMoveRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Move a knowledge item (file or folder) — id carried in the body so folder
     paths with slashes route correctly."""
     if not request.item_id:
         raise HTTPException(status_code=400, detail="item_id is required")
     try:
+        await _authorize_brand_agent_scope(
+            current_user, request.brand_id, request.agent_id, Permission.DOCUMENT_WRITE
+        )
         item = await knowledge_service.move_item(
             brand_id=request.brand_id,
             item_id=request.item_id,
@@ -483,12 +662,16 @@ async def move_knowledge_item_by_body(
 @router.patch("/items/rename")
 async def rename_knowledge_item_by_body(
     request: KnowledgeRenameRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Rename a knowledge item (file or folder) — id carried in the body."""
     if not request.item_id:
         raise HTTPException(status_code=400, detail="item_id is required")
     try:
+        await _authorize_brand_agent_scope(
+            current_user, request.brand_id, request.agent_id, Permission.DOCUMENT_WRITE
+        )
         item = await knowledge_service.rename_item(
             brand_id=request.brand_id,
             item_id=request.item_id,
@@ -512,11 +695,15 @@ async def delete_knowledge_item_by_query(
     item_id: str,
     brand_id: str,
     agent_id: Optional[str] = None,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Delete a knowledge item (file or folder) — id in query so folder paths
     with slashes route correctly. Folders reparent their documents to the parent."""
     try:
+        await _authorize_brand_agent_scope(
+            current_user, brand_id, agent_id, Permission.DOCUMENT_DELETE
+        )
         result = await knowledge_service.delete_item(item_id, brand_id=brand_id, agent_id=agent_id)
         if not result.get("deleted"):
             raise HTTPException(status_code=404, detail=f"Knowledge item not found: {item_id}")
@@ -532,10 +719,14 @@ async def delete_knowledge_item_by_query(
 async def move_knowledge_item(
     item_id: str,
     request: KnowledgeMoveRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Move a knowledge item to another folder (legacy path-param route)."""
     try:
+        await _authorize_brand_agent_scope(
+            current_user, request.brand_id, request.agent_id, Permission.DOCUMENT_WRITE
+        )
         item = await knowledge_service.move_item(
             brand_id=request.brand_id,
             item_id=item_id,
@@ -558,10 +749,14 @@ async def move_knowledge_item(
 async def rename_knowledge_item(
     item_id: str,
     request: KnowledgeRenameRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Rename a knowledge file or folder."""
     try:
+        await _authorize_brand_agent_scope(
+            current_user, request.brand_id, request.agent_id, Permission.DOCUMENT_WRITE
+        )
         item = await knowledge_service.rename_item(
             brand_id=request.brand_id,
             item_id=item_id,
@@ -584,10 +779,12 @@ async def rename_knowledge_item(
 async def delete_knowledge_item(
     item_id: str,
     brand_id: str,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Delete a knowledge item and its chunks (legacy path-param route)."""
     try:
+        _authorize_brand(current_user, brand_id, Permission.DOCUMENT_DELETE)
         result = await knowledge_service.delete_item(item_id, brand_id=brand_id)
         if not result.get("deleted"):
             raise HTTPException(status_code=404, detail=f"Knowledge item not found: {item_id}")
@@ -602,10 +799,14 @@ async def delete_knowledge_item(
 @router.post("/retrieve")
 async def retrieve_knowledge(
     request: KnowledgeRetrieveRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Run an admin retrieval preview across all knowledge or a selected folder."""
     try:
+        await _authorize_brand_agent_scope(
+            current_user, request.brand_id, request.agent_id, Permission.DOCUMENT_READ
+        )
         chunks = await knowledge_service.retrieve(
             brand_id=request.brand_id,
             query=request.query,
@@ -615,6 +816,8 @@ async def retrieve_knowledge(
             score_threshold=request.score_threshold,
         )
         return {"success": True, "query": request.query, "chunks": chunks, "results": chunks, "count": len(chunks)}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to retrieve knowledge", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to retrieve knowledge: {str(e)}")
@@ -623,7 +826,8 @@ async def retrieve_knowledge(
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(
     job_id: str,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     Get the status of an upload job.
@@ -634,6 +838,35 @@ async def get_job_status(
     - error: error message if status is 'error'
     """
     try:
+        job = await knowledge_service.job_store.get(job_id)
+        if not job or not job.get("brand_id"):
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+        _authorize_brand(current_user, str(job["brand_id"]), Permission.DOCUMENT_READ)
+        if job.get("queue_version") == 2:
+            internal_status = str(job.get("status") or "error")
+            public_status = {
+                "queued": "pending",
+                "running": "processing",
+                "publishing": "processing",
+                "cancelled": "error",
+            }.get(internal_status, internal_status)
+            items_count = int(job.get("items_count") or job.get("files_count") or 0)
+            progress = {
+                "type": job.get("submission_kind") or "document",
+                # A durable worker stages source files atomically and publishes
+                # deterministic chunks. Before completion, items are not yet
+                # visible, so do not report partially published product data.
+                "processed_items": items_count if public_status == "completed" else 0,
+                "total_items": items_count,
+                "processed_chunks": 0,
+                "total_chunks": 0,
+            }
+            return JobStatusResponse(
+                job_id=job_id,
+                status=public_status if public_status in {"pending", "processing", "completed", "error"} else "error",
+                progress=progress,
+                error="Document processing failed" if public_status == "error" else None,
+            )
         status_data = await knowledge_service.get_job_status(job_id)
         
         if not status_data:
@@ -654,7 +887,8 @@ async def list_documents(
     content_type: Optional[str] = None,
     limit: int = 50,
     skip: int = 0,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     List documents in knowledge base.
@@ -666,6 +900,7 @@ async def list_documents(
     - skip: Number of documents to skip (default: 0)
     """
     try:
+        _authorize_brand(current_user, brand_id, Permission.DOCUMENT_READ)
         documents = await knowledge_service.list_documents(
             brand_id=brand_id,
             content_type=content_type,
@@ -678,7 +913,8 @@ async def list_documents(
             "documents": documents,
             "count": len(documents)
         }
-        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to list documents", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
@@ -689,7 +925,8 @@ async def get_document_preview(
     doc_id: str,
     brand_id: str,
     limit: int = 8,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     Fetch source metadata and sample chunks/items for preview.
@@ -699,6 +936,7 @@ async def get_document_preview(
     - limit: Maximum number of sample chunks/items to return
     """
     try:
+        _authorize_brand(current_user, brand_id, Permission.DOCUMENT_READ)
         preview = await knowledge_service.get_document_preview(
             doc_id=doc_id,
             brand_id=brand_id,
@@ -719,11 +957,82 @@ async def get_document_preview(
         raise HTTPException(status_code=500, detail=f"Failed to preview document: {str(e)}")
 
 
+@router.post(
+    "/documents/{doc_id}/reindex",
+    response_model=UploadResponse,
+    responses={
+        400: {"description": "Invalid durable re-index request"},
+        404: {"description": "Brand, agent, or document not found"},
+        409: {"description": "Idempotency key conflicts with another re-index request"},
+        503: {"description": "Durable job storage is temporarily unavailable"},
+    },
+)
+async def reindex_document(
+    doc_id: str,
+    brand_id: str,
+    agent_id: Optional[str] = None,
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+    current_user: User | None = Depends(require_dashboard_access),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+):
+    """Queue a durable in-place vector refresh for one document/job batch.
+
+    Re-indexing re-embeds already published chunks under their current logical
+    IDs. It does not re-upload source bytes or duplicate the document, and it
+    does not report terminal success until every target chunk is refreshed.
+    """
+    try:
+        scope = await _resolve_durable_knowledge_scope(
+            current_user, brand_id, agent_id, Permission.DOCUMENT_WRITE
+        )
+        preview = await knowledge_service.get_document_preview(
+            doc_id,
+            str(scope["brand_id"]),
+            limit=1,
+        )
+        if not preview:
+            raise HTTPException(status_code=404, detail="Document not found")
+        chunk_size, chunk_overlap = ingestion_service.snapshot_chunking_from_agent(
+            {"configuration": {}}
+            if not scope["agent_id"]
+            else await connection_manager.get_system_db().agents.find_one({"id": scope["agent_id"]}) or {}
+        )
+        job_id = await ingestion_service.submit_reindex_job(
+            document_id=doc_id,
+            agent_id=scope["agent_id"],
+            brand_id=str(scope["brand_id"]),
+            brand_slug=str(scope["brand_slug"]),
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            idempotency_key=idempotency_key,
+        )
+        return UploadResponse(
+            success=True,
+            job_id=job_id,
+            message="Knowledge re-index queued",
+            items_count=1,
+            status="pending",
+        )
+    except HTTPException:
+        raise
+    except IngestionIdempotencyConflictError:
+        raise HTTPException(status_code=409, detail="Idempotency key was already used for a different re-index request")
+    except InvalidIngestionInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except JobStoreUnavailableError:
+        raise HTTPException(status_code=503, detail="Knowledge re-indexing is temporarily unavailable")
+    except Exception as exc:
+        logger.error("knowledge_reindex_submission_failed", doc_id=doc_id, error_type=type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Knowledge re-index request failed")
+
+
 @router.delete("/documents/{doc_id}")
 async def delete_document(
     doc_id: str,
     brand_id: str,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     Delete a document and all its chunks.
@@ -735,6 +1044,7 @@ async def delete_document(
     - brand_id: Brand/agent ID for authorization
     """
     try:
+        _authorize_brand(current_user, brand_id, Permission.DOCUMENT_DELETE)
         deleted_count = await knowledge_service.delete_document(
             doc_id=doc_id,
             brand_id=brand_id
@@ -896,7 +1206,12 @@ async def _hydrate_product_cards(kb_collection: Any, products: List[Dict[str, An
         )[0]
         siblings: List[Dict[str, Any]] = []
         for query in _variant_group_queries(selected):
-            cursor = kb_collection.find({"content_type": "product", **query})
+            cursor = kb_collection.find({
+                "content_type": "product",
+                "product_data.source_active": {"$ne": False},
+                "metadata.catalog_source.active": {"$ne": False},
+                **query,
+            })
             async for doc in cursor:
                 product_data = doc.get("product_data", {})
                 if product_data and product_data.get("sku"):
@@ -945,7 +1260,8 @@ async def _hydrate_product_cards(kb_collection: Any, products: List[Dict[str, An
 @router.post("/products/by-skus")
 async def get_products_by_skus(
     request: ProductsBySkusRequest,
-    knowledge_service: KnowledgeService = Depends(get_knowledge_service)
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """
     Fetch full product details by SKUs from the knowledge base.
@@ -962,6 +1278,9 @@ async def get_products_by_skus(
         
         if not agent:
             raise HTTPException(status_code=404, detail=f"Agent not found: {request.agent_id}")
+
+        ensure_permission(current_user, Permission.DOCUMENT_READ)
+        ensure_brand_access(current_user, agent.get("brand_id"))
         
         brand_slug = agent.get('brand_slug')
         if not brand_slug:
@@ -992,7 +1311,9 @@ async def get_products_by_skus(
         matched_products = []
         cursor = kb_collection.find({
             'content_type': 'product',
-            'product_data.sku': {'$in': request.skus}
+            'product_data.sku': {'$in': request.skus},
+            'product_data.source_active': {'$ne': False},
+            'metadata.catalog_source.active': {'$ne': False},
         })
         
         async for doc in cursor:

@@ -4,18 +4,17 @@ import SyncSettingsModal from '../SyncSettingsModal';
 
 interface ShopifyTabProps {
   brandId: string;
-  onUpload: (data: any[]) => void;
   onBack: () => void;
 }
 
-export default function ShopifyTab({ brandId, onUpload, onBack }: ShopifyTabProps) {
+export default function ShopifyTab({ brandId, onBack }: ShopifyTabProps) {
   const [storeUrl, setStoreUrl] = useState('');
   const [accessToken, setAccessToken] = useState('');
   const [fallbackCurrency, setFallbackCurrency] = useState('');
   const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
   const [progress, setProgress] = useState(0);
   const [totalItems, setTotalItems] = useState(0);
-  const [items, setItems] = useState<any[]>([]);
+  const [syncCounts, setSyncCounts] = useState<{ products_upserted?: number; products_marked_inactive?: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSyncModal, setShowSyncModal] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -26,7 +25,7 @@ export default function ShopifyTab({ brandId, onUpload, onBack }: ShopifyTabProp
     if (!storeUrl.trim()) return;
     setStatus('loading');
     setError(null);
-    setItems([]);
+    setSyncCounts(null);
     setProgress(0);
     setTotalItems(0);
     try {
@@ -38,12 +37,12 @@ export default function ShopifyTab({ brandId, onUpload, onBack }: ShopifyTabProp
       );
       pollRef.current = setInterval(async () => {
         try {
-          const job = await catalogApi.getJob(job_id);
+          const job = await catalogApi.getJob(job_id, brandId);
           setProgress(job.processed || 0);
           setTotalItems(job.total || 0);
           if (job.status === 'completed') {
             clearInterval(pollRef.current!);
-            setItems(job.items || []);
+            setSyncCounts(job.counts || null);
             setStatus('done');
           } else if (job.status === 'error') {
             clearInterval(pollRef.current!);
@@ -123,7 +122,7 @@ export default function ShopifyTab({ brandId, onUpload, onBack }: ShopifyTabProp
       </div>
 
       <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
-        {accessToken.trim() ? 'The token is sent only to the encrypted sync configuration and is never returned in the dashboard.' : 'No token entered: this uses the public endpoint and may miss private products or store currency.'}
+        {accessToken.trim() ? 'The token is sent only to the encrypted sync configuration and is never returned in the dashboard.' : 'A saved Admin API token is required. Open Sync Settings to save one before starting a production catalog sync.'}
       </p>
 
       {/* Progress */}
@@ -157,10 +156,10 @@ export default function ShopifyTab({ brandId, onUpload, onBack }: ShopifyTabProp
       {status === 'done' && (
         <div className="rounded-md bg-green-50 border border-green-200 p-4">
           <p className="text-sm text-green-800 font-medium">
-            {items.length} products fetched from {storeUrl}
+            Catalog sync complete for {storeUrl}
           </p>
           <p className="text-xs text-green-700 mt-1">
-            Review and map fields in the next step.
+            {syncCounts?.products_upserted ?? 0} product variants updated and {syncCounts?.products_marked_inactive ?? 0} stale variants deactivated. Products are already indexed; no field mapping or second import is needed.
           </p>
         </div>
       )}
@@ -183,10 +182,10 @@ export default function ShopifyTab({ brandId, onUpload, onBack }: ShopifyTabProp
           </button>
         ) : (
           <button
-            onClick={() => onUpload(items)}
+            onClick={onBack}
             className="px-6 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-md"
           >
-            Next: Map Fields →
+            Back to upload methods
           </button>
         )}
       </div>

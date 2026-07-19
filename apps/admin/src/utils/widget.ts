@@ -1,6 +1,6 @@
 export function getWidgetBaseUrl(): string {
   const runtimeWidgetUrl = window.__APP_CONFIG__?.WIDGET_BASE_URL;
-  const envWidgetUrl = process.env.REACT_APP_WIDGET_URL;
+  const envWidgetUrl = import.meta.env.VITE_WIDGET_URL;
   return (runtimeWidgetUrl || envWidgetUrl || 'http://localhost:5174').replace(/\/+$/, '');
 }
 

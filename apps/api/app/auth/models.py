@@ -5,7 +5,7 @@ Authentication data models.
 from datetime import datetime
 from enum import Enum
 from typing import Optional, List
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 from bson import ObjectId
 
 
@@ -40,6 +40,16 @@ class Permission(str, Enum):
     # Message permissions
     MESSAGE_READ = "message:read"
     MESSAGE_WRITE = "message:write"
+
+    # Privacy lifecycle permissions
+    PRIVACY_READ = "privacy:read"
+    PRIVACY_WRITE = "privacy:write"
+    PRIVACY_DELETE = "privacy:delete"
+
+    # Staging-quality evidence permissions. These deliberately do not grant
+    # provider execution or access to customer evaluation data.
+    EVALUATION_READ = "evaluation:read"
+    EVALUATION_REVIEW = "evaluation:review"
     
     # API Key permissions
     API_KEY_READ = "api_key:read"
@@ -61,6 +71,8 @@ ADMIN_PERMISSIONS = [
     Permission.AGENT_READ, Permission.AGENT_WRITE, Permission.AGENT_DELETE,
     Permission.DOCUMENT_READ, Permission.DOCUMENT_WRITE, Permission.DOCUMENT_DELETE,
     Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
+    Permission.PRIVACY_READ, Permission.PRIVACY_WRITE, Permission.PRIVACY_DELETE,
+    Permission.EVALUATION_READ, Permission.EVALUATION_REVIEW,
     Permission.API_KEY_READ, Permission.API_KEY_WRITE, Permission.API_KEY_DELETE,
     Permission.USER_READ, Permission.USER_WRITE, Permission.USER_DELETE,
     Permission.SYSTEM_ADMIN,
@@ -71,6 +83,8 @@ BRAND_ADMIN_PERMISSIONS = [
     Permission.AGENT_READ, Permission.AGENT_WRITE, Permission.AGENT_DELETE,
     Permission.DOCUMENT_READ, Permission.DOCUMENT_WRITE, Permission.DOCUMENT_DELETE,
     Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
+    Permission.PRIVACY_READ, Permission.PRIVACY_WRITE, Permission.PRIVACY_DELETE,
+    Permission.EVALUATION_READ, Permission.EVALUATION_REVIEW,
     Permission.API_KEY_READ, Permission.API_KEY_WRITE, Permission.API_KEY_DELETE,
 ]
 
@@ -79,6 +93,7 @@ OPERATOR_PERMISSIONS = [
     Permission.AGENT_READ,
     Permission.DOCUMENT_READ,
     Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
+    Permission.EVALUATION_READ, Permission.EVALUATION_REVIEW,
 ]
 
 
@@ -109,6 +124,8 @@ ROLE_PERMISSIONS = {
 
 class User(BaseModel):
     """User model."""
+    model_config = ConfigDict(populate_by_name=True)
+
     id: Optional[str] = Field(default=None, alias="_id")
     email: EmailStr
     username: str
@@ -125,13 +142,6 @@ class User(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     metadata: dict = Field(default_factory=dict)
     
-    class Config:
-        populate_by_name = True
-        json_encoders = {
-            ObjectId: str,
-            datetime: lambda v: v.isoformat()
-        }
-
     @model_validator(mode="before")
     @classmethod
     def normalize_legacy_fields(cls, data):
@@ -198,6 +208,8 @@ class UserUpdate(BaseModel):
 
 class UserResponse(BaseModel):
     """User response model (excludes password)."""
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str = Field(alias="_id")
     email: EmailStr
     username: str
@@ -209,10 +221,6 @@ class UserResponse(BaseModel):
     last_login: Optional[datetime]
     created_at: datetime
     
-    class Config:
-        populate_by_name = True
-
-
 class Token(BaseModel):
     """Token response model."""
     access_token: str
@@ -232,6 +240,8 @@ class TokenData(BaseModel):
 
 class RefreshToken(BaseModel):
     """Refresh token model."""
+    model_config = ConfigDict(populate_by_name=True)
+
     id: Optional[str] = Field(default=None, alias="_id")
     token_hash: str
     user_id: str
@@ -241,12 +251,10 @@ class RefreshToken(BaseModel):
     revoked_at: Optional[datetime] = None
     device_info: Optional[str] = None
     
-    class Config:
-        populate_by_name = True
-
-
 class APIKey(BaseModel):
     """API Key model."""
+    model_config = ConfigDict(populate_by_name=True)
+
     id: Optional[str] = Field(default=None, alias="_id")
     key_id: str  # First 8 chars of key (public identifier)
     key_hash: str  # Hashed full key
@@ -267,9 +275,6 @@ class APIKey(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     revoked_at: Optional[datetime] = None
     
-    class Config:
-        populate_by_name = True
-
     @model_validator(mode="before")
     @classmethod
     def normalize_legacy_fields(cls, data):
@@ -317,6 +322,8 @@ class APIKeyCreate(BaseModel):
 
 class APIKeyResponse(BaseModel):
     """API Key response model."""
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str = Field(alias="_id")
     key_id: str
     key: Optional[str] = None  # Only returned on creation
@@ -329,10 +336,6 @@ class APIKeyResponse(BaseModel):
     expires_at: Optional[datetime]
     created_at: datetime
     
-    class Config:
-        populate_by_name = True
-
-
 class LoginRequest(BaseModel):
     """Login request model."""
     username: str  # Can be email or username

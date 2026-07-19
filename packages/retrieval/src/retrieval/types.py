@@ -2,7 +2,7 @@
 Type definitions for retrieval package
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Literal, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
 
@@ -40,6 +40,15 @@ class SearchResult(BaseModel):
     
     execution_time_ms: float = 0.0
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    # Search implementations use this to signal that they deliberately did
+    # not execute a query (for example, after an authentication failure).  An
+    # empty ``chunks`` list with ``backend_status="success"`` is grounded
+    # evidence that this backend found no matches; ``unavailable`` is not.
+    backend_status: Literal["success", "unavailable"] = "success"
+    backend_reason: Optional[
+        Literal["authentication_failed", "backend_unavailable", "collection_unavailable"]
+    ] = None
 
 
 class RetrievalContext(BaseModel):

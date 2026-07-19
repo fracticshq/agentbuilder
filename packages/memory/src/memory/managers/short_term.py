@@ -102,7 +102,7 @@ class ShortTermMemory:
         )
         
         # Store in MongoDB
-        message_doc = message.dict()
+        message_doc = message.model_dump()
         await self.collection.insert_one(message_doc)
         
         logger.debug("Message added to short-term memory",
@@ -131,9 +131,12 @@ class ShortTermMemory:
         Returns:
             List of Message objects
         """
+        # Fetch the newest messages first, then restore chronological order.
+        # Sorting ascending before applying the limit silently returns the
+        # oldest context and causes the agent to forget recent turns.
         cursor = self.collection.find(
             {"conversation_id": conversation_id}
-        ).sort("timestamp", 1).limit(limit)
+        ).sort("timestamp", -1).limit(limit)
         
         messages = []
         async for doc in cursor:
@@ -144,6 +147,8 @@ class ShortTermMemory:
             except Exception as e:
                 logger.warning("Failed to parse message", error=str(e))
         
+        messages.reverse()
+
         logger.debug("Retrieved recent messages",
                     conversation_id=conversation_id,
                     count=len(messages))
@@ -251,7 +256,7 @@ class ShortTermMemory:
         )
         
         # Store summary
-        await self.summaries.insert_one(summary.dict())
+        await self.summaries.insert_one(summary.model_dump())
         
         logger.info("Conversation summary created",
                    conversation_id=conversation_id,
@@ -318,8 +323,8 @@ class ShortTermMemory:
             "conversation_id": conversation_id,
             "message_count": len(messages),
             "turn_count": await self.get_turn_count(conversation_id),
-            "recent_messages": [m.dict() for m in messages],
-            "summaries": [s.dict() for s in summaries],
+            "recent_messages": [m.model_dump() for m in messages],
+            "summaries": [s.model_dump() for s in summaries],
             "has_summaries": len(summaries) > 0
         }
     

@@ -64,6 +64,7 @@ export const knowledgeApi = {
     content_type: 'product' | 'dealer';
     items: Array<ProductData | DealerData>;
     brand_id: string;
+    agent_id?: string;
     folder_id?: string | null;
     folder_path?: string;
   }): Promise<UploadDocumentResponse> {

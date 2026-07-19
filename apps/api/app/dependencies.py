@@ -10,6 +10,7 @@ from .services.knowledge_service import KnowledgeService
 from .services.activity_service import ActivityService
 from .services.observability_service import ObservabilityService
 from .services.runtime_settings_service import RuntimeSettingsService
+from .services.catalog_sync_store import CatalogSyncStore
 from .config import Settings
 
 
@@ -58,3 +59,8 @@ def get_runtime_settings_service() -> RuntimeSettingsService:
     """Get runtime settings service instance."""
     settings = get_settings()
     return RuntimeSettingsService(settings)
+
+
+def get_catalog_sync_store() -> CatalogSyncStore:
+    """Return the Mongo-authoritative Shopify catalog queue."""
+    return CatalogSyncStore(get_settings())

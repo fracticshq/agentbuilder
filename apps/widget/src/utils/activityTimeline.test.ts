@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { reduceActivity, finalizeActivity, EMPTY_ACTIVITY } from './activityTimeline';
 import type { StreamingMessage } from '../types';
 
-function ev(type: string, content = '', metadata: Record<string, any> = {}): StreamingMessage {
+function ev(type: string, content = '', metadata: Record<string, unknown> = {}): StreamingMessage {
   return { type: type as StreamingMessage['type'], content, conversation_id: 'c', metadata };
 }
 

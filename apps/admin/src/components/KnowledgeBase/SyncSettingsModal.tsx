@@ -90,6 +90,7 @@ export default function SyncSettingsModal({
   }, [brandId, job, onChanged]);
 
   const status = job?.status || config?.last_sync_status || 'idle';
+  const syncInFlight = ['queued', 'running', 'processing'].includes(status);
   const counts = job?.counts || config?.last_sync_counts;
   const progress = useMemo(() => {
     const processed = job?.processed || 0;
@@ -135,8 +136,8 @@ export default function SyncSettingsModal({
     try {
       await persistConfig();
       const nextJob = await catalogApi.startSync(brandId);
-      setJob({ job_id: nextJob.job_id, status: nextJob.status, warning: nextJob.warning, results: [] });
-      if (nextJob.warning) setNotice(nextJob.warning);
+      setJob({ job_id: nextJob.job_id, status: nextJob.status, deduplicated: nextJob.deduplicated, results: [] });
+      if (nextJob.deduplicated) setNotice('A catalog sync is already running for this brand; following the existing job.');
     } catch (startError) {
       setError(getErrorMessage(startError, 'Failed to start Shopify sync.'));
     } finally {
@@ -145,7 +146,7 @@ export default function SyncSettingsModal({
   };
 
   const hasToken = Boolean(config?.access_token_configured || token.trim());
-  const isProcessing = status === 'processing' || starting || saving;
+  const isProcessing = syncInFlight || starting || saving;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/40 p-4">
@@ -172,11 +173,11 @@ export default function SyncSettingsModal({
               <input
                 value={storeUrl}
                 onChange={(event) => setStoreUrl(event.target.value)}
-                placeholder="celavilifestyle.com"
+                placeholder="store.myshopify.com"
                 disabled={isProcessing}
                 className="mt-2 w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm outline-none focus:border-gray-600 focus:ring-1 focus:ring-gray-600 disabled:bg-gray-50"
               />
-              <span className="mt-1 block text-xs leading-5 text-gray-500">Use the store root only. The API normalizes it to HTTPS.</span>
+              <span className="mt-1 block text-xs leading-5 text-gray-500">Use the canonical `.myshopify.com` store root only. The API normalizes it to HTTPS and refuses custom domains for token-bound syncs.</span>
             </label>
 
             <label className="block">
@@ -215,7 +216,7 @@ export default function SyncSettingsModal({
           {!hasToken && (
             <div className="flex gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm leading-5 text-amber-900">
               <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 flex-none" />
-              <span>Without a token this uses the public storefront endpoint. Private products and authoritative store currency may be unavailable.</span>
+              <span>An Admin API token is required before a production catalog sync can run. Save a token with read_products and read_inventory access.</span>
             </div>
           )}
 
@@ -228,7 +229,11 @@ export default function SyncSettingsModal({
               type="button"
               role="switch"
               aria-checked={autoSync}
-              onClick={() => setAutoSync((value) => !value)}
+              onClick={() => setAutoSync((value) => {
+                const next = !value;
+                if (next && frequency === 'manual') setFrequency('daily');
+                return next;
+              })}
               disabled={isProcessing}
               className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${autoSync ? 'bg-gray-900' : 'bg-gray-200'} disabled:opacity-50`}
             >
@@ -254,7 +259,7 @@ export default function SyncSettingsModal({
                 </div>
                 {job?.processed !== undefined && job.total !== undefined && job.total > 0 && <span className="font-mono text-xs text-gray-500">{job.processed}/{job.total} items</span>}
               </div>
-              {job?.status === 'processing' && <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-gray-100"><div className="h-full rounded-full bg-gray-900 transition-[width] duration-300" style={{ width: `${progress}%` }} /></div>}
+              {syncInFlight && <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-gray-100"><div className="h-full rounded-full bg-gray-900 transition-[width] duration-300" style={{ width: `${progress}%` }} /></div>}
               {job?.warning && <p className="mt-3 text-xs leading-5 text-amber-800">{job.warning}</p>}
               {counts && (
                 <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-gray-600 sm:grid-cols-4">
@@ -275,7 +280,7 @@ export default function SyncSettingsModal({
         <div className="flex flex-col-reverse gap-2 border-t border-gray-200 bg-gray-50 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
           <button type="button" onClick={handleStart} disabled={isProcessing || !storeUrl.trim()} className="inline-flex items-center justify-center gap-2 rounded-md bg-gray-950 px-4 py-2.5 text-sm font-semibold text-white hover:bg-gray-800 active:translate-y-px disabled:cursor-not-allowed disabled:bg-gray-300">
             <ArrowPathIcon className={`h-4 w-4 ${starting ? 'animate-spin' : ''}`} />
-            {starting ? 'Starting…' : status === 'processing' ? 'Sync in progress' : 'Save and sync now'}
+            {starting ? 'Starting…' : syncInFlight ? 'Sync in progress' : 'Save and sync now'}
           </button>
           <div className="flex justify-end gap-2">
             <button type="button" onClick={onClose} className="rounded-md border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50">Close</button>

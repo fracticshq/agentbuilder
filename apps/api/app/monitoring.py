@@ -21,6 +21,8 @@ RATE_LIMIT_COUNT = Counter('rate_limit_events_total', 'Rate limit decisions', ['
 GUARDRAIL_COUNT = Counter('guardrail_events_total', 'Guardrail decisions', ['action', 'reason'])
 AGENT_FALLBACK_COUNT = Counter('agent_fallback_events_total', 'Agent fallback events', ['stage', 'reason'])
 STRAPI_SYNC_COUNT = Counter('strapi_sync_events_total', 'Strapi sync attempts', ['operation', 'status'])
+CATALOG_SYNC_COUNT = Counter('catalog_sync_jobs_total', 'Shopify catalog lifecycle jobs', ['action', 'status'])
+CATALOG_SYNC_DURATION = Histogram('catalog_sync_job_duration_seconds', 'Shopify catalog job duration', ['action'])
 
 
 def setup_monitoring(app: FastAPI):

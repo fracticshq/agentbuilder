@@ -1,25 +1,29 @@
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Layout from './components/Layout';
 import { AuthProvider } from './auth/AuthProvider';
 import { ProtectedRoute, PublicOnlyRoute } from './auth/ProtectedRoute';
-import Dashboard from './pages/Dashboard';
-import Brands from './pages/Brands';
-import BrandDetail from './pages/BrandDetail';
-import Agents from './pages/Agents';
-import AgentDetail from './pages/AgentDetail';
-import AgentWizard from './pages/AgentWizard';
-import AgentConsole from './pages/AgentConsole';
-import KnowledgeBase from './pages/KnowledgeBase';
-import Settings from './pages/Settings';
-import Observability from './pages/Observability';
-import Support from './pages/Support';
-import Login from './pages/Login';
-import Signup from './pages/Signup';
-import ForgotPassword from './pages/ForgotPassword';
-import ResetPassword from './pages/ResetPassword';
 import './App.css';
+
+// Routes are the natural code-splitting boundary.  Keep the auth shell and
+// routing controls eagerly available, while loading an operator page only
+// after navigation requests it.
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Brands = lazy(() => import('./pages/Brands'));
+const BrandDetail = lazy(() => import('./pages/BrandDetail'));
+const Agents = lazy(() => import('./pages/Agents'));
+const AgentDetail = lazy(() => import('./pages/AgentDetail'));
+const AgentWizard = lazy(() => import('./pages/AgentWizard'));
+const AgentConsole = lazy(() => import('./pages/AgentConsole'));
+const KnowledgeBase = lazy(() => import('./pages/KnowledgeBase'));
+const Settings = lazy(() => import('./pages/Settings'));
+const Observability = lazy(() => import('./pages/Observability'));
+const Support = lazy(() => import('./pages/Support'));
+const Login = lazy(() => import('./pages/Login'));
+const Signup = lazy(() => import('./pages/Signup'));
+const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
+const ResetPassword = lazy(() => import('./pages/ResetPassword'));
 
 // Create a client
 const queryClient = new QueryClient({
@@ -45,6 +49,7 @@ function App() {
       <AuthProvider>
         <Router>
           <div className="App">
+            <Suspense fallback={<div className="p-6 text-sm text-gray-600" role="status">Loading page…</div>}>
             <Routes>
               <Route
                 path="/login"
@@ -98,6 +103,7 @@ function App() {
                 </Route>
               </Route>
             </Routes>
+            </Suspense>
           </div>
         </Router>
       </AuthProvider>

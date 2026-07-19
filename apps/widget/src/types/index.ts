@@ -1,5 +1,18 @@
 export type BrandMode = 'dark' | 'light';
 
+/** JSON-like metadata received from widget API and streaming responses. */
+export type Metadata = Record<string, unknown>;
+
+export interface AgentAnalytics {
+  track(event: string, properties: Record<string, unknown>): void;
+}
+
+declare global {
+  interface Window {
+    agentAnalytics?: AgentAnalytics;
+  }
+}
+
 /** Resolved theme tokens used throughout the widget */
 export interface BrandThemeTokens {
   mode: BrandMode;
@@ -77,7 +90,7 @@ export interface Message {
   confidenceScore?: number;
   products?: ProductData[];  // Phase 5: Product cards
   dealers?: DealerData[];    // Phase 5: Dealer cards
-  metadata?: Record<string, any>;
+  metadata?: Metadata;
   commerce?: CommerceMetadata;
   feedback?: 'up' | 'down';
   activitySteps?: ActivityStep[];  // Live "what happened in the background" trace
@@ -214,7 +227,7 @@ export interface PageContext {
   sku?: string;
   category?: string;
   content?: string;
-  metadata?: Record<string, any>;
+  metadata?: Metadata;
 }
 
 export type StreamingMessageType =
@@ -252,7 +265,7 @@ export interface StreamingMessage {
   confidence_score?: number;
   products?: ProductData[];  // Phase 5: Product cards in metadata
   dealers?: DealerData[];    // Phase 5: Dealer cards in metadata
-  metadata?: Record<string, any>;
+  metadata?: Metadata;
   commerce?: CommerceMetadata;
   timestamp?: string;
 }

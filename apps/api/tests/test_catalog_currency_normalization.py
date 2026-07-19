@@ -4,12 +4,16 @@ import pytest
 
 from app.config import Settings
 from app.services.catalog_service import (
+    ShopifyGraphQLRequestError,
     _fetch_shopify_default_currency,
+    _shopify_graphql_product_to_legacy,
     _normalize_schema_org,
     _normalize_shopify,
     _normalize_woocommerce,
+    normalize_authenticated_shopify_store_url,
     normalize_currency_code,
     normalize_shopify_store_url,
+    validate_json_feed_url,
 )
 from app.services.knowledge_service import KnowledgeService
 
@@ -176,9 +180,24 @@ def test_shopify_url_and_explicit_currency_validation():
     with pytest.raises(ValueError):
         normalize_currency_code("USDOLLAR")
 
+    assert normalize_authenticated_shopify_store_url("https://store.myshopify.com") == "https://store.myshopify.com"
+    for unsafe_authenticated_store in (
+        "http://store.myshopify.com",
+        "https://store.myshopify.com:8443",
+        "https://celavilifestyle.com",
+    ):
+        with pytest.raises(ValueError):
+            normalize_authenticated_shopify_store_url(unsafe_authenticated_store)
+
 
 @pytest.mark.asyncio
-async def test_authenticated_shopify_store_currency_success_and_failure():
+async def test_json_feed_route_cannot_bypass_shopify_admin_graphql_sync():
+    with pytest.raises(ValueError, match="Admin GraphQL"):
+        await validate_json_feed_url("https://store.myshopify.com/products.json")
+
+
+@pytest.mark.asyncio
+async def test_authenticated_shopify_store_currency_uses_admin_graphql_and_fails_closed():
     class Response:
         def __init__(self, status_code, payload, headers=None):
             self.status_code = status_code
@@ -189,55 +208,88 @@ async def test_authenticated_shopify_store_currency_success_and_failure():
         def json(self):
             return self._payload
 
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                import httpx
+
+                raise httpx.HTTPStatusError("status", request=None, response=None)
+
     class Client:
         def __init__(self, response):
             self.response = response
             self.calls = []
 
-        async def get(self, url, headers):
-            self.calls.append((url, headers))
+        async def post(self, url, headers, json):
+            self.calls.append((url, headers, json))
             return self.response
 
-    class SequenceClient:
-        def __init__(self, responses):
-            self.responses = iter(responses)
-            self.calls = []
+    client = Client(Response(200, {"data": {"shop": {"currencyCode": "inr"}}}))
+    assert await _fetch_shopify_default_currency(client, "https://celavilifestyle.myshopify.com", {"X-Shopify-Access-Token": "secret"}) == "INR"
+    assert client.calls[0][0].endswith("/admin/api/2026-04/graphql.json")
+    assert "ShopCurrency" in client.calls[0][2]["query"]
+    assert client.calls[0][1]["Content-Type"] == "application/json"
 
-        async def get(self, url, headers):
-            self.calls.append((url, headers))
-            return next(self.responses)
+    for response in (
+        Response(302, {}),
+        Response(403, {}),
+        Response(200, {"errors": [{"extensions": {"code": "ACCESS_DENIED"}}]}),
+        Response(200, {"data": {"shop": {}}}),
+    ):
+        with pytest.raises(ShopifyGraphQLRequestError):
+            await _fetch_shopify_default_currency(
+                Client(response),
+                "https://celavilifestyle.myshopify.com",
+                {"X-Shopify-Access-Token": "secret"},
+            )
 
-    client = Client(Response(200, {"shop": {"currency": "inr"}}))
-    assert await _fetch_shopify_default_currency(client, "https://celavilifestyle.com", {"X-Shopify-Access-Token": "secret"}) == "INR"
-    assert client.calls[0][0].endswith("/admin/api/2024-01/shop.json")
 
-    redirected = SequenceClient([
-        Response(302, {}, {"location": "https://celavilifestyle.myshopify.com/admin/api/2024-01/shop.json"}),
-        Response(200, {"shop": {"currency": "GBP"}}),
-    ])
-    assert await _fetch_shopify_default_currency(redirected, "https://celavilifestyle.com", {"X-Shopify-Access-Token": "secret"}) == "GBP"
-    assert len(redirected.calls) == 2
+def test_shopify_graphql_adapter_preserves_numeric_identity_money_images_and_inventory():
+    legacy = _shopify_graphql_product_to_legacy(
+        {
+            "id": "gid://shopify/Product/44",
+            "legacyResourceId": "44",
+            "title": "Linen Shirt",
+            "handle": "linen-shirt",
+            "productType": "Shirts",
+            "vendor": "NOVA",
+            "tags": ["linen"],
+            "options": [{"name": "Size", "position": 1}],
+            "featuredImage": {"url": "https://cdn.example.com/linen.jpg"},
+            "variants": {
+                "nodes": [
+                    {
+                        "id": "gid://shopify/ProductVariant/99",
+                        "legacyResourceId": "99",
+                        "sku": "LINEN-M",
+                        "title": "Medium",
+                        "price": {"amount": "12.50", "currencyCode": "USD"},
+                        "inventoryQuantity": 0,
+                        "inventoryPolicy": "CONTINUE",
+                        "image": {"url": "https://cdn.example.com/linen-m.jpg"},
+                        "selectedOptions": [{"name": "Size", "value": "M"}],
+                    }
+                ]
+            },
+        }
+    )
+    item = _normalize_shopify({"products": [legacy]}, shopify_currency="INR")[0]
 
-    unsafe_redirect = SequenceClient([
-        Response(302, {}, {"location": "http://127.0.0.1/admin/api/2024-01/shop.json"}),
-        Response(200, {"shop": {"currency": "GBP"}}),
-    ])
-    assert await _fetch_shopify_default_currency(unsafe_redirect, "https://celavilifestyle.com", {"X-Shopify-Access-Token": "secret"}) is None
-    assert len(unsafe_redirect.calls) == 1
+    assert item["source_product_id"] == "44"
+    assert item["source_variant_id"] == "99"
+    assert item["source_key"] == "shopify:44:99"
+    assert item["product_group_id"] == "shopify:44"
+    assert item["price"] == 1250
+    assert item["currency"] == "INR"
+    assert item["in_stock"] is True
+    assert item["image_url"] == "https://cdn.example.com/linen-m.jpg"
+    assert item["variant_options"] == {"Size": "M"}
 
-    cross_store_redirect = SequenceClient([
-        Response(302, {}, {"location": "https://another-store.myshopify.com/admin/api/2024-01/shop.json"}),
-        Response(200, {"shop": {"currency": "GBP"}}),
-    ])
-    assert await _fetch_shopify_default_currency(cross_store_redirect, "https://celavilifestyle.com", {"X-Shopify-Access-Token": "secret"}) is None
-    assert len(cross_store_redirect.calls) == 1
-
-    failed = Client(Response(403, {}))
-    assert await _fetch_shopify_default_currency(failed, "https://celavilifestyle.com", {"X-Shopify-Access-Token": "secret"}) is None
-
-    public = Client(Response(200, {"shop": {"currency": "USD"}}))
-    assert await _fetch_shopify_default_currency(public, "https://celavilifestyle.com", {}) is None
-    assert public.calls == []
+    # The GraphQL adapter returns the canonical legacy list shape. Reuse that
+    # result to verify its inventory-policy projection rather than treating it
+    # as a raw GraphQL connection a second time.
+    legacy["variants"][0]["inventory_policy"] = "deny"
+    denied_item = _normalize_shopify({"products": [legacy]})[0]
+    assert denied_item["in_stock"] is False
 
 
 class FakeUpsertCollection:

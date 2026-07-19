@@ -33,6 +33,8 @@ class MemoryConfig:
     
     # PII Encryption
     PII_ENCRYPTION_KEY: Optional[str] = os.getenv('PII_ENCRYPTION_KEY')
+    PII_KEY_ID: str = os.getenv('PII_KEY_ID', 'default')
+    PII_KEY_VERSION: int = int(os.getenv('PII_KEY_VERSION', 1))
     PII_KEY_ROTATION_DAYS: int = int(os.getenv('PII_KEY_ROTATION_DAYS', 90))
     
     # Database Settings

@@ -13,6 +13,7 @@ export interface CatalogSyncConfig {
   fallback_currency?: string | null;
   auto_sync?: boolean;
   sync_frequency?: string;
+  enabled?: boolean;
   access_token_configured?: boolean;
   last_sync_status?: 'processing' | 'completed' | 'error' | string;
   last_sync_job_id?: string;
@@ -27,7 +28,9 @@ export interface CatalogSyncJob {
   job_id: string;
   brand_id?: string;
   source_url?: string;
-  status: 'processing' | 'completed' | 'error' | string;
+  status: 'queued' | 'running' | 'processing' | 'completed' | 'error' | 'cancelled' | string;
+  phase?: string;
+  deduplicated?: boolean;
   processed?: number;
   total?: number;
   page?: number;
@@ -63,7 +66,7 @@ export const catalogApi = {
       access_token: accessToken || null,
       fallback_currency: fallbackCurrency || null,
     });
-    return response.data as { job_id: string; status: string; warning?: string | null };
+    return response.data as { job_id: string; status: string; deduplicated?: boolean };
   },
 
   importJsonFeed: async (url: string, brandId: string) => {
@@ -110,7 +113,7 @@ export const catalogApi = {
   },
 
   startSync: async (brandId: string) => {
-    const response = await apiClient.post<{ job_id: string; status: string; warning?: string | null }>(
+    const response = await apiClient.post<{ job_id: string; status: string; deduplicated?: boolean }>(
       `/api/v1/catalog/sync/${brandId}`,
     );
     return response.data;

@@ -38,6 +38,10 @@ This is the core FastAPI backend providing:
 | `AZURE_RESOURCE_GROUP` | For admin Azure discovery | `agentbuilder-rg` | Resource group containing the Azure OpenAI account |
 | `AZURE_OPENAI_ACCOUNT_NAME` | For admin Azure discovery | `anant-resource` | Azure OpenAI account name used on the ARM deployments route |
 | `SETTINGS_ENCRYPTION_KEY` | Recommended | `random-32-char-string` | Encrypts runtime settings stored in MongoDB. Falls back to `PII_ENCRYPTION_KEY`, then `SECRET_KEY`. |
+| `EVAL_STAGING_ENABLED` | No | `false` | Explicit opt-in for synthetic staging-evaluation evidence; never inferred from `ENVIRONMENT`. |
+| `EVAL_STAGING_TARGET_ALLOWLIST` | When evaluation enabled | `synthetic-external-staging` | Comma-separated protected synthetic/read-only target profiles. |
+| `EVAL_STAGING_MAX_CASES` | No | `25` | Maximum sanitized contract cases accepted per report. |
+| `EVAL_RESULT_TTL_SECONDS` | No | `604800` | TTL for aggregate-only evaluation results. |
 
 ---
 
@@ -94,3 +98,11 @@ curl http://localhost:8000/health
 - Azure deployment discovery for the admin UI uses ARM + `DefaultAzureCredential`; if the ARM env vars are missing, the endpoint returns `503`
 - Runtime provider secrets are resolved from encrypted records in the system DB first, then from environment variables as bootstrap/fallback
 - Strapi dashboard provisioning for agents must be best-effort and non-blocking; agent create/update/delete should not fail after Mongo writes because Strapi is unavailable
+- Generated factual answers must pass the deterministic claim-evidence gate before persistence or delivery. Server-owned safety templates and non-factual clarification may bypass it; raw evidence/provider data must never reach public metadata.
+- Ingestion job state and worker leases are owned by the system MongoDB store; Redis is a non-authoritative read cache only. `POST /ingest/documents` stores encrypted, TTL-bound source payloads plus an immutable creation-time agent/brand/chunking snapshot before responding. `Idempotency-Key` is scoped to that agent and brand: the same source reuses its job while divergent source content is rejected. The `ingestion-worker` compose service claims only v2 jobs with Mongo leases, always publishes to the snapshotted `brand_slug`, and uses deterministic upserts after a pre-publish staging boundary. Status/cancel authorization uses the immutable creation-time brand scope.
+- `POST /knowledge/upload` and `POST /knowledge/bulk-upload` use the same durable worker protocol. Their source bytes plus folder/product/dealer context are encrypted before a job is queued; do not reintroduce `BackgroundTasks` for any route that produces embeddings or vectors. Keep product/variant fields intact when extending this path.
+- Public takeover channels are scoped by a Mongo-backed widget conversation record. Widget control uses `Sec-WebSocket-Protocol: widget-session, <token>` and operator control uses `Sec-WebSocket-Protocol: bearer, <dashboard-token>`; never add credentials, agent IDs, or control secrets to a WebSocket URL. Dashboard control must verify both `message:write` and the stored brand scope.
+- Rate limits fail closed by default. Production Qdrant must remain private/authenticated (`QDRANT_API_KEY`) and upload paths must enforce per-file, aggregate, and DOCX archive-expansion limits before durable storage.
+- Production upload paths require a private ClamAV-compatible scanner (`MALWARE_SCAN_MODE=clamav`) before source bytes enter encrypted durable storage. Scanner errors fail closed; local development may use the explicitly disabled mode only for fixtures.
+- Widget sessions are an immutable tenant binding, not only a JWT signature. Every widget message/history/activity path must verify the Mongo conversation scope and reject an agent that has moved to another brand. Long-term/episodic memory requires explicit session consent; consent withdrawal deletes and verifies first-party episodic facts. Privacy export/deletion is tenant-scoped, `no-store`, and must report an external processor as pending until it returns a verified receipt. The `privacy-retention-worker` enforces configured first-party retention; never claim that it deletes third-party mirrors such as Strapi.
+- The repository-root `packages/` directory is the sole canonical shared-package source. Do not add or restore `apps/api/packages`; Docker, CI, tests, and local startup must resolve `commons`, `llm`, `memory`, `retrieval`, `tools`, and `agent_runtime` only from the root tree.

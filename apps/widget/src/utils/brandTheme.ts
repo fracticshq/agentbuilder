@@ -83,32 +83,46 @@ function deriveTokens(primaryColor: string, mode: BrandMode, darkBg?: string, li
 /** Build a BrandTheme from the raw Brand.colors object fetched from admin */
 export function buildBrandTheme(
   brandName: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  colors: any
+  colors: unknown,
 ): BrandTheme {
-  const primaryColor = colors?.primary_color || '#6366f1';
-  const mode: BrandMode = colors?.default_mode === 'light' ? 'light' : 'dark';
-  const chips: string[] = colors?.suggestion_chips
-    ? colors.suggestion_chips.split(',').map((c: string) => c.trim()).filter(Boolean)
+  const brandColors = isBrandColorConfig(colors) ? colors : {};
+  const primaryColor = getColorString(brandColors, 'primary_color') || '#6366f1';
+  const mode: BrandMode = getColorString(brandColors, 'default_mode') === 'light' ? 'light' : 'dark';
+  const suggestionChips = getColorString(brandColors, 'suggestion_chips');
+  const chips = suggestionChips
+    ? suggestionChips.split(',').map((chip) => chip.trim()).filter(Boolean)
     : [];
 
-  const cyclingCategories: string[] | undefined = colors?.cycling_categories
-    ? colors.cycling_categories.split(',').map((c: string) => c.trim()).filter(Boolean)
+  const categoryConfig = getColorString(brandColors, 'cycling_categories');
+  const cyclingCategories = categoryConfig
+    ? categoryConfig.split(',').map((category) => category.trim()).filter(Boolean)
     : undefined;
+
+  const darkBgGradient = getColorString(brandColors, 'dark_bg_gradient');
+  const lightBgGradient = getColorString(brandColors, 'light_bg_gradient');
 
   return {
     brandName,
     primaryColor,
     mode,
-    hideNovaLogo: colors?.hide_nova_logo ?? false,
-    chatLogoDarkUrl: colors?.chat_logo_dark_url || undefined,
-    chatLogoLightUrl: colors?.chat_logo_light_url || undefined,
-    heroTitle: colors?.hero_title || `I'm ${brandName} AI`,
-    heroSubtitle: colors?.hero_subtitle || 'How can I help you today?',
+    hideNovaLogo: brandColors.hide_nova_logo === true,
+    chatLogoDarkUrl: getColorString(brandColors, 'chat_logo_dark_url') || undefined,
+    chatLogoLightUrl: getColorString(brandColors, 'chat_logo_light_url') || undefined,
+    heroTitle: getColorString(brandColors, 'hero_title') || `I'm ${brandName} AI`,
+    heroSubtitle: getColorString(brandColors, 'hero_subtitle') || 'How can I help you today?',
     suggestionChips: chips,
     cyclingCategories,
-    darkBgGradient: colors?.dark_bg_gradient || undefined,
-    lightBgGradient: colors?.light_bg_gradient || undefined,
-    tokens: deriveTokens(primaryColor, mode, colors?.dark_bg_gradient, colors?.light_bg_gradient),
+    darkBgGradient,
+    lightBgGradient,
+    tokens: deriveTokens(primaryColor, mode, darkBgGradient, lightBgGradient),
   };
+}
+
+function isBrandColorConfig(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getColorString(colors: Record<string, unknown>, key: string): string | undefined {
+  const value = colors[key];
+  return typeof value === 'string' ? value : undefined;
 }

@@ -3,9 +3,6 @@ Knowledge Service - Enhanced document processing with structured metadata
 Handles both document uploads and bulk JSON imports for products/dealers
 """
 
-import csv
-import html
-import io
 import uuid
 import json
 import re
@@ -22,6 +19,18 @@ from .chunking import chunk_text, resolve_agent_chunking
 from .job_store import JobStore
 from .qdrant_vector_service import QdrantVectorService
 from .runtime_settings_service import RuntimeSettingsService
+from .knowledge_text_extraction import (
+    EXTENSION_SOURCE_TYPES,
+    MIME_SOURCE_TYPES,
+    detect_source_type,
+    extract_text,
+)
+from .knowledge_tree_mutations import KnowledgeTreeMutations
+from .knowledge_paths import (
+    folder_path_from_name as _folder_path_from_name,
+    normalize_folder_path as _normalize_folder_path_value,
+    normalize_item_path as _normalize_item_path_value,
+)
 
 logger = structlog.get_logger()
 
@@ -29,32 +38,9 @@ logger = structlog.get_logger()
 class KnowledgeService:
     """Service for knowledge base operations with structured metadata support."""
 
-    MIME_SOURCE_TYPES = {
-        "application/pdf": "pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-        "text/plain": "txt",
-        "text/markdown": "md",
-        "text/x-markdown": "md",
-        "text/html": "html",
-        "application/xhtml+xml": "html",
-        "application/json": "json",
-        "text/json": "json",
-        "text/csv": "csv",
-        "application/csv": "csv",
-        "application/vnd.ms-excel": "csv",
-    }
-
-    EXTENSION_SOURCE_TYPES = {
-        ".pdf": "pdf",
-        ".docx": "docx",
-        ".txt": "txt",
-        ".md": "md",
-        ".markdown": "md",
-        ".html": "html",
-        ".htm": "html",
-        ".json": "json",
-        ".csv": "csv",
-    }
+    # Compatibility aliases; source type rules live in the stateless extractor.
+    MIME_SOURCE_TYPES = MIME_SOURCE_TYPES
+    EXTENSION_SOURCE_TYPES = EXTENSION_SOURCE_TYPES
     
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -67,23 +53,17 @@ class KnowledgeService:
         self.db = None
         self.collection = None
 
-    def _normalize_folder_path(self, path: Optional[str]) -> str:
-        raw_path = (path or "/").strip()
-        if not raw_path:
-            raw_path = "/"
-        if not raw_path.startswith("/"):
-            raw_path = f"/{raw_path}"
-        normalized = re.sub(r"/+", "/", raw_path).rstrip("/")
-        return normalized or "/"
+    @staticmethod
+    def _normalize_folder_path(path: Optional[str]) -> str:
+        return _normalize_folder_path_value(path)
 
-    def _normalize_item_path(self, folder: Optional[str], name: Optional[str]) -> tuple[str, str, str]:
-        clean_folder = self._normalize_folder_path(folder)
-        clean_name = (name or "untitled").strip().strip("/") or "untitled"
-        return clean_folder, clean_name, f"{clean_folder.rstrip('/')}/{clean_name}" if clean_folder != "/" else f"/{clean_name}"
+    @staticmethod
+    def _normalize_item_path(folder: Optional[str], name: Optional[str]) -> tuple[str, str, str]:
+        return _normalize_item_path_value(folder, name)
 
-    def folder_path_from_name(self, name: Optional[str], parent_path: Optional[str] = None) -> str:
-        _, clean_name, path = self._normalize_item_path(parent_path, name)
-        return path if clean_name else self._normalize_folder_path(parent_path)
+    @staticmethod
+    def folder_path_from_name(name: Optional[str], parent_path: Optional[str] = None) -> str:
+        return _folder_path_from_name(name, parent_path)
 
     def _normalize_currency(self, value: Any) -> Optional[str]:
         if value is None:
@@ -260,6 +240,50 @@ class KnowledgeService:
         })
         return counts
 
+    async def deactivate_shopify_catalog(
+        self,
+        brand_id: str,
+        *,
+        source_url: str,
+        product_id: Optional[str] = None,
+        reason: str,
+    ) -> int:
+        """Make Shopify products non-retrievable after delete/uninstall events.
+
+        We retain the historical record for auditability, but every retrieval
+        path already treats ``source_active`` as an availability predicate. A
+        product-specific action matches both the canonical source product id and
+        the stable source-key prefix so older catalog rows are covered too.
+        """
+        await self._ensure_connection(brand_id)
+        now = datetime.utcnow().isoformat()
+        query: Dict[str, Any] = {
+            "content_type": "product",
+            "metadata.catalog_source.type": "shopify",
+            "metadata.catalog_source.source_url": source_url,
+        }
+        if product_id:
+            escaped_product_id = re.escape(str(product_id))
+            query["$or"] = [
+                {"product_data.source_product_id": str(product_id)},
+                {"metadata.catalog_source.source_key": {"$regex": rf"^shopify:{escaped_product_id}(?::|$)"}},
+            ]
+
+        result = await self.collection.update_many(
+            query,
+            {
+                "$set": {
+                    "product_data.in_stock": False,
+                    "product_data.source_active": False,
+                    "metadata.catalog_source.active": False,
+                    "metadata.catalog_source.deactivation_reason": reason,
+                    "metadata.catalog_source.deactivated_at": now,
+                    "metadata.updated_at": now,
+                }
+            },
+        )
+        return int(getattr(result, "modified_count", 0) or 0)
+
     async def _get_knowledge_folders_collection(self, brand_id: str):
         db = await self._get_brand_database(brand_id)
         return db["knowledge_folders"]
@@ -403,6 +427,23 @@ class KnowledgeService:
             # Fallback to default database
             self.db = connection_manager.get_mongodb_db()
             self.collection = self.db["knowledge_base"]
+
+    def _knowledge_tree_mutations(self) -> KnowledgeTreeMutations:
+        """Build the stateful tree coordinator with current service dependencies.
+
+        Constructing this facade on demand intentionally preserves compatibility
+        with callers and tests that replace a storage or scope dependency on an
+        existing ``KnowledgeService`` instance.
+        """
+        return KnowledgeTreeMutations(
+            resolve_brand_scope=self._resolve_brand_scope,
+            get_knowledge_folders_collection=self._get_knowledge_folders_collection,
+            get_brand_knowledge_collections=self._get_brand_knowledge_collections,
+            normalize_folder_path=self._normalize_folder_path,
+            normalize_item_path=self._normalize_item_path,
+            qdrant=getattr(self, "qdrant", None),
+            delete_document=self.delete_document,
+        )
     
     # ========================================================================
     # Job Management
@@ -1141,35 +1182,12 @@ class KnowledgeService:
         path: str,
         agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        folder_path = self._normalize_folder_path(path)
-        if folder_path == "/":
-            raise ValueError("Root folder already exists")
-        parent_path = self._normalize_folder_path("/".join(folder_path.rstrip("/").split("/")[:-1]) or "/")
-        now = datetime.utcnow().isoformat()
-        brand_scope = await self._resolve_brand_scope(brand_id)
-        resolved_brand_id = brand_scope.get("brand_id") or brand_id
-        folder_doc = {
-            "id": folder_path,
-            "brand_id": resolved_brand_id,
-            "brand_slug": brand_scope.get("brand_slug"),
-            "agent_id": agent_id,
-            "name": folder_path.rstrip("/").split("/")[-1],
-            "path": folder_path,
-            "parent_path": parent_path,
-            "created_at": now,
-            "updated_at": now,
-        }
-        collection = await self._get_knowledge_folders_collection(brand_id)
-        # `updated_at` must appear in exactly one of $setOnInsert / $set — Mongo
-        # rejects the same path in both (WriteError 40). Keep it only in $set so
-        # the timestamp refreshes on every upsert; the rest is insert-only.
-        insert_only = {key: value for key, value in folder_doc.items() if key != "updated_at"}
-        await collection.update_one(
-            {"brand_id": resolved_brand_id, "agent_id": agent_id, "path": folder_path},
-            {"$setOnInsert": insert_only, "$set": {"updated_at": now}},
-            upsert=True,
+        """Compatibility facade for stateful knowledge tree mutations."""
+        return await self._knowledge_tree_mutations().create_folder(
+            brand_id,
+            path,
+            agent_id,
         )
-        return {**folder_doc, "type": "folder"}
 
     async def _find_folder_doc(
         self,
@@ -1177,13 +1195,12 @@ class KnowledgeService:
         path: str,
         agent_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Return the stored folder document for a normalized path, if it exists."""
-        brand_scope = await self._resolve_brand_scope(brand_id)
-        folders_collection = await self._get_knowledge_folders_collection(brand_id)
-        query = {"brand_id": brand_scope.get("brand_id") or brand_id, "path": self._normalize_folder_path(path)}
-        if agent_id:
-            query["agent_id"] = agent_id
-        return await folders_collection.find_one(query)
+        """Compatibility facade for stateful knowledge tree mutations."""
+        return await self._knowledge_tree_mutations().find_folder_doc(
+            brand_id,
+            path,
+            agent_id,
+        )
 
     async def _cascade_folder_path_change(
         self,
@@ -1192,94 +1209,13 @@ class KnowledgeService:
         new_path: str,
         agent_id: Optional[str] = None,
     ) -> Dict[str, int]:
-        """Re-point every descendant folder and document when a folder moves/renames.
-
-        A folder at ``old_path`` becomes ``new_path``; everything nested under it
-        (subfolders + documents) has its stored path prefix rewritten so the tree
-        stays consistent. Idempotent and safe when old_path == new_path.
-        """
-        old_path = self._normalize_folder_path(old_path)
-        new_path = self._normalize_folder_path(new_path)
-        # Reparenting TO root (new_path == "/") is valid (e.g. folder delete);
-        # only the root itself can't move, and same-path is a no-op.
-        if old_path == "/" or old_path == new_path:
-            return {"folders": 0, "documents": 0}
-
-        now = datetime.utcnow().isoformat()
-        old_prefix = old_path + "/"
-
-        def repoint(value: str) -> str:
-            if value == old_path:
-                return new_path
-            if value.startswith(old_prefix):
-                # Normalize to avoid '//sub' when new_path is root.
-                return self._normalize_folder_path(new_path + value[len(old_path):])
-            return value
-
-        # 1. Descendant folder docs (the folder itself is handled by the caller).
-        brand_scope = await self._resolve_brand_scope(brand_id)
-        folders_collection = await self._get_knowledge_folders_collection(brand_id)
-        folder_query: Dict[str, Any] = {
-            "brand_id": brand_scope.get("brand_id") or brand_id,
-            "path": {"$regex": f"^{re.escape(old_prefix)}"},
-        }
-        if agent_id:
-            folder_query["agent_id"] = agent_id
-        folders_updated = 0
-        async for child in folders_collection.find(folder_query):
-            child_path = child.get("path") or ""
-            updated_path = repoint(child_path)
-            updated_parent = repoint(child.get("parent_path") or "/")
-            await folders_collection.update_one(
-                {"_id": child["_id"]},
-                {"$set": {"path": updated_path, "id": updated_path, "parent_path": updated_parent, "updated_at": now}},
-            )
-            folders_updated += 1
-
-        # 2. Documents stored under the old path (in the folder or any descendant).
-        brand_aliases = brand_scope.get("aliases") or [brand_id]
-        docs_updated = 0
-        # Collect Qdrant chunk re-points keyed by destination so the vector
-        # payload's folder/path stays in sync with Mongo (folder-scoped retrieval
-        # + citations otherwise go stale on the Qdrant backend).
-        qdrant_groups: Dict[tuple, list] = {}
-        for collection in await self._get_brand_knowledge_collections(brand_id):
-            doc_query: Dict[str, Any] = {
-                "$and": [
-                    {"$or": [
-                        {"metadata.folder": old_path},
-                        {"metadata.folder": {"$regex": f"^{re.escape(old_prefix)}"}},
-                    ]},
-                    {"$or": [
-                        {"metadata.brand_id": {"$in": brand_aliases}},
-                        {"metadata.brand_slug": {"$in": brand_aliases}},
-                    ]},
-                ]
-            }
-            if agent_id:
-                doc_query["$and"].append({"metadata.agent_id": agent_id})
-            async for doc in collection.find(doc_query):
-                meta = doc.get("metadata") or {}
-                new_folder = repoint(self._normalize_folder_path(meta.get("folder")))
-                name = meta.get("name") or doc.get("title") or doc.get("doc_id")
-                _, _, new_doc_path = self._normalize_item_path(new_folder, name)
-                await collection.update_one(
-                    {"_id": doc["_id"]},
-                    {"$set": {"metadata.folder": new_folder, "metadata.path": new_doc_path, "metadata.updated_at": now}},
-                )
-                docs_updated += 1
-                if self.qdrant and doc.get("chunk_id"):
-                    qdrant_groups.setdefault((new_folder, new_doc_path), []).append(doc["chunk_id"])
-
-        if self.qdrant and qdrant_groups:
-            brand_slug = brand_scope.get("brand_slug") or brand_id
-            for (new_folder, new_doc_path), chunk_ids in qdrant_groups.items():
-                try:
-                    await self.qdrant.reparent_chunks(chunk_ids, new_folder, new_doc_path, brand_slug=brand_slug)
-                except Exception as e:
-                    logger.error("qdrant_reparent_failed", folder=new_folder, error=str(e))
-
-        return {"folders": folders_updated, "documents": docs_updated}
+        """Compatibility facade for stateful knowledge tree mutations."""
+        return await self._knowledge_tree_mutations().cascade_folder_path_change(
+            brand_id,
+            old_path,
+            new_path,
+            agent_id,
+        )
 
     async def move_item(
         self,
@@ -1288,68 +1224,13 @@ class KnowledgeService:
         target_folder: str,
         agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        target_folder = self._normalize_folder_path(target_folder)
-        brand_scope = await self._resolve_brand_scope(brand_id)
-        brand_aliases = brand_scope.get("aliases") or [brand_id]
-        updated = 0
-        item_name = None
-
-        # Folder move: reparent the folder doc under target_folder, then cascade
-        # every descendant folder + document to the new path prefix.
-        folder_doc = await self._find_folder_doc(brand_id, item_id, agent_id)
-        if folder_doc:
-            folder_name = folder_doc.get("name") or self._normalize_folder_path(item_id).rstrip("/").split("/")[-1]
-            new_path = self._normalize_item_path(target_folder, folder_name)[2]
-            if new_path == self._normalize_folder_path(item_id):
-                return {"id": new_path, "type": "folder", "path": new_path, "parent_path": target_folder}
-            if new_path == folder_doc.get("path") or new_path.startswith((folder_doc.get("path") or "") + "/"):
-                raise ValueError("Cannot move a folder into itself")
-            now = datetime.utcnow().isoformat()
-            folders_collection = await self._get_knowledge_folders_collection(brand_id)
-            await folders_collection.update_one(
-                {"_id": folder_doc["_id"]},
-                {"$set": {"path": new_path, "id": new_path, "parent_path": target_folder, "updated_at": now}},
-            )
-            await self._cascade_folder_path_change(brand_id, folder_doc.get("path"), new_path, agent_id)
-            return {"id": new_path, "type": "folder", "path": new_path, "parent_path": target_folder}
-
-        for collection in await self._get_brand_knowledge_collections(brand_id):
-            query = {
-                "$and": [
-                    {
-                        "$or": [
-                            {"metadata.job_id": item_id},
-                            {"doc_id": item_id},
-                        ]
-                    },
-                    {
-                        "$or": [
-                            {"metadata.brand_id": {"$in": brand_aliases}},
-                            {"metadata.brand_slug": {"$in": brand_aliases}},
-                        ]
-                    },
-                ]
-            }
-            if agent_id:
-                query["$and"].append({"metadata.agent_id": agent_id})
-            first = await collection.find_one(query)
-            if first and not item_name:
-                item_name = (first.get("metadata") or {}).get("name") or first.get("title") or item_id
-            folder, name, path = self._normalize_item_path(target_folder, item_name or item_id)
-            result = await collection.update_many(
-                query,
-                {"$set": {
-                    "metadata.folder": folder,
-                    "metadata.name": name,
-                    "metadata.path": path,
-                    "metadata.updated_at": datetime.utcnow().isoformat(),
-                }},
-            )
-            updated += result.modified_count
-
-        if updated == 0:
-            return {}
-        return {"id": item_id, "folder": target_folder, "path": self._normalize_item_path(target_folder, item_name or item_id)[2]}
+        """Compatibility facade for stateful knowledge tree mutations."""
+        return await self._knowledge_tree_mutations().move_item(
+            brand_id,
+            item_id,
+            target_folder,
+            agent_id,
+        )
 
     async def rename_item(
         self,
@@ -1358,70 +1239,13 @@ class KnowledgeService:
         name: str,
         agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        clean_name = name.strip().strip("/")
-        if not clean_name:
-            raise ValueError("Name is required")
-        brand_scope = await self._resolve_brand_scope(brand_id)
-        brand_aliases = brand_scope.get("aliases") or [brand_id]
-
-        folders_collection = await self._get_knowledge_folders_collection(brand_id)
-        folder_query = {"brand_id": brand_scope.get("brand_id") or brand_id, "path": item_id}
-        if agent_id:
-            folder_query["agent_id"] = agent_id
-        folder_doc = await folders_collection.find_one(folder_query)
-        if folder_doc:
-            parent = folder_doc.get("parent_path") or "/"
-            old_path = folder_doc.get("path") or item_id
-            new_path = self._normalize_item_path(parent, clean_name)[2]
-            if new_path != old_path:
-                await folders_collection.update_one(
-                    {"_id": folder_doc["_id"]},
-                    {"$set": {"name": clean_name, "path": new_path, "id": new_path, "updated_at": datetime.utcnow().isoformat()}},
-                )
-                # Re-point descendant folders + documents to the renamed path.
-                await self._cascade_folder_path_change(brand_id, old_path, new_path, agent_id)
-            return {"id": new_path, "type": "folder", "name": clean_name, "path": new_path, "parent_path": parent}
-
-        updated = 0
-        next_path = None
-        for collection in await self._get_brand_knowledge_collections(brand_id):
-            query = {
-                "$and": [
-                    {
-                        "$or": [
-                            {"metadata.job_id": item_id},
-                            {"doc_id": item_id},
-                        ]
-                    },
-                    {
-                        "$or": [
-                            {"metadata.brand_id": {"$in": brand_aliases}},
-                            {"metadata.brand_slug": {"$in": brand_aliases}},
-                        ]
-                    },
-                ]
-            }
-            if agent_id:
-                query["$and"].append({"metadata.agent_id": agent_id})
-            first = await collection.find_one(query)
-            folder = self._normalize_folder_path((first or {}).get("metadata", {}).get("folder") if first else "/")
-            _, _, path = self._normalize_item_path(folder, clean_name)
-            next_path = path
-            result = await collection.update_many(
-                query,
-                {"$set": {
-                    "title": clean_name,
-                    "metadata.filename": clean_name,
-                    "metadata.name": clean_name,
-                    "metadata.path": path,
-                    "metadata.updated_at": datetime.utcnow().isoformat(),
-                }},
-            )
-            updated += result.modified_count
-
-        if updated == 0:
-            return {}
-        return {"id": item_id, "type": "file", "name": clean_name, "path": next_path}
+        """Compatibility facade for stateful knowledge tree mutations."""
+        return await self._knowledge_tree_mutations().rename_item(
+            brand_id,
+            item_id,
+            name,
+            agent_id,
+        )
 
     async def retrieve(
         self,
@@ -1617,17 +1441,12 @@ class KnowledgeService:
         return deleted_count > 0
 
     async def delete_item(self, item_id: str, brand_id: str, agent_id: Optional[str] = None) -> Dict[str, Any]:
-        """Delete a knowledge item — folder or document.
-
-        Folders are non-destructive by default: contained documents are reparented
-        to the deleted folder's parent so no embedded knowledge is lost, then the
-        folder and its descendant folders are removed. Documents delete their chunks.
-        """
-        folder_doc = await self._find_folder_doc(brand_id, item_id, agent_id)
-        if folder_doc:
-            return await self.delete_folder(brand_id, folder_doc, agent_id)
-        deleted = await self.delete_document(item_id, brand_id=brand_id)
-        return {"deleted": deleted, "type": "file"}
+        """Compatibility facade for stateful knowledge tree mutations."""
+        return await self._knowledge_tree_mutations().delete_item(
+            item_id,
+            brand_id,
+            agent_id,
+        )
 
     async def delete_folder(
         self,
@@ -1635,32 +1454,12 @@ class KnowledgeService:
         folder_doc: Dict[str, Any],
         agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Remove a folder and its descendant folders; reparent contained docs to the parent."""
-        folder_path = self._normalize_folder_path(folder_doc.get("path"))
-        parent_path = self._normalize_folder_path(folder_doc.get("parent_path") or "/")
-
-        brand_scope = await self._resolve_brand_scope(brand_id)
-        folders_collection = await self._get_knowledge_folders_collection(brand_id)
-        prefix = folder_path + "/"
-
-        # Delete the folder records FIRST (before cascade would rename them out of
-        # this path prefix), then reparent the contained documents to the parent.
-        delete_query: Dict[str, Any] = {
-            "brand_id": brand_scope.get("brand_id") or brand_id,
-            "$or": [{"path": folder_path}, {"path": {"$regex": f"^{re.escape(prefix)}"}}],
-        }
-        if agent_id:
-            delete_query["agent_id"] = agent_id
-        result = await folders_collection.delete_many(delete_query)
-
-        # Reparent every document under this folder (and descendants) up to the parent.
-        reparented = await self._cascade_folder_path_change(brand_id, folder_path, parent_path, agent_id)
-        return {
-            "deleted": result.deleted_count > 0,
-            "type": "folder",
-            "deleted_folders": result.deleted_count,
-            "reparented_documents": reparented.get("documents", 0),
-        }
+        """Compatibility facade for stateful knowledge tree mutations."""
+        return await self._knowledge_tree_mutations().delete_folder(
+            brand_id,
+            folder_doc,
+            agent_id,
+        )
 
     # ========================================================================
     # Helper Methods
@@ -1668,127 +1467,11 @@ class KnowledgeService:
 
     def detect_source_type(self, content_type: Optional[str], filename: Optional[str]) -> Optional[str]:
         """Normalize an uploaded file type from MIME header or filename extension."""
-        normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
-        if normalized_content_type in self.MIME_SOURCE_TYPES:
-            return self.MIME_SOURCE_TYPES[normalized_content_type]
-
-        normalized_filename = (filename or "").lower()
-        for extension, source_type in self.EXTENSION_SOURCE_TYPES.items():
-            if normalized_filename.endswith(extension):
-                return source_type
-
-        return None
+        return detect_source_type(content_type, filename)
     
     async def _extract_text(self, content: bytes, content_type: str, filename: str) -> str:
-        """Extract text from different file types."""
-        try:
-            source_type = self.detect_source_type(content_type, filename)
-
-            if source_type in {"txt", "md"}:
-                return self._decode_text(content)
-            
-            elif source_type == "html":
-                return self._extract_html_text(content)
-            
-            elif source_type == "json":
-                # For JSON files, pretty-print the content
-                data = json.loads(self._decode_text(content))
-                return json.dumps(data, indent=2)
-            
-            elif source_type == "csv":
-                return self._extract_csv_text(content)
-
-            elif source_type == "pdf":
-                return self._extract_pdf_text(content)
-            
-            elif source_type == "docx":
-                return self._extract_docx_text(content)
-            
-            else:
-                return self._decode_text(content)
-                
-        except Exception as e:
-            logger.error("Text extraction failed", filename=filename, error=str(e))
-            raise Exception(f"Failed to extract text from {filename}: {str(e)}")
-
-    def _decode_text(self, content: bytes) -> str:
-        """Decode uploaded text content with a forgiving UTF-8 default."""
-        return content.decode("utf-8-sig", errors="replace")
-
-    def _extract_html_text(self, content: bytes) -> str:
-        """Extract readable text from lightweight HTML without adding a parser dependency."""
-        text = self._decode_text(content)
-        text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
-        text = re.sub(r"(?s)<br\s*/?>", "\n", text)
-        text = re.sub(r"(?s)</(p|div|section|article|li|tr|h[1-6])>", "\n", text)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = html.unescape(text)
-        return re.sub(r"[ \t]+\n", "\n", re.sub(r"\n{3,}", "\n\n", text)).strip()
-
-    def _extract_csv_text(self, content: bytes) -> str:
-        """Convert CSV rows into labeled plain text for chunking and retrieval."""
-        text = self._decode_text(content)
-        reader = csv.reader(io.StringIO(text))
-        rows = list(reader)
-        if not rows:
-            return ""
-
-        headers = [header.strip() for header in rows[0]]
-        try:
-            has_headers = csv.Sniffer().has_header(text[:2048])
-        except csv.Error:
-            has_headers = any(headers) and len(rows) > 1
-        if len(rows) == 1:
-            has_headers = False
-        extracted_rows = []
-
-        for index, row in enumerate(rows[1:] if has_headers else rows, start=1):
-            if has_headers:
-                values = []
-                for column_index, value in enumerate(row):
-                    header = headers[column_index] if column_index < len(headers) and headers[column_index] else f"Column {column_index + 1}"
-                    values.append(f"{header}: {value.strip()}")
-                extracted_rows.append(f"Row {index}\n" + "\n".join(values))
-            else:
-                extracted_rows.append(f"Row {index}: " + ", ".join(value.strip() for value in row))
-
-        return "\n\n".join(extracted_rows)
-
-    def _extract_pdf_text(self, content: bytes) -> str:
-        """Extract text from a PDF using pypdf."""
-        try:
-            from pypdf import PdfReader
-        except ImportError as exc:
-            raise RuntimeError("PDF extraction requires pypdf to be installed") from exc
-
-        reader = PdfReader(io.BytesIO(content))
-        page_text = []
-        for page_number, page in enumerate(reader.pages, start=1):
-            extracted = page.extract_text() or ""
-            extracted = extracted.strip()
-            if extracted:
-                page_text.append(f"Page {page_number}\n{extracted}")
-
-        return "\n\n".join(page_text)
-
-    def _extract_docx_text(self, content: bytes) -> str:
-        """Extract text from a DOCX using python-docx."""
-        try:
-            from docx import Document
-        except ImportError as exc:
-            raise RuntimeError("DOCX extraction requires python-docx to be installed") from exc
-
-        document = Document(io.BytesIO(content))
-        paragraphs = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
-
-        table_rows = []
-        for table in document.tables:
-            for row in table.rows:
-                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                if cells:
-                    table_rows.append(" | ".join(cells))
-
-        return "\n\n".join(paragraphs + table_rows)
+        """Compatibility facade for the stateless text-extraction module."""
+        return extract_text(content, content_type, filename)
     
     async def _chunk_text(self, text: str, title: str = "", agent_id: Optional[str] = None) -> List[str]:
         """Chunk text via the shared chunker, honoring the agent's rag.chunking config."""

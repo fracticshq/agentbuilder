@@ -32,12 +32,6 @@ class Message(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
     
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-
 class ConversationSummary(BaseModel):
     """Summary of conversation turns."""
     id: str = Field(description="Summary ID")
@@ -48,12 +42,6 @@ class ConversationSummary(BaseModel):
     end_timestamp: datetime = Field(description="Last message timestamp")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-
 class EpisodicFact(BaseModel):
     """A fact about a user extracted from conversations."""
     id: str = Field(description="Fact ID")
@@ -75,12 +63,6 @@ class EpisodicFact(BaseModel):
             raise ValueError("Confidence must be ≥ 0.70 to store episodic fact")
         return v
     
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-
 class GraphRule(BaseModel):
     """A rule in the graph memory (condition → action)."""
     id: str = Field(description="Rule ID")
@@ -93,12 +75,6 @@ class GraphRule(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: Dict[str, Any] = Field(default_factory=dict)
     
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-
 class EscalationTrigger(BaseModel):
     """Safety escalation trigger."""
     id: str = Field(description="Trigger ID")
@@ -108,12 +84,6 @@ class EscalationTrigger(BaseModel):
     message: str = Field(description="Message to display to user")
     enabled: bool = Field(default=True)
     
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-
 class MemoryContext(BaseModel):
     """Complete memory context for a conversation."""
     conversation_id: str
@@ -132,25 +102,20 @@ class MemoryContext(BaseModel):
         """Check if any facts contain PII."""
         return any(fact.pii_encrypted for fact in self.episodic_facts)
     
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-
 class PIIField(BaseModel):
     """Encrypted PII field."""
     encrypted_value: str = Field(description="Base64-encoded encrypted value")
     iv: str = Field(description="Base64-encoded initialization vector")
+    salt: str = Field(description="Base64-encoded PBKDF2 salt")
     field_name: str = Field(description="Original field name")
+    key_id: str = Field(description="Identifier of the master key used for encryption")
+    key_version: int = Field(ge=1, description="Version of the master key used for encryption")
+    encryption_version: int = Field(ge=1, description="Version of the PII encryption envelope")
+    algorithm: str = Field(description="Authenticated encryption algorithm")
+    kdf: str = Field(description="Key derivation function")
+    kdf_iterations: int = Field(ge=1, description="PBKDF2 iteration count")
     encrypted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-
 class MemoryStats(BaseModel):
     """Memory usage statistics."""
     conversation_id: str
@@ -162,12 +127,6 @@ class MemoryStats(BaseModel):
     newest_message: Optional[datetime] = None
     storage_bytes: int = 0
     
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-
 class ExtractedEntity(BaseModel):
     """Entity extracted from text."""
     entity_type: str = Field(description="Type of entity (person, location, preference)")
@@ -175,8 +134,3 @@ class ExtractedEntity(BaseModel):
     confidence: float = Field(description="Extraction confidence", ge=0.0, le=1.0)
     is_pii: bool = Field(default=False, description="Whether entity contains PII")
     context: str = Field(description="Surrounding context")
-    
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }

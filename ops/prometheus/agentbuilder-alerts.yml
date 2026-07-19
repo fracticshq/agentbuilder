@@ -1,0 +1,50 @@
+groups:
+  - name: agentbuilder-api
+    rules:
+      - alert: AgentBuilderApiHighServerErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(http_requests_total[5m])), 1)
+          >= 0.01
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Agent Builder API 5xx ratio is at least 1%
+          runbook: docs/operations/MONGO_AND_WORKER_RECOVERY_RUNBOOK.md
+
+      - alert: AgentBuilderApiP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+          ) > 3
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Agent Builder API P95 request latency exceeds three seconds
+          runbook: docs/operations/MONGO_AND_WORKER_RECOVERY_RUNBOOK.md
+
+      - alert: AgentBuilderCatalogSyncFailure
+        expr: increase(catalog_sync_jobs_total{status="error"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: A Shopify catalog sync reached a terminal error
+          runbook: docs/api/P5_SHOPIFY_OPERATIONS.md
+
+      - alert: AgentBuilderCatalogSyncSlow
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(catalog_sync_job_duration_seconds_bucket[30m]))
+          ) > 1800
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Shopify catalog sync P95 exceeds 30 minutes
+          runbook: docs/api/P5_SHOPIFY_OPERATIONS.md

@@ -5,11 +5,20 @@ Activity API Endpoints — write and read conversation activity events.
 from datetime import datetime
 from typing import Optional
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ....dependencies import get_activity_service
 from ....services.activity_service import ActivityService, TrackEventRequest
+from ....auth.dependencies import ensure_brand_access, ensure_permission, require_dashboard_access
+from ....auth.models import Permission, User
+from ....auth.widget_session import WidgetSession, decode_widget_session
+from ....connections import connection_manager
+from ....services.conversation_scope_store import (
+    ConversationScopeAuthorizationError,
+    ConversationScopeStoreError,
+    conversation_scope_store,
+)
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -33,6 +42,48 @@ class BatchTrackResponse(BaseModel):
     ids: list[str]
 
 
+async def _require_widget_session(
+    x_widget_session: Optional[str],
+    expected_agent_id: str,
+) -> WidgetSession:
+    session = decode_widget_session(x_widget_session, expected_agent_id=expected_agent_id)
+    if not session:
+        raise HTTPException(status_code=401, detail="A valid widget session is required")
+    try:
+        await conversation_scope_store.require_active_widget_scope(
+            conversation_id=session.conversation_id,
+            user_id=session.user_id,
+            agent_id=session.agent_id,
+        )
+    except ConversationScopeAuthorizationError as exc:
+        raise HTTPException(status_code=401, detail="Widget session is no longer valid") from exc
+    except ConversationScopeStoreError as exc:
+        raise HTTPException(status_code=503, detail="Widget sessions are temporarily unavailable") from exc
+    return session
+
+
+def _bind_widget_event(request: TrackEventRequest, session: WidgetSession) -> TrackEventRequest:
+    """Derive tenant and actor identity from the signed widget session."""
+    if request.actor_type not in {"user", "agent"}:
+        raise HTTPException(status_code=422, detail="Widget activity actor_type must be user or agent")
+    return request.model_copy(
+        update={
+            "agent_id": session.agent_id,
+            "conversation_id": session.conversation_id,
+            "actor_id": session.user_id if request.actor_type == "user" else session.agent_id,
+            "session_id": session.conversation_id,
+        }
+    )
+
+
+async def _require_agent_brand_access(current_user: User | None, agent_id: str) -> None:
+    agent = await connection_manager.get_system_db().agents.find_one({"id": agent_id}, {"brand_id": 1})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    ensure_permission(current_user, Permission.MESSAGE_READ)
+    ensure_brand_access(current_user, agent.get("brand_id"))
+
+
 # ---------------------------------------------------------------------------
 # Write endpoints
 # ---------------------------------------------------------------------------
@@ -41,9 +92,11 @@ class BatchTrackResponse(BaseModel):
 async def track_event(
     request: TrackEventRequest,
     svc: ActivityService = Depends(get_activity_service),
+    x_widget_session: Optional[str] = Header(None),
 ):
     """Track a single activity event."""
-    event = await svc.track(request)
+    session = await _require_widget_session(x_widget_session, request.agent_id)
+    event = await svc.track(_bind_widget_event(request, session))
     return TrackEventResponse(id=event.id, timestamp=event.timestamp)
 
 
@@ -51,11 +104,16 @@ async def track_event(
 async def track_events_batch(
     body: BatchTrackRequest,
     svc: ActivityService = Depends(get_activity_service),
+    x_widget_session: Optional[str] = Header(None),
 ):
     """Track up to 50 activity events in a single request."""
     if not body.events:
         raise HTTPException(status_code=422, detail="events list is empty")
-    events = await svc.track_batch(body.events)
+    expected_agent_id = body.events[0].agent_id
+    if any(event.agent_id != expected_agent_id for event in body.events):
+        raise HTTPException(status_code=422, detail="Widget event batches must target one agent")
+    session = await _require_widget_session(x_widget_session, expected_agent_id)
+    events = await svc.track_batch([_bind_widget_event(event, session) for event in body.events])
     return BatchTrackResponse(created=len(events), ids=[e.id for e in events])
 
 
@@ -72,8 +130,10 @@ async def get_conversation_events(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     svc: ActivityService = Depends(get_activity_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Return events for a conversation, with optional filtering."""
+    await _require_agent_brand_access(current_user, agent_id)
     event_types = [e.strip() for e in event_type.split(",")] if event_type else None
     events, total = await svc.get_conversation_events(
         conversation_id=conversation_id,
@@ -95,8 +155,10 @@ async def get_conversation_timeline(
     conversation_id: str,
     agent_id: str = Query(..., description="Agent ID (required to resolve brand DB)"),
     svc: ActivityService = Depends(get_activity_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Return all events for a conversation sorted by timestamp."""
+    await _require_agent_brand_access(current_user, agent_id)
     events = await svc.get_conversation_timeline(
         conversation_id=conversation_id,
         agent_id=agent_id,
@@ -113,8 +175,10 @@ async def get_user_sessions(
     agent_id: str = Query(..., description="Agent ID (required to resolve brand DB)"),
     limit: int = Query(20, ge=1, le=200),
     svc: ActivityService = Depends(get_activity_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Return session summaries for a user (one row per conversation)."""
+    await _require_agent_brand_access(current_user, agent_id)
     sessions = await svc.get_user_sessions(
         user_id=user_id,
         agent_id=agent_id,
@@ -129,8 +193,10 @@ async def get_analytics(
     from_ts: Optional[datetime] = Query(None, alias="from"),
     to_ts: Optional[datetime] = Query(None, alias="to"),
     svc: ActivityService = Depends(get_activity_service),
+    current_user: User | None = Depends(require_dashboard_access),
 ):
     """Return aggregate analytics for an agent over a time range."""
+    await _require_agent_brand_access(current_user, agent_id)
     summary = await svc.get_analytics(
         agent_id=agent_id,
         from_ts=from_ts,

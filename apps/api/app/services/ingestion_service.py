@@ -6,8 +6,12 @@ import asyncio
 import io
 import uuid
 import json
-from typing import List, Optional, Tuple
-from datetime import datetime
+import math
+import hashlib
+import re
+import zipfile
+from typing import Any, AsyncIterator, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
 from fastapi import UploadFile
 import structlog
 import httpx
@@ -16,12 +20,84 @@ from commons.types.requests import IngestionRequest
 from commons.types.responses import IngestionResponse, IngestionStatus
 from ..config import Settings
 from ..connections import connection_manager
-from .chunking import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, chunk_text, resolve_agent_chunking
-from .job_store import JobStore
+from .chunking import (
+    DEFAULT_CHUNK_OVERLAP,
+    DEFAULT_CHUNK_SIZE,
+    clamp_chunking,
+    chunk_text,
+    resolve_agent_chunking,
+)
+from .job_store import (
+    DURABLE_REINDEX_KIND,
+    DuplicateDurableJobError,
+    JobStore,
+    JobStoreUnavailableError,
+)
+from .ingestion_payload_store import (
+    IngestionPayloadStore,
+    InvalidIngestionPayloadError,
+)
+from ..security.malware_scanner import (
+    MalwareDetectedError,
+    MalwareScanner,
+    MalwareScannerUnavailableError,
+)
 from .qdrant_vector_service import QdrantVectorService
 from .runtime_settings_service import RuntimeSettingsService
 
 logger = structlog.get_logger()
+
+STAGED_CHUNKS_COLLECTION = "ingestion_staged_chunks"
+_IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+class IngestionEmbeddingError(RuntimeError):
+    """Raised when Voyage cannot produce a valid embedding."""
+
+
+class IngestionStorageError(RuntimeError):
+    """Raised when a chunk cannot be durably stored in every configured backend."""
+
+
+class InvalidIngestionInputError(ValueError):
+    """A permanent, safe-to-report source/input validation failure."""
+
+
+class IngestionIdempotencyConflictError(ValueError):
+    """An idempotency key was reused with a different upload manifest."""
+
+
+def _utc_timestamp() -> str:
+    """Return an unambiguous UTC timestamp for durable job state."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _public_job_error(exc: Exception) -> str:
+    """Map backend failures to a safe status message for dashboard clients."""
+    if isinstance(exc, IngestionEmbeddingError):
+        return "Document embedding failed"
+    if isinstance(exc, IngestionStorageError):
+        return "Failed to store knowledge-base document"
+    if isinstance(exc, (InvalidIngestionInputError, InvalidIngestionPayloadError)):
+        return "Document input is invalid"
+    return "Document processing failed"
+
+
+_SAFE_JOB_ERRORS = {
+    "Document embedding failed",
+    "Failed to store knowledge-base document",
+    "Document processing failed",
+    "Document input is invalid",
+}
+
+
+def _safe_stored_job_error(status: str, error: object) -> Optional[str]:
+    """Keep legacy job records from exposing stored provider diagnostics."""
+    if status != "error":
+        return None
+    if isinstance(error, str) and error in _SAFE_JOB_ERRORS:
+        return error
+    return "Document processing failed"
 
 
 class IngestionService:
@@ -29,7 +105,9 @@ class IngestionService:
     
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.job_store = JobStore()
+        self.job_store = JobStore(job_ttl_seconds=settings.INGESTION_JOB_TTL_SECONDS)
+        self.payload_store = IngestionPayloadStore(settings)
+        self.malware_scanner = MalwareScanner(settings)
         self.runtime_settings_service = RuntimeSettingsService(settings)
         self.qdrant = QdrantVectorService(settings) if settings.VECTOR_BACKEND == "qdrant" else None
 
@@ -41,7 +119,12 @@ class IngestionService:
             "model": config["model"],
         }
     
-    async def start_ingestion_job(self, files: List[dict], agent_id: Optional[str] = None) -> str:
+    async def start_ingestion_job(
+        self,
+        files: List[dict],
+        agent_id: Optional[str] = None,
+        brand_id: Optional[str] = None,
+    ) -> str:
         """Start a new ingestion job."""
         job_id = str(uuid.uuid4())
 
@@ -50,12 +133,768 @@ class IngestionService:
             "files_count": len(files),
             "processed_count": 0,
             "agent_id": agent_id,
-            "created_at": datetime.utcnow().isoformat(),
-            "error": None
+            "brand_id": brand_id,
+            "created_at": _utc_timestamp(),
+            "completed_at": None,
+            "error": None,
         })
 
         logger.info("Started ingestion job", job_id=job_id, files_count=len(files), agent_id=agent_id)
         return job_id
+
+    async def submit_durable_job(
+        self,
+        files: List[dict],
+        *,
+        agent_id: str | None,
+        brand_id: str,
+        brand_slug: str,
+        chunk_size: int,
+        chunk_overlap: int,
+        idempotency_key: str | None = None,
+        job_metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Persist encrypted sources and an immutable v2 job before returning.
+
+        This is deliberately separate from ``start_ingestion_job`` because the
+        latter remains a compatibility hook for historical tests/callers. Only
+        this method creates work that the restart-safe worker is allowed to
+        claim.
+        """
+        if not all(isinstance(value, str) and value for value in (brand_id, brand_slug)):
+            raise InvalidIngestionInputError("Agent brand scope is incomplete")
+        if agent_id is not None and (not isinstance(agent_id, str) or not agent_id):
+            raise InvalidIngestionInputError("Agent identifier is invalid")
+        if not files:
+            raise InvalidIngestionInputError("At least one document is required")
+        normalized_idempotency_key = self._normalize_idempotency_key(idempotency_key)
+        normalized_job_metadata = self._normalize_durable_job_metadata(job_metadata)
+        source_manifest = self._source_manifest(files)
+        if normalized_idempotency_key:
+            existing = await self.job_store.find_durable_job_by_idempotency(
+                agent_id=agent_id,
+                brand_id=brand_id,
+                idempotency_key=normalized_idempotency_key,
+            )
+            if existing:
+                if self._matches_idempotent_submission(
+                    existing,
+                    source_manifest=source_manifest,
+                    brand_slug=brand_slug,
+                ):
+                    return str(existing["job_id"])
+                raise IngestionIdempotencyConflictError(
+                    "Idempotency key was already used for a different document upload"
+                )
+        # Source bytes must be scanned before durable encryption/persistence so
+        # an infected payload cannot be retained, leased, or processed later.
+        for file_index, file_data in enumerate(files):
+            try:
+                scan = await self.malware_scanner.scan(
+                    file_data["content"], filename=file_data["filename"]
+                )
+                logger.info(
+                    "durable_upload_malware_scan_completed",
+                    brand_id=brand_id,
+                    file_index=file_index,
+                    result=scan.status,
+                )
+            except MalwareDetectedError:
+                logger.warning(
+                    "durable_upload_malware_detected",
+                    brand_id=brand_id,
+                    file_index=file_index,
+                )
+                raise
+            except MalwareScannerUnavailableError:
+                logger.error(
+                    "durable_upload_malware_scan_unavailable",
+                    brand_id=brand_id,
+                    file_index=file_index,
+                )
+                raise
+        job_id = str(uuid.uuid4())
+        snapshot = {
+            "agent_id": agent_id,
+            "brand_id": brand_id,
+            "brand_slug": brand_slug,
+            "chunk_size": int(chunk_size),
+            "chunk_overlap": int(chunk_overlap),
+        }
+        payload_refs = await self.payload_store.persist(job_id, files)
+        try:
+            await self.job_store.create_durable_job(
+                job_id,
+                {
+                    "files_count": len(payload_refs),
+                    "agent_id": agent_id,
+                    "brand_id": brand_id,
+                    "brand_slug": brand_slug,
+                    "snapshot": snapshot,
+                    "payload_refs": payload_refs,
+                    "source_manifest": source_manifest,
+                    **normalized_job_metadata,
+                    **({"idempotency_key": normalized_idempotency_key} if normalized_idempotency_key else {}),
+                    "max_attempts": max(1, int(self.settings.INGESTION_MAX_ATTEMPTS)),
+                },
+            )
+        except DuplicateDurableJobError:
+            await self.payload_store.delete_job_payloads(job_id)
+            existing = await self.job_store.find_durable_job_by_idempotency(
+                agent_id=agent_id,
+                brand_id=brand_id,
+                idempotency_key=normalized_idempotency_key or "",
+            )
+            if existing and self._matches_idempotent_submission(
+                existing,
+                source_manifest=source_manifest,
+                brand_slug=brand_slug,
+            ):
+                return str(existing["job_id"])
+            raise IngestionIdempotencyConflictError(
+                "Idempotency key was already used for a different document upload"
+            )
+        except Exception:
+            # A payload without its job is inaccessible and is promptly removed;
+            # the TTL index remains a bounded-retention backstop on interruption.
+            await self.payload_store.delete_job_payloads(job_id)
+            raise
+        logger.info("durable_ingestion_job_queued", job_id=job_id, files_count=len(payload_refs))
+        return job_id
+
+    async def submit_reindex_job(
+        self,
+        *,
+        document_id: str,
+        agent_id: str | None,
+        brand_id: str,
+        brand_slug: str,
+        chunk_size: int,
+        chunk_overlap: int,
+        idempotency_key: str | None = None,
+    ) -> str:
+        """Queue a durable in-place embedding refresh for one knowledge document.
+
+        A re-index refreshes embeddings and vector-backend payloads from already
+        published chunks; it does not need to retain source bytes or create a
+        second logical document. The immutable target and tenant snapshot make
+        retries, cancellation, and worker recovery use the same protocol as
+        uploads.
+        """
+        if not all(isinstance(value, str) and value for value in (document_id, brand_id, brand_slug)):
+            raise InvalidIngestionInputError("Knowledge document scope is incomplete")
+        if agent_id is not None and (not isinstance(agent_id, str) or not agent_id):
+            raise InvalidIngestionInputError("Agent identifier is invalid")
+        normalized_idempotency_key = self._normalize_idempotency_key(idempotency_key)
+        if normalized_idempotency_key:
+            existing = await self.job_store.find_durable_job_by_idempotency(
+                agent_id=agent_id,
+                brand_id=brand_id,
+                idempotency_key=normalized_idempotency_key,
+                kind=DURABLE_REINDEX_KIND,
+            )
+            if existing:
+                if existing.get("reindex_document_id") == document_id and existing.get("brand_slug") == brand_slug:
+                    return str(existing["job_id"])
+                raise IngestionIdempotencyConflictError(
+                    "Idempotency key was already used for a different re-index request"
+                )
+
+        job_id = str(uuid.uuid4())
+        snapshot = {
+            "agent_id": agent_id,
+            "brand_id": brand_id,
+            "brand_slug": brand_slug,
+            "chunk_size": int(chunk_size),
+            "chunk_overlap": int(chunk_overlap),
+        }
+        try:
+            await self.job_store.create_durable_job(
+                job_id,
+                {
+                    "files_count": 0,
+                    "items_count": 1,
+                    "agent_id": agent_id,
+                    "brand_id": brand_id,
+                    "brand_slug": brand_slug,
+                    "snapshot": snapshot,
+                    "reindex_document_id": document_id,
+                    "submission_kind": "knowledge_reindex",
+                    **({"idempotency_key": normalized_idempotency_key} if normalized_idempotency_key else {}),
+                    "max_attempts": max(1, int(self.settings.INGESTION_MAX_ATTEMPTS)),
+                },
+                kind=DURABLE_REINDEX_KIND,
+            )
+        except DuplicateDurableJobError:
+            existing = await self.job_store.find_durable_job_by_idempotency(
+                agent_id=agent_id,
+                brand_id=brand_id,
+                idempotency_key=normalized_idempotency_key or "",
+                kind=DURABLE_REINDEX_KIND,
+            )
+            if existing and existing.get("reindex_document_id") == document_id and existing.get("brand_slug") == brand_slug:
+                return str(existing["job_id"])
+            raise IngestionIdempotencyConflictError(
+                "Idempotency key was already used for a different re-index request"
+            )
+        logger.info("durable_knowledge_reindex_queued", job_id=job_id, brand_id=brand_id)
+        return job_id
+
+    @staticmethod
+    def _normalize_idempotency_key(value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not _IDEMPOTENCY_KEY_PATTERN.fullmatch(value):
+            raise InvalidIngestionInputError("Idempotency key is invalid")
+        return value
+
+    @staticmethod
+    def _normalize_durable_job_metadata(value: dict[str, Any] | None) -> dict[str, Any]:
+        """Allow only small, source-free status metadata in a durable job."""
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise InvalidIngestionInputError("Job metadata is invalid")
+        allowed = {"submission_kind", "items_count"}
+        if set(value) - allowed:
+            raise InvalidIngestionInputError("Job metadata contains unsupported fields")
+        normalized: dict[str, Any] = {}
+        if "submission_kind" in value:
+            kind = value["submission_kind"]
+            if not isinstance(kind, str) or kind not in {"document", "knowledge_document", "knowledge_bulk", "knowledge_reindex"}:
+                raise InvalidIngestionInputError("Job submission kind is invalid")
+            normalized["submission_kind"] = kind
+        if "items_count" in value:
+            try:
+                items_count = int(value["items_count"])
+            except (TypeError, ValueError) as exc:
+                raise InvalidIngestionInputError("Job item count is invalid") from exc
+            if not 1 <= items_count <= 1000:
+                raise InvalidIngestionInputError("Job item count is invalid")
+            normalized["items_count"] = items_count
+        return normalized
+
+    @staticmethod
+    def _source_manifest(files: List[dict]) -> list[dict[str, Any]]:
+        manifest: list[dict[str, Any]] = []
+        for index, file_data in enumerate(files):
+            content = file_data.get("content")
+            filename = file_data.get("filename")
+            content_type = file_data.get("content_type")
+            context = file_data.get("context")
+            if not isinstance(content, bytes) or not isinstance(filename, str) or not isinstance(content_type, str):
+                raise InvalidIngestionInputError("Document upload is invalid")
+            if context is not None:
+                try:
+                    context_serialized = json.dumps(context, sort_keys=True, separators=(",", ":"))
+                except (TypeError, ValueError) as exc:
+                    raise InvalidIngestionInputError("Document upload context is invalid") from exc
+                context_sha256 = hashlib.sha256(context_serialized.encode("utf-8")).hexdigest()
+            else:
+                context_sha256 = None
+            manifest.append(
+                {
+                    "file_index": index,
+                    "filename": filename,
+                    "content_type": content_type,
+                    "size_bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    **({"context_sha256": context_sha256} if context_sha256 else {}),
+                }
+            )
+        return manifest
+
+    @staticmethod
+    def _matches_idempotent_submission(
+        existing: dict,
+        *,
+        source_manifest: list[dict[str, Any]],
+        brand_slug: str,
+    ) -> bool:
+        return (
+            existing.get("brand_slug") == brand_slug
+            and existing.get("source_manifest") == source_manifest
+        )
+
+    async def process_next_durable_job(self, *, worker_id: str) -> bool:
+        """Claim and process at most one v2 job. Used by the standalone worker."""
+        job = await self.job_store.claim_next(
+            worker_id=worker_id,
+            lease_seconds=self.settings.INGESTION_LEASE_SECONDS,
+        )
+        if not job:
+            return False
+        if job.get("kind") == DURABLE_REINDEX_KIND:
+            await self._process_claimed_reindex_job(job)
+        else:
+            await self._process_claimed_durable_job(job)
+        return True
+
+    async def _process_claimed_reindex_job(self, job: dict) -> None:
+        job_id = str(job.get("job_id") or "")
+        lease_token = str(job.get("lease_token") or "")
+        try:
+            snapshot = self._durable_snapshot(job)
+            document_id = job.get("reindex_document_id")
+            if not isinstance(document_id, str) or not document_id:
+                raise InvalidIngestionInputError("Re-index target is invalid")
+            if not await self.job_store.begin_publish(job_id, lease_token):
+                return
+            refreshed = await self._refresh_document_embeddings(
+                job_id=job_id,
+                lease_token=lease_token,
+                document_id=document_id,
+                snapshot=snapshot,
+            )
+            if not refreshed:
+                raise InvalidIngestionInputError("Knowledge document is no longer available for re-indexing")
+            if await self.job_store.complete(job_id, lease_token):
+                logger.info("durable_knowledge_reindex_completed", job_id=job_id, chunks=refreshed)
+        except Exception as exc:
+            permanent = isinstance(exc, InvalidIngestionInputError)
+            try:
+                await self.job_store.retry_or_fail(
+                    job_id,
+                    lease_token,
+                    error=_public_job_error(exc),
+                    retryable=not permanent,
+                    max_attempts=max(1, int(self.settings.INGESTION_MAX_ATTEMPTS)),
+                    retry_delay_seconds=max(1, int(self.settings.INGESTION_RETRY_DELAY_SECONDS)),
+                )
+            except JobStoreUnavailableError:
+                pass
+            logger.warning(
+                "durable_knowledge_reindex_failed",
+                job_id=job_id,
+                error_type=type(exc).__name__,
+                retryable=not permanent,
+            )
+
+    async def _refresh_document_embeddings(
+        self,
+        *,
+        job_id: str,
+        lease_token: str,
+        document_id: str,
+        snapshot: dict,
+    ) -> int:
+        """Refresh existing document chunks in place, preserving logical IDs."""
+        try:
+            collection = connection_manager.get_brand_db(snapshot["brand_slug"])["knowledge_base"]
+        except Exception as exc:
+            raise IngestionStorageError("Knowledge storage is unavailable") from exc
+
+        refreshed = 0
+        found = False
+        for query in ({"doc_id": document_id}, {"metadata.job_id": document_id}):
+            cursor = collection.find(query)
+            async for document in cursor:
+                found = True
+                if not await self.job_store.renew_lease(
+                    job_id, lease_token, lease_seconds=self.settings.INGESTION_LEASE_SECONDS
+                ):
+                    return refreshed
+                content = document.get("content")
+                chunk_id = document.get("chunk_id") or document.get("_id")
+                if not isinstance(content, str) or not content.strip() or not isinstance(chunk_id, str):
+                    raise InvalidIngestionInputError("Knowledge document has an invalid chunk")
+                embeddings = await self._generate_embeddings(content)
+                self._validate_embedding(embeddings)
+                updated_at = _utc_timestamp()
+                try:
+                    await collection.update_one(
+                        {"_id": document.get("_id")},
+                        {"$set": {"embeddings": embeddings, "reindexed_at": updated_at, "reindex_job_id": job_id, "updated_at": updated_at}},
+                    )
+                    if self.qdrant:
+                        refreshed_document = dict(document)
+                        refreshed_document.update({"embeddings": embeddings, "updated_at": updated_at, "reindexed_at": updated_at, "reindex_job_id": job_id})
+                        await self.qdrant.upsert_chunk(refreshed_document, snapshot["brand_slug"])
+                except Exception as exc:
+                    raise IngestionStorageError("Failed to refresh knowledge document vectors") from exc
+                refreshed += 1
+                if not await self.job_store.mark_progress(job_id, lease_token, refreshed):
+                    return refreshed
+            if found:
+                break
+        return refreshed
+
+    async def _process_claimed_durable_job(self, job: dict) -> None:
+        job_id = str(job.get("job_id") or "")
+        lease_token = str(job.get("lease_token") or "")
+        try:
+            snapshot = self._durable_snapshot(job)
+            if job.get("phase") != "publishing":
+                await self._stage_claimed_job(job, lease_token, snapshot)
+                if not await self.job_store.begin_publish(job_id, lease_token):
+                    # Cancellation that wins before the publish fence leaves no
+                    # visible chunks. Staging/payload retention is then removed.
+                    current = await self.job_store.get(job_id)
+                    if current and current.get("status") == "cancelled":
+                        await self._cleanup_durable_artifacts(job_id)
+                    return
+            elif not await self.job_store.renew_lease(
+                job_id,
+                lease_token,
+                lease_seconds=self.settings.INGESTION_LEASE_SECONDS,
+            ):
+                return
+            await self._publish_claimed_job(job_id, lease_token, snapshot)
+            if await self.job_store.complete(job_id, lease_token):
+                await self._cleanup_durable_artifacts(job_id)
+                logger.info("durable_ingestion_job_completed", job_id=job_id)
+        except Exception as exc:
+            permanent = isinstance(exc, (InvalidIngestionInputError, InvalidIngestionPayloadError))
+            try:
+                await self.job_store.retry_or_fail(
+                    job_id,
+                    lease_token,
+                    error=_public_job_error(exc),
+                    retryable=not permanent,
+                    max_attempts=max(1, int(self.settings.INGESTION_MAX_ATTEMPTS)),
+                    retry_delay_seconds=max(1, int(self.settings.INGESTION_RETRY_DELAY_SECONDS)),
+                )
+                current = await self.job_store.get(job_id)
+                if current and current.get("status") in {"error", "cancelled"}:
+                    await self._cleanup_durable_artifacts(job_id)
+            except JobStoreUnavailableError:
+                # The original failure must remain recoverable from its lease;
+                # never turn a Mongo outage into an unsafe local terminal state.
+                pass
+            logger.warning(
+                "durable_ingestion_job_failed",
+                job_id=job_id,
+                error_type=type(exc).__name__,
+                retryable=not permanent,
+            )
+
+    def _durable_snapshot(self, job: dict) -> dict:
+        snapshot = job.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise InvalidIngestionInputError("Ingestion snapshot is missing")
+        required = ("brand_id", "brand_slug", "chunk_size", "chunk_overlap")
+        if any(snapshot.get(key) in (None, "") for key in required):
+            raise InvalidIngestionInputError("Ingestion snapshot is invalid")
+        # Scope fields are duplicated outside the snapshot for authorization.
+        # Requiring equality prevents a malformed Mongo record from silently
+        # writing to a different brand database.
+        for key in ("brand_id", "brand_slug"):
+            if job.get(key) != snapshot.get(key):
+                raise InvalidIngestionInputError("Ingestion scope snapshot is invalid")
+        if job.get("agent_id") != snapshot.get("agent_id"):
+            raise InvalidIngestionInputError("Ingestion scope snapshot is invalid")
+        try:
+            chunk_size, chunk_overlap = int(snapshot["chunk_size"]), int(snapshot["chunk_overlap"])
+        except (TypeError, ValueError) as exc:
+            raise InvalidIngestionInputError("Ingestion chunking snapshot is invalid") from exc
+        if chunk_size <= 0 or chunk_overlap < 0 or chunk_overlap >= chunk_size:
+            raise InvalidIngestionInputError("Ingestion chunking snapshot is invalid")
+        return {
+            "agent_id": str(snapshot["agent_id"]) if snapshot.get("agent_id") else None,
+            "brand_id": str(snapshot["brand_id"]),
+            "brand_slug": str(snapshot["brand_slug"]),
+            "chunk_size": chunk_size,
+            "chunk_overlap": chunk_overlap,
+        }
+
+    async def _stage_claimed_job(self, job: dict, lease_token: str, snapshot: dict) -> None:
+        job_id = str(job["job_id"])
+        payload_refs = job.get("payload_refs")
+        if not isinstance(payload_refs, list) or len(payload_refs) != int(job.get("files_count") or 0):
+            raise InvalidIngestionInputError("Ingestion payload references are invalid")
+        for index, ref in enumerate(sorted(payload_refs, key=lambda item: item.get("file_index", -1))):
+            if not isinstance(ref, dict) or ref.get("file_index") != index or not isinstance(ref.get("payload_id"), str):
+                raise InvalidIngestionInputError("Ingestion payload references are invalid")
+            if not await self.job_store.renew_lease(
+                job_id, lease_token, lease_seconds=self.settings.INGESTION_LEASE_SECONDS
+            ):
+                return
+            file_data = await self.payload_store.load(ref["payload_id"], job_id=job_id)
+            try:
+                chunks = await self._extract_and_chunk(
+                    file_data["content"],
+                    file_data["content_type"],
+                    file_data["filename"],
+                    chunk_size=snapshot["chunk_size"],
+                    chunk_overlap=snapshot["chunk_overlap"],
+                )
+            except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+                raise InvalidIngestionInputError("Document cannot be processed") from exc
+            chunks = self._apply_payload_context(
+                chunks,
+                context=file_data.get("context"),
+                filename=file_data["filename"],
+                content_type_header=file_data["content_type"],
+            )
+            if not chunks:
+                raise InvalidIngestionInputError("Document contains no ingestible content")
+            for chunk_index, chunk in enumerate(chunks):
+                if not await self.job_store.renew_lease(
+                    job_id, lease_token, lease_seconds=self.settings.INGESTION_LEASE_SECONDS
+                ):
+                    return
+                await self._stage_chunk(
+                    job_id=job_id,
+                    file_index=index,
+                    chunk_index=chunk_index,
+                    chunk=chunk,
+                    filename=file_data["filename"],
+                    snapshot=snapshot,
+                )
+            if not await self.job_store.mark_progress(job_id, lease_token, index + 1):
+                return
+
+    @staticmethod
+    def _normalize_folder_path(value: object) -> str:
+        raw_path = str(value or "/").strip()
+        if not raw_path:
+            raw_path = "/"
+        if not raw_path.startswith("/"):
+            raw_path = f"/{raw_path}"
+        normalized = re.sub(r"/+", "/", raw_path).rstrip("/")
+        return normalized or "/"
+
+    @staticmethod
+    def _source_type(content_type: str, filename: str) -> str:
+        normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+        content_types = {
+            "application/pdf": "pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+            "text/plain": "txt",
+            "text/markdown": "md",
+            "text/html": "html",
+            "application/json": "json",
+            "text/csv": "csv",
+        }
+        if normalized_content_type in content_types:
+            return content_types[normalized_content_type]
+        lowered_filename = (filename or "").lower()
+        for suffix, source_type in {
+            ".pdf": "pdf", ".docx": "docx", ".txt": "txt", ".md": "md",
+            ".markdown": "md", ".html": "html", ".htm": "html", ".json": "json", ".csv": "csv",
+        }.items():
+            if lowered_filename.endswith(suffix):
+                return source_type
+        return "unknown"
+
+    def _apply_payload_context(
+        self,
+        chunks: list[dict],
+        *,
+        context: object,
+        filename: str,
+        content_type_header: str,
+    ) -> list[dict]:
+        """Apply encrypted knowledge metadata after source extraction.
+
+        The job document contains only opaque references. This method is the
+        first point at which optional folder/product/dealer metadata is made
+        available to the worker, after its encrypted payload is recovered.
+        """
+        if context is None:
+            return chunks
+        if not isinstance(context, dict):
+            raise InvalidIngestionInputError("Document upload context is invalid")
+        allowed = {"kb_content_type", "folder_path", "product_data", "dealer_data"}
+        if set(context) - allowed:
+            raise InvalidIngestionInputError("Document upload context is invalid")
+
+        kb_content_type = context.get("kb_content_type")
+        if kb_content_type is not None and (
+            not isinstance(kb_content_type, str)
+            or kb_content_type not in {"product", "dealer", "faq", "office", "category", "guide", "document"}
+        ):
+            raise InvalidIngestionInputError("Document content type is invalid")
+        product_data = context.get("product_data")
+        dealer_data = context.get("dealer_data")
+        if product_data is not None and not isinstance(product_data, dict):
+            raise InvalidIngestionInputError("Product metadata is invalid")
+        if dealer_data is not None and not isinstance(dealer_data, dict):
+            raise InvalidIngestionInputError("Dealer metadata is invalid")
+        if product_data is not None and dealer_data is not None:
+            raise InvalidIngestionInputError("Document cannot be both product and dealer data")
+
+        folder = self._normalize_folder_path(context.get("folder_path"))
+        name = filename.strip().strip("/") or "untitled"
+        path = f"{folder.rstrip('/')}/{name}" if folder != "/" else f"/{name}"
+        source_type = self._source_type(content_type_header, filename)
+        for chunk in chunks:
+            metadata = dict(chunk.get("metadata") or {})
+            metadata.update(
+                {
+                    "filename": filename,
+                    "name": name,
+                    "folder": folder,
+                    "path": path,
+                    "content_type_header": content_type_header,
+                    "source_type": source_type,
+                }
+            )
+            chunk["metadata"] = metadata
+            if kb_content_type is not None:
+                chunk["content_type"] = kb_content_type
+            if product_data is not None:
+                chunk["product_data"] = dict(product_data)
+                chunk["dealer_data"] = None
+            if dealer_data is not None:
+                chunk["dealer_data"] = dict(dealer_data)
+                chunk["product_data"] = None
+        return chunks
+
+    @staticmethod
+    def _durable_chunk_id(job_id: str, file_index: int, chunk_index: int) -> str:
+        digest = hashlib.sha256(f"{job_id}:{file_index}:{chunk_index}".encode("utf-8")).hexdigest()
+        return f"ingest-{digest}"
+
+    def _staged_collection(self):
+        try:
+            return connection_manager.get_system_db()[STAGED_CHUNKS_COLLECTION]
+        except (RuntimeError, AttributeError, KeyError, TypeError) as exc:
+            raise IngestionStorageError("Staging storage is unavailable") from exc
+
+    async def _ensure_staged_indexes(self, collection: Any) -> None:
+        # Index creation is idempotent at Mongo; keeping it local makes workers
+        # deployable without requiring a one-time migration command.
+        try:
+            await collection.create_index("expires_at", expireAfterSeconds=0, name="ingestion_staged_chunks_expiry_idx")
+            await collection.create_index([("job_id", 1), ("file_index", 1), ("chunk_index", 1)], name="ingestion_staged_chunks_job_idx")
+        except Exception as exc:
+            logger.warning("ingestion_staging_index_setup_failed", error_type=type(exc).__name__)
+
+    async def _stage_chunk(
+        self,
+        *,
+        job_id: str,
+        file_index: int,
+        chunk_index: int,
+        chunk: dict,
+        filename: str,
+        snapshot: dict,
+    ) -> None:
+        content = chunk.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise InvalidIngestionInputError("Document contains invalid text")
+        embeddings = await self._generate_embeddings(content)
+        chunk_id = self._durable_chunk_id(job_id, file_index, chunk_index)
+        metadata = dict(chunk.get("metadata") or {})
+        metadata.update(
+            {
+                "job_id": job_id,
+                "agent_id": snapshot["agent_id"],
+                "brand_id": snapshot["brand_id"],
+                "brand_slug": snapshot["brand_slug"],
+                "ingestion_file_index": file_index,
+                "ingestion_chunk_index": chunk_index,
+            }
+        )
+        now = _utc_timestamp()
+        document = {
+            "_id": chunk_id,
+            "chunk_id": chunk_id,
+            "job_id": job_id,
+            "file_index": file_index,
+            "chunk_index": chunk_index,
+            "filename": filename,
+            "content": content,
+            "embeddings": embeddings,
+            "metadata": metadata,
+            "content_type": chunk.get("content_type") or "guide",
+            "product_data": chunk.get("product_data"),
+            "dealer_data": chunk.get("dealer_data"),
+            "agent_id": snapshot["agent_id"],
+            "brand_id": snapshot["brand_id"],
+            "brand_slug": snapshot["brand_slug"],
+            "updated_at": now,
+            "expires_at": datetime.now(timezone.utc) + timedelta(seconds=self.settings.INGESTION_JOB_TTL_SECONDS),
+        }
+        collection = self._staged_collection()
+        await self._ensure_staged_indexes(collection)
+        try:
+            update_doc = dict(document)
+            update_doc.pop("_id")
+            await collection.update_one(
+                {"_id": chunk_id},
+                {"$set": update_doc, "$setOnInsert": {"created_at": now}},
+                upsert=True,
+            )
+        except Exception as exc:
+            logger.warning("ingestion_chunk_stage_failed", job_id=job_id, error_type=type(exc).__name__)
+            raise IngestionStorageError("Unable to stage document chunk") from exc
+
+    async def _publish_claimed_job(self, job_id: str, lease_token: str, snapshot: dict) -> None:
+        published_count = 0
+        async for staged in self._iter_staged_chunks(job_id):
+            if not await self.job_store.renew_lease(
+                job_id, lease_token, lease_seconds=self.settings.INGESTION_LEASE_SECONDS
+            ):
+                return
+            await self._publish_staged_chunk(staged, snapshot)
+            published_count += 1
+        if not published_count:
+            raise IngestionStorageError("No staged chunks are available for publishing")
+
+    async def _iter_staged_chunks(self, job_id: str) -> AsyncIterator[dict]:
+        collection = self._staged_collection()
+        try:
+            cursor = collection.find({"job_id": job_id})
+            if hasattr(cursor, "sort"):
+                cursor = cursor.sort([("file_index", 1), ("chunk_index", 1)])
+            async for document in cursor:
+                yield document
+        except IngestionStorageError:
+            raise
+        except Exception as exc:
+            logger.warning("ingestion_staged_chunk_read_failed", job_id=job_id, error_type=type(exc).__name__)
+            raise IngestionStorageError("Unable to read staged document chunks") from exc
+
+    async def _publish_staged_chunk(self, staged: dict, snapshot: dict) -> None:
+        chunk_id = staged.get("chunk_id")
+        if not isinstance(chunk_id, str) or not chunk_id:
+            raise IngestionStorageError("Staged chunk is invalid")
+        self._validate_embedding(staged.get("embeddings"))
+        # Deliberately use the creation-time slug. Do not resolve current agent
+        # ownership here: an agent move must not change a queued job's target.
+        try:
+            brand_db = connection_manager.get_brand_db(snapshot["brand_slug"])
+            collection = brand_db["knowledge_base"]
+            document = {
+                "_id": chunk_id,
+                "chunk_id": chunk_id,
+                "doc_id": staged.get("job_id"),
+                "job_id": staged.get("job_id"),
+                "filename": staged.get("filename"),
+                "content": staged.get("content"),
+                "embeddings": staged.get("embeddings"),
+                "metadata": dict(staged.get("metadata") or {}),
+                "content_type": staged.get("content_type") or "guide",
+                "product_data": staged.get("product_data"),
+                "dealer_data": staged.get("dealer_data"),
+                "agent_id": snapshot["agent_id"],
+                "brand_id": snapshot["brand_id"],
+                "brand_slug": snapshot["brand_slug"],
+                "updated_at": _utc_timestamp(),
+            }
+            update_doc = dict(document)
+            update_doc.pop("_id")
+            await collection.update_one(
+                {"_id": chunk_id},
+                {"$set": update_doc, "$setOnInsert": {"created_at": _utc_timestamp()}},
+                upsert=True,
+            )
+            if self.qdrant:
+                await self.qdrant.upsert_chunk(document, snapshot["brand_slug"])
+        except IngestionStorageError:
+            raise
+        except Exception as exc:
+            logger.warning("ingestion_chunk_publish_failed", chunk_id=chunk_id, error_type=type(exc).__name__)
+            raise IngestionStorageError("Failed to store knowledge-base document") from exc
+
+    async def _cleanup_durable_artifacts(self, job_id: str) -> None:
+        await self.payload_store.delete_job_payloads(job_id)
+        try:
+            await self._staged_collection().delete_many({"job_id": job_id})
+        except Exception as exc:
+            logger.warning("ingestion_staging_cleanup_failed", job_id=job_id, error_type=type(exc).__name__)
 
     async def process_documents(self, job_id: str, files: List[dict], agent_id: Optional[str] = None):
         """Process documents in background."""
@@ -84,25 +923,51 @@ class IngestionService:
 
                 logger.info("Processed file", job_id=job_id, filename=filename, chunks_count=len(chunks))
 
-            await self.job_store.update(job_id, {"status": "completed"})
+            await self.job_store.update(
+                job_id,
+                {"status": "completed", "completed_at": _utc_timestamp()},
+            )
             logger.info("Completed ingestion job", job_id=job_id)
 
-        except Exception as e:
-            await self.job_store.update(job_id, {"status": "error", "error": str(e)})
-            logger.error("Error processing documents", job_id=job_id, error=str(e))
+        except Exception as exc:
+            await self.job_store.update(
+                job_id,
+                {
+                    "status": "error",
+                    "error": _public_job_error(exc),
+                    "completed_at": _utc_timestamp(),
+                },
+            )
+            logger.error(
+                "ingestion_job_processing_failed",
+                job_id=job_id,
+                error_type=type(exc).__name__,
+            )
     
-    async def process_chunk(self, request: IngestionRequest) -> IngestionResponse:
+    async def process_chunk(
+        self,
+        request: IngestionRequest,
+        *,
+        agent_id: Optional[str] = None,
+    ) -> IngestionResponse:
         """Process a single text chunk."""
         try:
             # Generate embeddings
             embeddings = await self._generate_embeddings(request.text)
             
             # Create chunk document
+            metadata = dict(request.metadata or {})
+            if agent_id:
+                # The route has already authorized this agent. Persist that
+                # canonical scope rather than trusting caller-supplied metadata.
+                metadata["agent_id"] = agent_id
+
             chunk_doc = {
                 "doc_id": request.doc_id or str(uuid.uuid4()),
                 "content": request.text,
                 "embeddings": embeddings,
-                "metadata": request.metadata,
+                "metadata": metadata,
+                "agent_id": agent_id,
                 "created_at": datetime.utcnow().isoformat()
             }
             
@@ -115,12 +980,12 @@ class IngestionService:
                 message="Chunk processed successfully"
             )
             
-        except Exception as e:
-            logger.error("Error processing chunk", error=str(e))
+        except Exception as exc:
+            logger.error("ingestion_chunk_processing_failed", error_type=type(exc).__name__)
             return IngestionResponse(
                 success=False,
                 chunk_id=None,
-                message=f"Error processing chunk: {str(e)}"
+                message="Unable to process chunk",
             )
     
     async def get_job_status(self, job_id: str) -> Optional[IngestionStatus]:
@@ -129,22 +994,37 @@ class IngestionService:
         if not job_info:
             return None
 
+        internal_status = job_info["status"]
+        public_status = {
+            "queued": "pending",
+            "running": "processing",
+            "publishing": "processing",
+        }.get(internal_status, internal_status)
         return IngestionStatus(
             job_id=job_id,
-            status=job_info["status"],
+            status=public_status,
             files_count=job_info["files_count"],
             processed_count=job_info["processed_count"],
-            error=job_info.get("error")
+            error=_safe_stored_job_error(public_status, job_info.get("error")),
+            created_at=job_info.get("created_at"),
+            completed_at=job_info.get("completed_at"),
         )
 
     async def cancel_job(self, job_id: str) -> bool:
         """Cancel an ingestion job."""
         job_info = await self.job_store.get(job_id)
-        if job_info:
-            await self.job_store.update(job_id, {"status": "cancelled"})
-            logger.info("Cancelled ingestion job", job_id=job_id)
-            return True
-        return False
+        if not job_info:
+            return False
+        if hasattr(self.job_store, "cancel"):
+            cancelled = await self.job_store.cancel(job_id)
+        else:
+            cancelled = await self.job_store.update(
+                job_id,
+                {"status": "cancelled", "completed_at": _utc_timestamp()},
+            )
+        if cancelled:
+            logger.info("ingestion_job_cancelled", job_id=job_id)
+        return bool(cancelled)
     
     async def get_documents(self, agent_id: Optional[str] = None) -> List[dict]:
         """Get uploaded documents, optionally filtered by agent_id."""
@@ -213,17 +1093,29 @@ class IngestionService:
             if not has_product_fields:
                 return None
             
-            return {
+            product = {
                 "sku": json_obj.get("sku") or json_obj.get("product_id"),
                 "name": json_obj.get("name") or json_obj.get("product_name"),
                 "price": json_obj.get("price"),
                 "currency": json_obj.get("currency"),
                 "category": json_obj.get("category"),
-                "image_url": json_obj.get("image_url"),
-                "product_url": json_obj.get("product_url"),
+                "image_url": json_obj.get("image_url") or json_obj.get("image"),
+                "product_url": json_obj.get("product_url") or json_obj.get("url"),
                 "in_stock": json_obj.get("in_stock", True),
-                "features": json_obj.get("features", [])
+                "features": json_obj.get("features", []),
             }
+            # Keep commerce variant and provenance fields intact. Product cards
+            # and Shopify reconciliation depend on these, so durable bulk
+            # ingestion must not silently flatten them into generic text.
+            for field in (
+                "id", "price_unit", "currency_source", "product_group_id", "handle", "parent_name",
+                "has_variants", "variant_count", "price_min", "price_max", "default_variant_id",
+                "variant_id", "variant_sku", "variant_title", "variant_options", "variant_url", "variants",
+                "source_type", "source_url", "source_product_id", "source_variant_id", "source_key", "source_active",
+            ):
+                if field in json_obj:
+                    product[field] = json_obj.get(field)
+            return product
         except Exception as e:
             logger.warning("Failed to extract product data", error=str(e))
             return None
@@ -282,6 +1174,16 @@ class IngestionService:
         """Resolve chunk size/overlap via the shared chunking module."""
         return await resolve_agent_chunking(agent_id)
 
+    def snapshot_chunking_from_agent(self, agent: dict) -> Tuple[int, int]:
+        """Freeze chunking from the already-authorized creation-time agent row."""
+        chunking = (((agent.get("configuration") or {}).get("rag") or {}).get("chunking") or {})
+        try:
+            size = int(chunking.get("chunk_size", DEFAULT_CHUNK_SIZE))
+            overlap = int(chunking.get("chunk_overlap", DEFAULT_CHUNK_OVERLAP))
+        except (TypeError, ValueError):
+            size, overlap = DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP
+        return clamp_chunking(size, overlap)
+
     def _extract_pdf_text(self, content: bytes) -> str:
         """Extract text from a PDF using pypdf."""
         try:
@@ -299,6 +1201,7 @@ class IngestionService:
 
     def _extract_docx_text(self, content: bytes) -> str:
         """Extract text from a DOCX using python-docx."""
+        self._validate_docx_archive(content)
         try:
             from docx import Document
         except ImportError as exc:
@@ -313,6 +1216,30 @@ class IngestionService:
                 if cells:
                     table_rows.append(" | ".join(cells))
         return "\n\n".join(paragraphs + table_rows)
+
+    def _validate_docx_archive(self, content: bytes) -> None:
+        """Reject compressed DOCX archives that can exhaust worker memory/CPU."""
+        max_files = max(1, int(self.settings.MAX_ARCHIVE_FILES))
+        max_uncompressed = max(1, int(self.settings.MAX_ARCHIVE_UNCOMPRESSED_SIZE_MB)) * 1024 * 1024
+        max_ratio = max(1, int(self.settings.MAX_ARCHIVE_COMPRESSION_RATIO))
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                entries = archive.infolist()
+                if len(entries) > max_files:
+                    raise InvalidIngestionInputError("DOCX archive contains too many files")
+                uncompressed = sum(max(0, int(entry.file_size)) for entry in entries)
+                compressed = sum(max(0, int(entry.compress_size)) for entry in entries)
+        except InvalidIngestionInputError:
+            raise
+        except (zipfile.BadZipFile, OSError, ValueError) as exc:
+            raise InvalidIngestionInputError("DOCX archive is invalid") from exc
+        if uncompressed > max_uncompressed:
+            raise InvalidIngestionInputError("DOCX archive exceeds the uncompressed size limit")
+        # Empty archives are invalid DOCX documents and should be rejected by
+        # python-docx. Avoid division by zero while still catching a compressed
+        # payload that expands beyond its declared ratio.
+        if uncompressed and (compressed == 0 or uncompressed / max(compressed, 1) > max_ratio):
+            raise InvalidIngestionInputError("DOCX archive compression ratio is too high")
 
     async def _extract_and_chunk(
         self,
@@ -451,9 +1378,9 @@ class IngestionService:
         model = voyage_config["model"]
 
         if not api_key:
-            logger.warning("voyage_api_key_not_configured", text_length=len(text))
-            return [0.0] * 1024  # Voyage uses 1024 dimensions
-        
+            logger.error("voyage_api_key_not_configured", text_length=len(text))
+            raise IngestionEmbeddingError("Voyage embedding API key is not configured")
+
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -468,19 +1395,47 @@ class IngestionService:
                     },
                     timeout=30.0
                 )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    embeddings = result["data"][0]["embedding"]
-                    logger.debug("Generated embeddings", dimensions=len(embeddings))
-                    return embeddings
-                else:
-                    logger.error("Voyage API error", status_code=response.status_code, response=response.text)
-                    return [0.0] * 1024
-                    
-        except Exception as e:
-            logger.error("Error generating embeddings", error=str(e))
-            return [0.0] * 1024
+        except httpx.HTTPError as exc:
+            logger.error("voyage_embedding_request_failed", error_type=type(exc).__name__)
+            raise IngestionEmbeddingError("Voyage embedding request failed") from exc
+
+        if response.status_code != 200:
+            logger.error("voyage_embedding_request_rejected", status_code=response.status_code)
+            raise IngestionEmbeddingError(
+                f"Voyage embedding request failed with HTTP {response.status_code}"
+            )
+
+        try:
+            embeddings = response.json()["data"][0]["embedding"]
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
+            logger.error("voyage_embedding_response_invalid", error_type=type(exc).__name__)
+            raise IngestionEmbeddingError("Voyage returned an invalid embeddings response") from exc
+
+        self._validate_embedding(embeddings)
+        logger.debug("Generated embeddings", dimensions=len(embeddings))
+        return embeddings
+
+    def _validate_embedding(self, embeddings: object) -> None:
+        """Reject malformed or placeholder vectors before any storage write."""
+        if not isinstance(embeddings, list):
+            raise IngestionEmbeddingError("Voyage returned an embedding with an invalid type")
+
+        if len(embeddings) != self.settings.VECTOR_DIMENSIONS:
+            raise IngestionEmbeddingError(
+                "Voyage returned an embedding with unexpected dimensions "
+                f"({len(embeddings)}; expected {self.settings.VECTOR_DIMENSIONS})"
+            )
+
+        if any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            for value in embeddings
+        ):
+            raise IngestionEmbeddingError("Voyage returned an embedding with invalid values")
+
+        if not any(embeddings):
+            raise IngestionEmbeddingError("Voyage returned an all-zero embedding")
     
     async def _store_chunks(self, chunks: List[dict], job_id: str, filename: str, agent_id: Optional[str] = None):
         """Store chunks in vector database with structured data."""
@@ -531,6 +1486,8 @@ class IngestionService:
     async def _store_chunk(self, chunk_doc: dict) -> str:
         """Store a single chunk in brand-specific MongoDB database."""
         try:
+            self._validate_embedding(chunk_doc.get("embeddings"))
+
             # Get brand-specific database
             agent_id = chunk_doc.get("agent_id")
             if agent_id:
@@ -548,14 +1505,20 @@ class IngestionService:
             
             # Insert the chunk
             result = await chunks_collection.insert_one(chunk_doc)
-            chunk_id = str(result.inserted_id)
+            inserted_id = getattr(result, "inserted_id", None)
+            if inserted_id is None:
+                raise IngestionStorageError("MongoDB did not return an inserted chunk ID")
+
+            chunk_id = str(inserted_id)
             if self.qdrant:
                 brand_slug = (chunk_doc.get("metadata") or {}).get("brand_slug")
                 await self.qdrant.upsert_chunk(chunk_doc, brand_slug)
             
             logger.debug("Stored chunk in MongoDB", chunk_id=chunk_id, agent_id=chunk_doc.get("agent_id"))
             return chunk_id
-            
-        except Exception as e:
-            logger.error("Error storing chunk in MongoDB", error=str(e))
-            return str(uuid.uuid4())  # Return fake ID on error
+
+        except IngestionStorageError:
+            raise
+        except Exception as exc:
+            logger.error("chunk_storage_failed", error_type=type(exc).__name__)
+            raise IngestionStorageError("Failed to store knowledge-base chunk") from exc

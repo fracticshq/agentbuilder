@@ -1,0 +1,102 @@
+[
+  {
+    "id": "tenant-session-agent-transfer",
+    "suite": "tenant_isolation",
+    "given": "A signed session was created for brand A and its agent is moved to brand B.",
+    "expect": "The session is rejected and never reads/writes brand B.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_conversation_scope_store.py",
+        "nodeid": "test_widget_scope_rejects_a_session_after_the_agent_moves_tenants"
+      }
+    ]
+  },
+  {
+    "id": "provider-diagnostic-redaction",
+    "suite": "provider_outage",
+    "given": "A tool/provider throws a message containing an authorization token.",
+    "expect": "Public SSE/WebSocket/tool context receives only a stable retryable error.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_stream_message_llm_error.py",
+        "nodeid": "test_stream_error_chunk_has_conversation_id_and_redacts_exception_details"
+      },
+      {
+        "path": "apps/api/tests/test_shopify_orchestrator_references.py",
+        "nodeid": "test_tool_exception_does_not_return_diagnostic_to_the_orchestrator"
+      }
+    ]
+  },
+  {
+    "id": "commerce-invalid-quantity",
+    "suite": "shopify",
+    "given": "A cart action contains a non-integer, zero, or negative quantity.",
+    "expect": "No mutation executes and quantity is never defaulted.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_shopify_orchestrator_references.py",
+        "nodeid": "test_invalid_cart_quantity_never_defaults_to_a_mutation"
+      }
+    ]
+  },
+  {
+    "id": "lalkitab-missing-chart",
+    "suite": "lalkitab",
+    "given": "The chart context has no verifiable placements.",
+    "expect": "No chart/prediction is produced; runtime abstains.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_lalkitab_safety.py",
+        "nodeid": "test_missing_validated_chart_returns_deterministic_abstention_without_llm"
+      }
+    ]
+  },
+  {
+    "id": "hybrid-rag-degraded-status",
+    "suite": "hybrid_rag",
+    "given": "One retrieval backend is unavailable while another returns no matching evidence.",
+    "expect": "The caller receives an explicit degraded status rather than a healthy no-evidence result.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_retrieval_tool_statuses.py",
+        "nodeid": "test_retrieval_tool_does_not_present_degraded_empty_result_as_no_evidence"
+      }
+    ]
+  },
+  {
+    "id": "shopify-inactive-catalog-exclusion",
+    "suite": "shopify",
+    "given": "A Shopify product source has been deactivated after its catalog record was deleted.",
+    "expect": "Direct catalog search and RAG candidates exclude that inactive product.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_commerce_retrieval_tool.py",
+        "nodeid": "test_catalog_search_excludes_deactivated_shopify_products_from_direct_and_rag_results"
+      }
+    ]
+  },
+  {
+    "id": "untrusted-tool-prompt-injection-boundary",
+    "suite": "prompt_injection",
+    "given": "Retrieved tool data contains embedded instructions that attempt to override the agent.",
+    "expect": "Untrusted instructions are removed before the data can enter the agent prompt, while ordinary evidence remains available.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_orchestrator_fallbacks.py",
+        "nodeid": "test_tool_data_sanitizer_removes_embedded_prompt_instructions_and_bounds_text"
+      }
+    ]
+  },
+  {
+    "id": "deterministic-claim-support",
+    "suite": "hybrid_rag",
+    "given": "A factual response is paired with retrieved evidence that directly contains the claimed fact.",
+    "expect": "The deterministic claim-support validator accepts the grounded response and removes its private evidence annotation; it is not an LLM judge.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_response_validator_evidence.py",
+        "nodeid": "test_supported_retrieval_claim_passes_and_private_annotation_is_removed"
+      }
+    ]
+  }
+]

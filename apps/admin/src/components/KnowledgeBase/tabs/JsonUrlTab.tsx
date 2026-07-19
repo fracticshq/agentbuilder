@@ -57,7 +57,7 @@ export default function JsonUrlTab({ brandId, onUpload, onBack }: JsonUrlTabProp
             value={url}
             onChange={e => setUrl(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && handleFetch()}
-            placeholder="https://mystore.com/products.json"
+            placeholder="https://catalog.example.com/feed.json"
             disabled={status === 'loading'}
             className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:bg-gray-50"
           />

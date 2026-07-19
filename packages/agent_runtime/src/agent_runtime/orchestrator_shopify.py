@@ -14,6 +14,16 @@ from tools.types import ToolResult
 
 logger = structlog.get_logger(__name__)
 
+_SAFE_TOOL_FAILURE_MESSAGE = (
+    "The commerce service could not complete that action. Do not retry the action "
+    "automatically; ask the customer to try again."
+)
+_SAFE_LOOP_FAILURE_MESSAGE = (
+    "The commerce service is temporarily unavailable. Do not make or claim any "
+    "cart changes; ask the customer to try again."
+)
+_SIDE_EFFECTING_TOOL_NAMES = frozenset({"update_cart"})
+
 
 def _safe_checkout_url(value: Any) -> Optional[str]:
     """Only retain absolute HTTPS checkout links; MCP validates the host."""
@@ -58,6 +68,7 @@ class ShopifyOrchestrator(Orchestrator):
         self.rerank_results: List[Dict[str, Any]] = []
         self.resolved_reference: Optional[Dict[str, Any]] = None
         self.pending_clarification_response: Optional[str] = None
+        self._uncertain_side_effect_outcomes: set[str] = set()
 
     async def run(
         self, 
@@ -122,6 +133,7 @@ class ShopifyOrchestrator(Orchestrator):
         self.rerank_results = session_state.get("rerank_results", [])
         self.resolved_reference = None
         self.pending_clarification_response = None
+        self._uncertain_side_effect_outcomes.clear()
         self.prompt_runtime_context = (context or {}).get("prompt_runtime", {})
         self.active_product_focus = self._normalize_focus_products(self.active_product_focus)
         self.product_reference_map = self._build_product_reference_map(self.active_product_focus)
@@ -182,12 +194,22 @@ class ShopifyOrchestrator(Orchestrator):
                             "role": "assistant",
                             "content": json.dumps(first_pass_call),
                         })
-                        content = tool_result.error if not tool_result.success else self._format_tool_output(tool_result.data)
+                        content = (
+                            _SAFE_TOOL_FAILURE_MESSAGE
+                            if not tool_result.success
+                            else self._format_tool_output(tool_result.data)
+                        )
                         self.conversation.append({
                             "role": "tool",
                             "name": tool_name,
                             "content": content,
                         })
+                        if self._has_uncertain_side_effect_outcome(tool_name, tool_result):
+                            logger.warning(
+                                "shopify_side_effect_outcome_uncertain",
+                                tool=tool_name,
+                            )
+                            return _SAFE_TOOL_FAILURE_MESSAGE, tool_results_map
                         if confirmed_cart_add:
                             self.conversation.append({
                                 "role": "system",
@@ -231,21 +253,53 @@ class ShopifyOrchestrator(Orchestrator):
                 self.conversation.append({"role": "assistant", "content": message})
                 
                 # Use error message if success is false
-                content = tool_result.error if not tool_result.success else self._format_tool_output(tool_result.data)
+                content = (
+                    _SAFE_TOOL_FAILURE_MESSAGE
+                    if not tool_result.success
+                    else self._format_tool_output(tool_result.data)
+                )
                 self.conversation.append({
                     "role": "tool",
                     "name": tool_name,
                     "content": content
                 })
+                if self._has_uncertain_side_effect_outcome(tool_name, tool_result):
+                    logger.warning(
+                        "shopify_side_effect_outcome_uncertain",
+                        tool=tool_name,
+                    )
+                    return _SAFE_TOOL_FAILURE_MESSAGE, tool_results_map
             except Exception as loop_err:
-                logger.error("shopify_agent_loop_error", iteration=iteration, error=str(loop_err))
+                logger.error(
+                    "shopify_agent_loop_error",
+                    iteration=iteration,
+                    error_type=type(loop_err).__name__,
+                )
                 # Feed error back to LLM to allow one last chance to recover
-                self.conversation.append({"role": "tool", "name": "system", "content": f"System Error: {str(loop_err)}"})
+                self.conversation.append({
+                    "role": "tool",
+                    "name": "system",
+                    "content": _SAFE_LOOP_FAILURE_MESSAGE,
+                })
                 if iteration >= max_iterations:
                     break
 
         logger.warning("shopify_agent_loop_max_iterations_or_loop")
         return "I've run into an issue processing your request. Could you please specify which product or action you'd like me to take?", tool_results_map
+
+    def _has_uncertain_side_effect_outcome(self, tool_name: str, result: ToolResult) -> bool:
+        """Only stop the loop when an invoked mutation could have succeeded.
+
+        A normal failed result remains available to the model as a safe,
+        redacted tool failure.  An exception while a mutation RPC is in flight
+        is different: retrying (or moving to another tool) could duplicate an
+        add/remove/update whose remote outcome is unknown.
+        """
+        return (
+            tool_name in _SIDE_EFFECTING_TOOL_NAMES
+            and tool_name in self._uncertain_side_effect_outcomes
+            and not result.success
+        )
 
     def _get_confirmed_cart_add(self) -> Optional[Dict[str, Any]]:
         """Resolve pronoun-based add-to-cart requests from the Shopify session focus only."""
@@ -540,6 +594,7 @@ class ShopifyOrchestrator(Orchestrator):
 
     async def _execute_tool_action(self, tool_name: str, tool_input: Dict[str, Any]) -> ToolResult:
         """Preprocess, execute, and postprocess a tool call."""
+        invocation_started = False
         try:
             # 1. Resolve IDs from cache and inject cart_id
             self._preprocess_input(tool_name, tool_input)
@@ -551,17 +606,41 @@ class ShopifyOrchestrator(Orchestrator):
             if not tool:
                 logger.error("shopify_tool_not_found", tool_name=tool_name)
                 return ToolResult(success=False, data=None, error=f"Tool '{tool_name}' not found.")
-                
+
+            # Once a mutation RPC has been started, a transport/provider
+            # exception leaves its remote outcome unknowable.  Preserve the
+            # redacted result contract while marking that special case for the
+            # iterative loop to stop before another action can be attempted.
+            self._uncertain_side_effect_outcomes.discard(tool_name)
+            invocation_started = True
             result = await tool.run(**tool_input)
             logger.info("shopify_tool_result_raw", tool=tool_name, success=result.success, error=result.error)
             
             # 3. Capture state from result (cart_id, products, etc.)
             if result.success:
-                self._capture_result_state(tool_name, result)
+                try:
+                    self._capture_result_state(tool_name, result)
+                except Exception as exc:
+                    logger.error(
+                        "shopify_tool_result_processing_failed",
+                        tool=tool_name,
+                        error_type=type(exc).__name__,
+                    )
+                    return ToolResult(success=False, data=None, error=_SAFE_TOOL_FAILURE_MESSAGE)
             return result
-        except Exception as e:
-            logger.error("shopify_tool_execution_failed", tool=tool_name, error=str(e))
-            return ToolResult(success=False, data=None, error=str(e))
+        except Exception as exc:
+            logger.error(
+                "shopify_tool_execution_failed",
+                tool=tool_name,
+                error_type=type(exc).__name__,
+            )
+            if invocation_started and tool_name in _SIDE_EFFECTING_TOOL_NAMES:
+                self._uncertain_side_effect_outcomes.add(tool_name)
+            return ToolResult(
+                success=False,
+                data=None,
+                error=_SAFE_TOOL_FAILURE_MESSAGE,
+            )
 
     def _preprocess_input(self, tool_name: str, tool_input: Dict[str, Any]):
         """Inject state and resolve natural language references to GIDs."""
@@ -668,8 +747,13 @@ class ShopifyOrchestrator(Orchestrator):
 
                     # Ensure quantity is integer
                     if "quantity" in item:
-                        try: item["quantity"] = int(item["quantity"])
-                        except: item["quantity"] = 1
+                        try:
+                            quantity = int(item["quantity"])
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError("Cart quantity must be a positive whole number") from exc
+                        if quantity < 1:
+                            raise ValueError("Cart quantity must be a positive whole number")
+                        item["quantity"] = quantity
                 
                 # Final validation pass
                 for item in tool_input["add_items"]:
@@ -1095,7 +1179,8 @@ Thought: "I've removed one pair of white socks. You now have 1 pair remaining."
             parsed = json.loads(clean_msg)
             if isinstance(parsed, dict) and "tool_name" in parsed: 
                 return parsed
-        except: pass
+        except json.JSONDecodeError:
+            pass
 
         # 2. Markdown Block
         match = re.search(r"```json\s*({.*?})\s*```", message, re.DOTALL)
@@ -1104,7 +1189,8 @@ Thought: "I've removed one pair of white socks. You now have 1 pair remaining."
                 parsed = json.loads(match.group(1))
                 if isinstance(parsed, dict) and "tool_name" in parsed: 
                     return parsed
-            except: pass
+            except json.JSONDecodeError:
+                pass
             
         # 3. Embedded JSON
         start_idx = message.find('{')
@@ -1116,6 +1202,7 @@ Thought: "I've removed one pair of white socks. You now have 1 pair remaining."
                     parsed = json.loads(candidate)
                     if isinstance(parsed, dict) and "tool_name" in parsed:
                         return parsed
-                except: pass
+                except json.JSONDecodeError:
+                    pass
         
         return None

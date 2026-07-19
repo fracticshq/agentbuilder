@@ -29,7 +29,9 @@ class StrapiClient:
             "Authorization": f"Bearer {api_token}",
             "Content-Type": "application/json",
         }
-        self._enabled = bool(base_url and _HTTPX_AVAILABLE)
+        # Conversation mirrors are an authenticated best-effort integration.
+        # Never enqueue an unauthenticated request with an empty Bearer token.
+        self._enabled = bool(base_url and api_token and _HTTPX_AVAILABLE)
         if not _HTTPX_AVAILABLE:
             logger.warning("strapi_client_disabled", reason="httpx not installed")
 

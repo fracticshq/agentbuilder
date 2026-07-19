@@ -175,6 +175,42 @@ async def test_catalog_search_normalizes_missing_currency_from_config():
 
 
 @pytest.mark.asyncio
+async def test_catalog_search_excludes_deactivated_shopify_products_from_direct_and_rag_results():
+    retrieval = FakeRetrievalPipeline(
+        rows=[
+            product_row(
+                sku="STALE-1",
+                name="Deleted Speaker",
+                product_type="speaker",
+                category="Speakers",
+                price=999,
+                source_active=False,
+            )
+        ],
+        chunks=[
+            product_chunk(
+                sku="STALE-1",
+                name="Deleted Speaker",
+                product_type="speaker",
+                category="Speakers",
+                price=999,
+                source_active=False,
+            )
+        ],
+    )
+    tool = CatalogSearchTool(retrieval)
+
+    result = await tool.run(query="bookshelf speaker", commerce_config=commerce_config())
+
+    assert result.success is True
+    assert result.metadata["products"] == []
+    assert any(
+        query["query"].get("product_data.source_active") == {"$ne": False}
+        for query in retrieval.bm25_search.collection.queries
+    )
+
+
+@pytest.mark.asyncio
 async def test_catalog_search_honors_default_only_currency_policy():
     tool = CatalogSearchTool(
         FakeRetrievalPipeline(

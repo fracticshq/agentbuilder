@@ -12,7 +12,6 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Optional
 from datetime import datetime, timezone
-from urllib.parse import urlsplit, urlunsplit
 import structlog
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -39,21 +38,24 @@ from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
 from ..config import Settings
 from ..connections import connection_manager
 from ..monitoring import AGENT_FALLBACK_COUNT, GUARDRAIL_COUNT, MESSAGE_COUNT, MESSAGE_DURATION
-from .response_validator import ResponseValidator  # Phase 4
+from .response_validator import ResponseValidator, validate_claim_evidence  # Phase 4
 from .strapi_client import StrapiClient
 from .runtime_settings_service import RuntimeSettingsService
 from .tool_config_secrets import decrypt_full_agent_configuration_for_runtime
-from .capability_firewall import CapabilityDecision, CapabilityFirewall
+from .capability_firewall import CapabilityDecision, CapabilityFirewall, configured_verticals
 from .commerce_config import is_commerce_agent_config, normalize_commerce_configuration
+from . import commerce_response as _commerce_response
 from .observability_service import ObservabilityService
 from .prompt_assembler import PromptAssembler
 from .skill_registry import BuiltInSkillRegistry
 from .artifact_registry import is_artifact_enabled
 from .birth_profile_extractor import extract_birth_profile
 from .lalkitab_runtime import (
+    LAL_KITAB_CHART_UNAVAILABLE_MESSAGE,
     build_lalkitab_runtime_context,
     extract_kundali_chart_summary,
     is_lalkitab_agent,
+    is_valid_lalkitab_context_payload,
 )
 from .conversation_policy import (
     activity_stream_response_kwargs,
@@ -62,6 +64,9 @@ from .conversation_policy import (
 )
 from .agent_turn_planner import AgentTurnPlan, AgentTurnPlanner
 from .tool_registry import ToolRegistryService
+from .conversation_scope_store import ConversationScopeStoreError, conversation_scope_store
+from . import response_metadata as _response_metadata
+from .stateful_turn_context import StatefulTurnContext, build_stateful_turn_context
 
 logger = structlog.get_logger(__name__)
 
@@ -98,11 +103,42 @@ LOW_CONFIDENCE_MESSAGE = (
     "I don’t have enough verified information in the knowledge base to answer that reliably. "
     "Please share a little more detail or contact the brand team for confirmation."
 )
+LAL_KITAB_UNSUPPORTED_CLAIM_MESSAGE = (
+    "I can’t verify that Lal Kitab interpretation or remedy from the calculated context I have. "
+    "Please ask a narrower question or try again when the supporting information is available."
+)
+STREAM_GENERATION_ERROR_MESSAGE = (
+    "I’m sorry, but I can’t complete that response right now. Please try again in a moment."
+)
+STREAM_GENERATION_ERROR_METADATA = {
+    "code": "generation_failed",
+    "retryable": True,
+}
 INTERNAL_SOURCE_TERMS = re.compile(
     r"\b(api|rag|chunk|chunks|connector|connectors|endpoint|endpoints|tool call|tool calls|tool-backed|"
     r"execution history|observation|observations|geocode lookup|runtime|mcp)\b",
     re.IGNORECASE,
 )
+
+
+def _is_unrecoverable_generation_failure(agent_result: AgentResult) -> bool:
+    """Identify terminal generation failures without reclassifying safe abstentions.
+
+    The orchestrator deliberately converts a second failed generation attempt
+    into its ``safe_canned`` fallback so synchronous callers still receive a
+    safe response.  In a stream, clients need an explicit terminal error to
+    distinguish that failure from a completed answer.  Lal Kitab's validated
+    chart abstention does not use this fallback marker and must remain a normal
+    response.
+    """
+    metadata = getattr(agent_result, "metadata", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    return (
+        getattr(agent_result, "success", True) is False
+        or metadata.get("fallback_stage") == "safe_canned"
+    )
 
 
 def _sanitize_for_json(data: dict) -> dict:
@@ -118,358 +154,137 @@ def _sanitize_for_json(data: dict) -> dict:
         return {}
 
 
-def _normalize_commerce_product_currency(product: dict, agent_config: dict | None) -> dict:
-    """Apply configured commerce currency policy before products leave the API."""
-    if not isinstance(product, dict) or not is_commerce_agent_config(agent_config or {}):
-        return product
+def _public_lalkitab_api_context(api_context: dict | None, *, chart_validated: bool | None = None) -> dict:
+    """Return the safe public subset of Lal Kitab runtime state.
 
-    commerce = (agent_config or {}).get("commerce") or {}
-    default_currency = str(commerce.get("default_currency") or "").strip().upper() or None
-    policy = str(commerce.get("currency_policy") or "catalog_first_config_fallback").strip().lower()
-    catalog_currency = (
-        str(product.get("currency")).strip().upper()
-        if product.get("currency") not in (None, "") and str(product.get("currency")).strip()
-        else None
+    The complete chart input and response remain available only in internal
+    short-term state for a later retry.  Public API and stream metadata must not
+    include birth date/time/place, coordinates, provider URLs, or raw payloads.
+    """
+    context = api_context if isinstance(api_context, dict) else {}
+    validated = (
+        is_valid_lalkitab_context_payload(context.get("chart_context"))
+        if chart_validated is None
+        else bool(chart_validated)
     )
-    catalog_source = str(product.get("currency_source") or "").strip().lower()
-
-    normalized = dict(product)
-    if catalog_currency and catalog_source == "shopify_store":
-        normalized["currency"] = catalog_currency
-        normalized["currency_source"] = "shopify_store"
-        return normalized
-    if policy == "default_only":
-        normalized["currency"] = default_currency
-        normalized["currency_source"] = "commerce.default_currency" if default_currency else "missing"
-        return normalized
-
-    if catalog_currency:
-        normalized["currency"] = catalog_currency
-        normalized["currency_source"] = normalized.get("currency_source") or "product"
-        return normalized
-
-    if policy != "catalog_only" and default_currency:
-        normalized["currency"] = default_currency
-        normalized["currency_source"] = "commerce.default_currency"
-        return normalized
-
-    normalized["currency"] = None
-    normalized["currency_source"] = "missing"
-    return normalized
-
-
-def _normalize_commerce_products_currency(products: list[dict], agent_config: dict | None) -> list[dict]:
-    return [_canonicalize_commerce_product(_normalize_commerce_product_currency(product, agent_config)) for product in products]
-
-
-def _canonicalize_commerce_product(product: dict) -> dict:
-    """Normalize provider aliases into the widget's explicit minor-unit contract."""
-    if not isinstance(product, dict):
-        return product
-    normalized = dict(product)
-    if normalized.get("price_minor") is None and normalized.get("price") not in (None, ""):
-        try:
-            normalized["price_minor"] = int(round(float(normalized["price"])))
-        except (TypeError, ValueError):
-            normalized["price_minor"] = None
-    normalized["price_unit"] = "minor"
-    normalized["image_url"] = normalized.get("image_url") or normalized.get("image")
-    normalized["product_url"] = normalized.get("product_url") or normalized.get("url")
-    if normalized.get("currency_source") == "product":
-        normalized["currency_source"] = "catalog"
-    variants = normalized.get("variants")
-    if isinstance(variants, list):
-        normalized["variants"] = [_canonicalize_commerce_product(variant) for variant in variants if isinstance(variant, dict)]
-    return normalized
-
-
-def _safe_commerce_cart(
-    agent_metadata: dict,
-    tool_results: dict,
-    previous: Optional[dict] = None,
-    allowed_shop_url: Optional[str] = None,
-) -> Optional[dict]:
-    """Build one safe cart shape for sync, streaming, and persisted history."""
-    state = dict(previous or {})
-    for key in ("cart_id", "checkout_url", "cart_lines"):
-        if agent_metadata.get(key) not in (None, ""):
-            state[key] = agent_metadata[key]
-    for tool_result in tool_results.values() if isinstance(tool_results, dict) else []:
-        metadata = getattr(tool_result, "metadata", {}) or {}
-        action = metadata.get("commerce_action") if isinstance(metadata.get("commerce_action"), dict) else {}
-        cart = action.get("cart") if isinstance(action.get("cart"), dict) else metadata.get("cart")
-        if not isinstance(cart, dict):
-            continue
-        for target, keys in {
-            "cart_id": ("cart_id", "cartId", "id"),
-            "checkout_url": ("checkout_url", "checkoutUrl"),
-            "cart_lines": ("cart_lines", "lines", "line_items"),
-        }.items():
-            for key in keys:
-                if cart.get(key) not in (None, ""):
-                    state[target] = cart[key]
-                    break
-    if state.get("checkout_url"):
-        try:
-            parsed = urlsplit(str(state["checkout_url"]))
-            allowed_host = urlsplit(str(allowed_shop_url)).hostname if allowed_shop_url else None
-            if parsed.scheme != "https" or not parsed.hostname or (allowed_host and parsed.hostname != allowed_host):
-                state["checkout_url"] = None
-            else:
-                state["checkout_url"] = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
-        except Exception:
-            state["checkout_url"] = None
-    if not isinstance(state.get("cart_lines"), list):
-        state["cart_lines"] = []
-    return state if any(state.get(key) for key in ("cart_id", "checkout_url", "cart_lines")) else None
-
-
-def _base_product_url(url: Any) -> Optional[str]:
-    if url in (None, ""):
-        return None
-    try:
-        parts = urlsplit(str(url))
-        if not parts.scheme or not parts.netloc:
-            return re.sub(r"\?.*$", "", str(url)).rstrip("/")
-        return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
-    except Exception:
-        return re.sub(r"\?.*$", "", str(url)).rstrip("/")
-
-
-def _commerce_product_group_key(product: dict) -> Optional[str]:
-    for key in ("product_group_id", "product_id", "handle"):
-        value = product.get(key)
-        if value not in (None, ""):
-            return f"{key}:{str(value).strip().lower()}"
-    base_url = _base_product_url(product.get("product_url") or product.get("url") or product.get("variant_url"))
-    if base_url:
-        return f"url:{base_url.lower()}"
-    return None
-
-
-def _commerce_variant_identity(product: dict) -> Optional[str]:
-    for key in ("variant_id", "variant_sku", "sku", "variant_url", "id"):
-        value = product.get(key)
-        if value not in (None, ""):
-            return re.sub(r"\s+", " ", str(value).strip().lower())
-    return None
-
-
-def _variant_rank(product: dict, default: int = 9999) -> int:
-    try:
-        return int(product.get("_variant_rank"))
-    except (TypeError, ValueError):
-        return default
-
-
-def _common_product_name(products: list[dict]) -> str:
-    parent_names = [str(product.get("parent_name")) for product in products if product.get("parent_name")]
-    if parent_names:
-        return parent_names[0]
-    names = [str(product.get("name") or product.get("title") or "") for product in products if product.get("name") or product.get("title")]
-    if not names:
-        return ""
-    if len(names) == 1:
-        return names[0]
-    prefix = names[0]
-    for name in names[1:]:
-        while prefix and not name.lower().startswith(prefix.lower()):
-            prefix = prefix[:-1]
-    return re.sub(r"[\s\-–—/]+$", "", prefix).strip() or names[0]
-
-
-def _variant_label(product: dict, parent_name: str) -> str:
-    explicit = product.get("variant_title")
-    if explicit not in (None, "", "Default Title"):
-        return str(explicit)
-    name = str(product.get("name") or product.get("title") or "")
-    if parent_name and name.lower().startswith(parent_name.lower()):
-        suffix = re.sub(r"^[\s\-–—/]+", "", name[len(parent_name):]).strip()
-        if suffix:
-            return suffix
-    return str(product.get("variant_sku") or product.get("sku") or product.get("variant_id") or "Variant")
-
-
-def _commerce_variant_from_product(product: dict, selected: dict, parent_name: str) -> dict:
-    variant_options = product.get("variant_options")
-    if not isinstance(variant_options, dict) or not variant_options:
-        variant_options = {"Variant": _variant_label(product, parent_name)}
+    provenance = []
+    for item in context.get("source_provenance") or []:
+        if isinstance(item, dict) and item.get("endpoint_id"):
+            provenance.append(
+                {
+                    "endpoint_id": item.get("endpoint_id"),
+                    "endpoint_name": item.get("endpoint_name"),
+                }
+            )
     return {
-        "id": product.get("variant_id") or product.get("id") or product.get("sku"),
-        "variant_id": product.get("variant_id") or product.get("id") or product.get("sku"),
-        "sku": product.get("variant_sku") or product.get("sku"),
-        "variant_sku": product.get("variant_sku") or product.get("sku"),
-        "name": product.get("name"),
-        "title": product.get("variant_title") or _variant_label(product, parent_name),
-        "variant_title": product.get("variant_title") or _variant_label(product, parent_name),
-        "variant_options": variant_options,
-        "price": product.get("price"),
-        "currency": product.get("currency"),
-        "currency_source": product.get("currency_source"),
-        "image_url": product.get("image_url") or product.get("image"),
-        "image": product.get("image") or product.get("image_url"),
-        "product_url": product.get("product_url") or product.get("url"),
-        "variant_url": product.get("variant_url") or product.get("product_url") or product.get("url"),
-        "in_stock": product.get("in_stock", True),
-        "is_default": _commerce_variant_identity(product) == _commerce_variant_identity(selected),
+        "chart_available": validated,
+        "chart_validated": validated,
+        "secondary_endpoint_ids": sorted((context.get("secondary_endpoint_results") or {}).keys()),
+        "source_provenance": provenance,
     }
 
 
-def _group_commerce_products_for_cards(products: list[dict]) -> list[dict]:
-    groups: dict[str, list[dict]] = {}
-    order: list[str] = []
-    passthrough: list[dict] = []
-    for index, product in enumerate(products):
-        if not isinstance(product, dict):
-            continue
-        variants = product.get("variants")
-        if isinstance(variants, list) and len(variants) > 1:
-            passthrough.append(product)
-            continue
-        group_key = _commerce_product_group_key(product)
-        if not group_key:
-            passthrough.append(product)
-            continue
-        product_copy = dict(product)
-        product_copy["_variant_rank"] = index
-        if group_key not in groups:
-            groups[group_key] = []
-            order.append(group_key)
-        groups[group_key].append(product_copy)
-
-    grouped_products: list[dict] = []
-    for group_key in order:
-        group_products = groups[group_key]
-        if len(group_products) == 1:
-            product = dict(group_products[0])
-            product.pop("_variant_rank", None)
-            grouped_products.append(product)
-            continue
-
-        group_products = _deduplicate_entities(
-            group_products,
-            "variant_id",
-            "variant_sku",
-            "sku",
-            "variant_url",
-            "id",
-        )
-        selected = min(
-            group_products,
-            key=lambda product: (
-                _variant_rank(product),
-                0 if product.get("in_stock", True) else 1,
-                float(product.get("price") or 10**18),
-            ),
-        )
-        group_products = sorted(
-            group_products,
-            key=lambda product: (
-                0 if _commerce_variant_identity(product) == _commerce_variant_identity(selected) else 1,
-                _variant_rank(product),
-                0 if product.get("in_stock", True) else 1,
-                float(product.get("price") or 10**18),
-                _commerce_variant_identity(product) or "",
-            ),
-        )
-        parent_name = _common_product_name(group_products)
-        variants = [_commerce_variant_from_product(product, selected, parent_name) for product in group_products]
-        prices = [float(variant["price"]) for variant in variants if variant.get("price") not in (None, "")]
-        card = dict(selected)
-        card["product_group_id"] = selected.get("product_group_id") or group_key
-        card["name"] = parent_name or selected.get("name") or selected.get("title") or "Product"
-        card["title"] = card["name"]
-        card["has_variants"] = True
-        card["variant_count"] = max(int(selected.get("variant_count") or 0), len(variants))
-        card["variants"] = variants
-        card["default_variant_id"] = selected.get("variant_id") or selected.get("id") or selected.get("sku")
-        if prices:
-            card["price_min"] = min(prices)
-            card["price_max"] = max(prices)
-        card.pop("_variant_rank", None)
-        grouped_products.append(card)
-
-    return [*grouped_products, *passthrough]
+def _public_lalkitab_place_candidates(candidates: list | None) -> list[dict]:
+    """Expose disambiguation labels without precise location data."""
+    return [
+        {
+            "placeId": candidate.get("placeId"),
+            "name": candidate.get("name"),
+            "adminRegion": candidate.get("adminRegion"),
+            "country": candidate.get("country"),
+            "label": candidate.get("label"),
+        }
+        for candidate in (candidates or [])
+        if isinstance(candidate, dict)
+    ]
 
 
-def _prepare_commerce_products_for_response(products: list[dict], agent_config: dict | None) -> list[dict]:
-    normalized = _normalize_commerce_products_currency(products, agent_config)
-    return _group_commerce_products_for_cards(normalized)
+def _public_lalkitab_missing_fields(missing: list | None) -> list[str]:
+    """Hide coordinate fields behind the birth-place prompt shown to users."""
+    public_fields: list[str] = []
+    for field in missing or []:
+        public_field = {
+            "date": "birth_date",
+            "time": "birth_time",
+            "latitude": "birth_place",
+            "longitude": "birth_place",
+            "timezone": "birth_place",
+        }.get(str(field), str(field))
+        if public_field not in public_fields:
+            public_fields.append(public_field)
+    return public_fields
+
+
+def _lalkitab_validation_confidence(lalkitab_plan, api_context: dict) -> float:
+    """Derive confidence from the validated endpoint coverage for this turn."""
+    selected = {
+        str(endpoint_id)
+        for endpoint_id in (getattr(lalkitab_plan, "selected_endpoint_ids", None) or [])
+        if endpoint_id
+    }
+    validated_sources = {
+        str(item.get("endpoint_id"))
+        for item in (api_context.get("source_provenance") or [])
+        if isinstance(item, dict) and item.get("endpoint_id")
+    }
+    if not selected:
+        return 1.0 if is_valid_lalkitab_context_payload(api_context.get("chart_context")) else 0.0
+    return min(1.0, len(selected & validated_sources) / len(selected))
+
+
+_normalize_commerce_product_currency = _commerce_response._normalize_commerce_product_currency
+_normalize_commerce_products_currency = _commerce_response._normalize_commerce_products_currency
+_canonicalize_commerce_product = _commerce_response._canonicalize_commerce_product
+_safe_commerce_cart = _commerce_response._safe_commerce_cart
+_base_product_url = _commerce_response._base_product_url
+_commerce_product_group_key = _commerce_response._commerce_product_group_key
+_commerce_variant_identity = _commerce_response._commerce_variant_identity
+_variant_rank = _commerce_response._variant_rank
+_common_product_name = _commerce_response._common_product_name
+_variant_label = _commerce_response._variant_label
+_commerce_variant_from_product = _commerce_response._commerce_variant_from_product
+_group_commerce_products_for_cards = _commerce_response._group_commerce_products_for_cards
+_prepare_commerce_products_for_response = _commerce_response._prepare_commerce_products_for_response
+
+
+def _safe_citation_text(value: Any, *, limit: int) -> Optional[str]:
+    return _response_metadata._safe_citation_text(value, limit=limit)
+
+
+def _safe_citation_url(value: Any) -> Optional[str]:
+    return _response_metadata._safe_citation_url(value)
+
+
+def _normalized_citation_confidence(value: Any, *, default: float) -> float:
+    return _response_metadata._normalized_citation_confidence(value, default=default)
+
+
+def _citation_from_metadata(value: Any, *, default_confidence: float) -> Optional[dict]:
+    return _response_metadata._citation_from_metadata(value, default_confidence=default_confidence)
+
+
+def _merge_citation(existing: dict, candidate: dict) -> dict:
+    return _response_metadata._merge_citation(existing, candidate)
+
+
+def _safe_retrieval_health(value: Any) -> Optional[dict]:
+    return _response_metadata._safe_retrieval_health(value)
+
+
+def _retrieval_health_from_tool_results(tool_results: Any) -> Optional[dict]:
+    return _response_metadata._retrieval_health_from_tool_results(tool_results)
+
+
+def _response_retrieval_health(tool_results: Any, agent_metadata: Any = None) -> Optional[dict]:
+    return _response_metadata._response_retrieval_health(tool_results, agent_metadata)
 
 
 def _extract_tool_result_metadata(tool_results: dict) -> tuple[list[dict], list[dict], list[dict]]:
-    """Normalize citations, products, and dealers from orchestrator tool metadata."""
-    citations: list[dict] = []
-    products: list[dict] = []
-    dealers: list[dict] = []
-
-    for step_id, tool_result in tool_results.items():
-        if not hasattr(tool_result, "metadata") or not tool_result.metadata:
-            continue
-
-        result_metadata = tool_result.metadata
-
-        if "products" in result_metadata:
-            products.extend(result_metadata["products"])
-        if "dealers" in result_metadata:
-            dealers.extend(result_metadata["dealers"])
-
-        if "sources" not in result_metadata:
-            continue
-
-        confidence = min(1.0, max(0.0, float(result_metadata.get("confidence", 1.0))))
-        for source in result_metadata["sources"][:5]:
-            doc_id = source if isinstance(source, str) else source.get("title", str(source))
-            citations.append({
-                "doc_id": doc_id,
-                "title": doc_id,
-                "confidence": confidence,
-                "url": None,
-                "snippet": None,
-            })
-
-        logger.info(
-            "tool_result_metadata",
-            step_id=step_id,
-            products_count=len(result_metadata.get("products", [])),
-            dealers_count=len(result_metadata.get("dealers", [])),
-            sources_count=len(result_metadata.get("sources", [])),
-        )
-
-    safe_products = [_sanitize_for_json(product) for product in products]
-    safe_dealers = [_sanitize_for_json(dealer) for dealer in dealers]
-    return citations, safe_products, safe_dealers
+    return _response_metadata._extract_tool_result_metadata(tool_results)
 
 
-def _entity_identity(entity: dict, *keys: str) -> Optional[str]:
-    """Build a stable identity string from the first populated key."""
-    for key in keys:
-        value = entity.get(key)
-        if value is None:
-            continue
-        normalized = str(value).strip()
-        if normalized:
-            return f"{key}:{normalized}"
-    return None
-
-
-def _deduplicate_entities(entities: list[dict], *identity_keys: str) -> list[dict]:
-    """Deduplicate metadata entities while tolerating inconsistent provider schemas."""
-    unique_entities: list[dict] = []
-    seen_keys: set[str] = set()
-
-    for entity in entities:
-        identity = _entity_identity(entity, *identity_keys)
-        if identity is None:
-            identity = f"json:{json.dumps(entity, sort_keys=True, default=str)}"
-
-        if identity in seen_keys:
-            continue
-
-        seen_keys.add(identity)
-        unique_entities.append(entity)
-
-    return unique_entities
+_entity_identity = _commerce_response._entity_identity
+_deduplicate_entities = _commerce_response._deduplicate_entities
 
 
 class MessageService:
@@ -568,6 +383,30 @@ class MessageService:
         long_term = memory.get("long_term") or {}
         return bool(long_term.get("enabled", False))
 
+    async def _long_term_memory_consent_granted(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        agent_id: str,
+    ) -> bool:
+        """Fail closed unless this signed widget session explicitly opted in."""
+        if not self._long_term_memory_enabled():
+            return False
+        try:
+            return await conversation_scope_store.has_long_term_memory_consent(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
+        except ConversationScopeStoreError:
+            logger.warning(
+                "long_term_memory_consent_unavailable",
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+            )
+            return False
+
     def _agent_rag_config(self) -> dict:
         config = self.agent_config or {}
         rag = config.get("rag")
@@ -633,7 +472,11 @@ class MessageService:
             },
             "long_term": {
                 "enabled": self._long_term_memory_enabled(),
-                "status": "enabled" if self._long_term_memory_enabled() else "needs_privacy_setup",
+                "status": (
+                    "requires_explicit_session_consent"
+                    if self._long_term_memory_enabled()
+                    else "needs_privacy_setup"
+                ),
             },
         }
 
@@ -1155,6 +998,51 @@ Updated memory:"""
     ) -> AgentResult:
         """Generate a Lal Kitab answer grounded in chart-first API context plus RAG."""
         api_context = lalkitab_plan.api_context or {}
+        chart_validated = bool(
+            getattr(lalkitab_plan, "chart_validated", False)
+            and is_valid_lalkitab_context_payload(api_context.get("chart_context"))
+        )
+        requires_safe_abstention = bool(
+            getattr(lalkitab_plan, "requires_safe_abstention", False)
+            or not chart_validated
+        )
+        tool_results = dict(lalkitab_plan.tool_results or {})
+        if rag_tool_result:
+            tool_results["knowledge_search"] = rag_tool_result
+        if requires_safe_abstention:
+            # Never ask the LLM to fill gaps in a chart reading.  A connector
+            # failure, malformed payload, or missing validated chart must be a
+            # deterministic abstention rather than an astrology synthesis.
+            return AgentResult(
+                answer=LAL_KITAB_CHART_UNAVAILABLE_MESSAGE,
+                metadata={
+                    "tool_results": tool_results,
+                    "steps_executed": len(tool_results),
+                    "validation_passed": False,
+                    "validation_confidence": 0.0,
+                    "validation_issues": ["validated_chart_context_unavailable"],
+                    "lalkitab_runtime": True,
+                    "api_context": _public_lalkitab_api_context(
+                        api_context, chart_validated=False
+                    ),
+                    "selected_connector_endpoint_ids": getattr(
+                        lalkitab_plan, "selected_endpoint_ids", []
+                    ),
+                    "used_cached_context": False,
+                    # Retained only in internal short-term metadata so a later
+                    # request can retry with the already-collected birth input.
+                    "lalkitab_api_context_full": _sanitize_for_json(api_context),
+                    "lalkitab_rag_context_full": _sanitize_for_json(rag_context),
+                    "rag_context": {
+                        "chunks_count": len(rag_context.get("chunks") or []),
+                        "sources": rag_context.get("sources") or [],
+                        "confidence": rag_context.get("confidence"),
+                    },
+                },
+            )
+        validation_confidence = _lalkitab_validation_confidence(
+            lalkitab_plan, api_context
+        )
         input_resolution = api_context.get("input_resolution") if isinstance(api_context.get("input_resolution"), dict) else {}
         confirmation_rule = (
             "- Start by briefly confirming the birth details you used. If a detail was inferred from a known place, say so naturally."
@@ -1177,13 +1065,6 @@ Updated memory:"""
         )
         normalized_birth = api_context.get("normalized_birth_input") or {}
         user_name = normalized_birth.get("name") or (birth_profile or {}).get("name")
-        if kundali_chart:
-            kundali_chart["birth"] = {
-                "name": user_name,
-                "date": normalized_birth.get("date"),
-                "time": normalized_birth.get("time"),
-                "place": normalized_birth.get("birth_place_resolved") or normalized_birth.get("birth_place"),
-            }
         name_rule = (
             f"- Address the user by name ({user_name}) naturally, like an astrologer who knows them.\n"
             if user_name else ""
@@ -1261,25 +1142,19 @@ Knowledge Context:
 Answer the user directly.
 """
         response = await self.llm_provider.generate(prompt)
-        tool_results = dict(lalkitab_plan.tool_results or {})
-        if rag_tool_result:
-            tool_results["knowledge_search"] = rag_tool_result
         return AgentResult(
             answer=response.content,
             metadata={
                 "tool_results": tool_results,
                 "steps_executed": len(tool_results),
-                "validation_passed": True,
-                "validation_confidence": 0.92,
+                "validation_passed": chart_validated,
+                "validation_confidence": validation_confidence,
                 "lalkitab_runtime": True,
                 "extractor_source": (birth_profile or {}).get("source"),
                 "kundali_chart": _sanitize_for_json(kundali_chart) if kundali_chart else None,
-                "api_context": {
-                    "normalized_birth_input": api_context.get("normalized_birth_input"),
-                    "chart_available": bool(api_context.get("chart_context")),
-                    "secondary_endpoint_ids": sorted((api_context.get("secondary_endpoint_results") or {}).keys()),
-                    "source_provenance": api_context.get("source_provenance") or [],
-                },
+                "api_context": _public_lalkitab_api_context(
+                    api_context, chart_validated=chart_validated
+                ),
                 "selected_connector_endpoint_ids": lalkitab_plan.selected_endpoint_ids,
                 "used_cached_context": bool(getattr(lalkitab_plan, "used_cached_context", False)),
                 "lalkitab_api_context_full": _sanitize_for_json(api_context),
@@ -1362,13 +1237,33 @@ Answer the user directly.
         return {"action": "allow", "reason": "none", "message": ""}
 
     def _apply_post_response_guardrails(self, response_text: str, metadata: dict) -> tuple[str, dict]:
+        metadata = dict(metadata or {})
+        if metadata.pop("_trusted_safety_template", False):
+            # Pre-response block/escalation messages are server-owned templates,
+            # not generated factual claims. They may safely bypass evidence
+            # matching while retaining an auditable, non-sensitive marker.
+            metadata["evidence_validation"] = {
+                "claim_count": 0,
+                "evidence_record_count": 0,
+                "unsupported_claim_count": 0,
+                "trusted_safety_template": True,
+            }
+            return response_text, metadata
+        validation_issues = metadata.get("validation_issues") or []
+        lalkitab_safe_abstention = bool(
+            metadata.get("lalkitab_runtime")
+            and (
+                response_text == LAL_KITAB_CHART_UNAVAILABLE_MESSAGE
+                or "validated_chart_context_unavailable" in validation_issues
+            )
+        )
         confidence = float(metadata.get("validation_confidence", 1.0) or 1.0)
         threshold = getattr(self.settings, "CONFIDENCE_THRESHOLD", 0.70)
         try:
             threshold_value = float(threshold)
         except (TypeError, ValueError):
             threshold_value = 0.70
-        if confidence < threshold_value:
+        if confidence < threshold_value and not lalkitab_safe_abstention:
             GUARDRAIL_COUNT.labels(action="fallback", reason="low_confidence").inc()
             next_metadata = {
                 **metadata,
@@ -1376,18 +1271,65 @@ Answer the user directly.
                 "guardrail_reason": "low_confidence",
                 "original_confidence": confidence,
             }
-            return LOW_CONFIDENCE_MESSAGE, next_metadata
+            return self._apply_claim_evidence_guard(LOW_CONFIDENCE_MESSAGE, next_metadata)
 
         hide_internal_sources = bool(
             ((self.agent_config or {}).get("conversation_policy") or {}).get("hide_internal_sources", True)
         )
         if hide_internal_sources and response_text and INTERNAL_SOURCE_TERMS.search(response_text):
-            return self._strip_internal_source_language(response_text), {
+            response_text, metadata = self._strip_internal_source_language(response_text), {
                 **metadata,
                 "public_answer_sanitized": True,
             }
 
-        return response_text, metadata
+        return self._apply_claim_evidence_guard(response_text, metadata)
+
+    def _apply_claim_evidence_guard(self, response_text: str, metadata: dict | None) -> tuple[str, dict]:
+        """Fail closed when a final answer makes a factual claim without evidence.
+
+        This central final-answer gate is intentionally synchronous and
+        deterministic. It accepts textual retrieval evidence and structured
+        commerce/chart data, while keeping the evidence comparison private.
+        """
+        next_metadata = dict(metadata or {})
+        validation = validate_claim_evidence(
+            response_text,
+            tool_results=next_metadata.get("tool_results"),
+            runtime_metadata=next_metadata,
+        )
+        next_metadata["evidence_validation"] = validation.metadata
+        if validation.is_valid:
+            return validation.sanitized_response, next_metadata
+
+        is_lalkitab = bool(next_metadata.get("lalkitab_runtime"))
+        chart_was_validated = bool(next_metadata.get("validation_passed")) and (
+            "validated_chart_context_unavailable" not in (next_metadata.get("validation_issues") or [])
+        )
+        if is_lalkitab and chart_was_validated:
+            fallback_message = LAL_KITAB_UNSUPPORTED_CLAIM_MESSAGE
+        elif is_lalkitab:
+            fallback_message = LAL_KITAB_CHART_UNAVAILABLE_MESSAGE
+        else:
+            fallback_message = LOW_CONFIDENCE_MESSAGE
+        GUARDRAIL_COUNT.labels(action="fallback", reason="claim_evidence").inc()
+        logger.warning(
+            "claim_evidence_guard_fallback",
+            claim_count=validation.metadata.get("claim_count", 0),
+            evidence_record_count=validation.metadata.get("evidence_record_count", 0),
+            unsupported_claim_count=validation.metadata.get("unsupported_claim_count", 0),
+            lalkitab_runtime=is_lalkitab,
+        )
+        return fallback_message, {
+            **next_metadata,
+            "fallback": True,
+            "fallback_stage": "claim_evidence",
+            "fallback_reason": "unsupported_claim",
+            "guardrail_action": "fallback",
+            "guardrail_reason": "claim_evidence",
+            "validation_passed": False,
+            "validation_confidence": 0.0,
+            "validation_issues": ["unsupported_factual_claim"],
+        }
 
     def _strip_internal_source_language(self, response_text: str) -> str:
         """Remove backend/runtime explanations from public answers."""
@@ -1414,7 +1356,16 @@ Answer the user directly.
         user_message: str,
         decision: dict,
     ) -> MessageResponse:
-        response_text = decision["message"]
+        response_text, response_metadata = self._apply_post_response_guardrails(
+            decision["message"],
+            {
+                "validation_confidence": 1.0,
+                "validation_passed": False,
+                "guardrail_action": decision["action"],
+                "guardrail_reason": decision["reason"],
+                "_trusted_safety_template": True,
+            },
+        )
         if self._short_term_memory_enabled():
             await self.short_term.add_message(
                 conversation_id=conversation_id,
@@ -1422,10 +1373,11 @@ Answer the user directly.
                 content=response_text,
                 metadata={
                     "user_id": user_id,
-                    "guardrail_action": decision["action"],
-                    "guardrail_reason": decision["reason"],
+                    "guardrail_action": response_metadata.get("guardrail_action"),
+                    "guardrail_reason": response_metadata.get("guardrail_reason"),
                     "capability_scope": decision.get("capability_scope"),
-                    "validation_passed": False,
+                    "validation_passed": response_metadata.get("validation_passed"),
+                    "evidence_validation": response_metadata.get("evidence_validation"),
                 },
             )
         self.strapi.sync_conversation(
@@ -1735,6 +1687,7 @@ Rules:
                 rerank_api_key=voyage_config["api_key"] or None,
                 rerank_model=voyage_config["rerank_model"],
                 rerank_base_url=voyage_config["base_url"],
+                verticals=sorted(configured_verticals(self.agent_config or {})),
             )
             logger.info("retrieval_pipeline_initialized", brand_id=brand_slug)
         except Exception as e:
@@ -1924,7 +1877,7 @@ Rules:
                 # Initialize remote MCP tools only when live Shopify actions are enabled.
                 # Catalog-backed ecommerce answers can run without MCP/customer auth.
                 if config.get("data_source") == "shopify":
-                    from tools.mcp_client import McpClient
+                    from tools.mcp_client import McpClient, McpDiscoveryError
                     from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
 
                     # For local development we assume port 3005 for the Shopify MCP Service
@@ -1957,6 +1910,13 @@ Rules:
                             "x-shopify-shop-url": str(shopify_url or ""),
                             "x-session-id": f"agent:{agent_id}",
                         }
+                        if self.settings.MCP_SERVICE_AUTH_TOKEN:
+                            mcp_headers["Authorization"] = (
+                                f"Bearer {self.settings.MCP_SERVICE_AUTH_TOKEN}"
+                            )
+                        elif self.settings.is_production:
+                            logger.error("shopify_mcp_service_token_missing", agent_id=agent_id)
+                            raise McpDiscoveryError("Shopify MCP service authentication is not configured")
                         if shopify_client_id:
                             mcp_headers["x-shopify-client-id"] = str(shopify_client_id)
                         if shopify_client_secret:
@@ -1977,6 +1937,8 @@ Rules:
 
                         # Connect and discover remote tools using a stable agent session.
                         remote_tools = await mcp_client.discover_tools(session_id=f"agent:{agent_id}")
+                        if not remote_tools:
+                            raise McpDiscoveryError("Shopify MCP did not expose any enabled tools")
                         local_catalog_tool_names = {"search_catalog", "search_shop_catalog"}
                         prefer_local_catalog = shopify_conf.get("integration_mode") == "hybrid_catalog_rag_mcp"
                         for tool in remote_tools:
@@ -2012,8 +1974,12 @@ Rules:
                     brand_slug=self.brand_id,
                 )
 
+        except McpDiscoveryError:
+            # Live commerce was explicitly enabled.  Do not silently replace a
+            # failed/misconfigured MCP boundary with a generic agent runtime.
+            raise
         except Exception as e:
-            logger.error("agent_config_load_error", error=str(e))
+            logger.error("agent_config_load_error", error_type=type(e).__name__)
             self.agent_record = {}
             self.agent_config = {}
             self.system_prompt = ""
@@ -2031,6 +1997,30 @@ Rules:
             page_context=request.page_context,
             filters=request.filters,
         )
+
+    def _build_stateful_turn_context(
+        self,
+        *,
+        conversation_summary: str,
+        recent_messages: list,
+        request: MessageRequest,
+        capability_scope: dict | None,
+        memory_context: dict | None = None,
+        include_memory: bool = False,
+    ) -> StatefulTurnContext:
+        """Adapt loaded turn data to the pure shared state-context assembler."""
+        args = {
+            "conversation_summary": conversation_summary,
+            "recent_messages": recent_messages,
+            "prompt_runtime": self._build_prompt_runtime_context(request),
+            "prompt_metadata": self.prompt_metadata,
+            "capability_scope": capability_scope,
+        }
+        if is_commerce_agent_config(self.agent_config or {}):
+            args["commerce"] = (self.agent_config or {}).get("commerce") or {}
+        if include_memory:
+            args["memory"] = memory_context
+        return build_stateful_turn_context(**args)
 
     def _normalized_request_page_context(self, request: MessageRequest) -> dict | None:
         url_context_config = (self.agent_config or {}).get("url_context_boost") or {}
@@ -2084,6 +2074,11 @@ Rules:
             # Generate conversation ID if not provided
             conversation_id = request.conversation_id or str(uuid.uuid4())
             user_id = request.user_id or "anonymous"
+            long_term_enabled = await self._long_term_memory_consent_granted(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
             self._bind_request_page_context_to_retrieval(request)
 
             logger.info(
@@ -2158,7 +2153,9 @@ Rules:
                     "pending_inputs": turn_plan.pending_inputs,
                     "context_decision": turn_plan.context_decision,
                     "validation_passed": True,
+                    "validation_confidence": 1.0,
                 }
+                response_text, metadata = self._apply_post_response_guardrails(response_text, metadata)
                 if short_term_enabled:
                     await self.short_term.add_message(
                         conversation_id=conversation_id,
@@ -2193,7 +2190,7 @@ Rules:
                     conversation_id=conversation_id,
                     citations=[],
                     context_used=0,
-                    confidence_score=1.0,
+                    confidence_score=min(1.0, max(0.0, float(metadata.get("validation_confidence", 1.0)))),
                     processing_time_ms=duration_ms,
                 )
 
@@ -2203,6 +2200,7 @@ Rules:
                 user_id=user_id,
                 query=runtime_message,
                 escalations=escalations,
+                long_term_enabled=long_term_enabled,
             )
 
             # Retrieve recent history + rolling memory (auto-compaction).
@@ -2213,58 +2211,22 @@ Rules:
                 recent_messages = conv_ctx["recent"]
                 conversation_summary = conv_ctx["summary"]
 
-            # Build chat history AND extract session state (e.g. cart_id) from
-            # previous assistant message metadata so the agent can reuse the cart.
-            chat_history = []
-            session_state: dict = {}
-            if conversation_summary:
-                # Lead with the rolling memory so older context survives compaction.
-                chat_history.append({
-                    "role": "system",
-                    "content": f"Conversation memory so far (earlier turns):\n{conversation_summary}",
-                    "metadata": {"memory_summary": True},
-                })
-            for msg in recent_messages:
-                role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
-                chat_history.append({
-                    "role": role,
-                    "content": msg.content,
-                    "metadata": msg.metadata or {}
-                })
-                # The most recent assistant message that carried session state wins.
-                if role == "assistant":
-                    meta = msg.metadata or {}
-                    if "cart_id" in meta:
-                        session_state["cart_id"] = meta["cart_id"]
-                    if "captured_ids" in meta:
-                        session_state["captured_ids"] = meta.get("captured_ids", {})
-                    if "last_searched" in meta:
-                        session_state["last_searched"] = meta.get("last_searched", {})
-                    for key in (
-                        "active_product_focus",
-                        "product_reference_map",
-                        "last_user_query",
-                        "last_search_query",
-                        "last_constraints",
-                        "rerank_results",
-                        "connector_inputs",
-                    ):
-                        if key in meta:
-                            session_state[key] = meta.get(key)
+            turn_context = self._build_stateful_turn_context(
+                conversation_summary=conversation_summary,
+                recent_messages=recent_messages,
+                request=request,
+                capability_scope=capability_scope,
+                memory_context=memory_context,
+                include_memory=True,
+            )
+            chat_history = turn_context.chat_history
+            session_state = turn_context.session_state
 
             remembered_inputs = session_state.get("connector_inputs") or {}
             if remembered_inputs:
                 self._apply_remembered_connector_inputs(remembered_inputs)
 
-            context_dict = {
-                "memory": memory_context,
-                "session_state": session_state,
-                "prompt_runtime": self._build_prompt_runtime_context(request),
-                "prompt_metadata": self.prompt_metadata,
-                "capability_scope": capability_scope,
-            }
-            if is_commerce_agent_config(self.agent_config or {}):
-                context_dict["commerce"] = (self.agent_config or {}).get("commerce") or {}
+            context_dict = turn_context.context
 
             # Chart-first Lal Kitab runtime (mirrors the streaming path): parse
             # birth details, geocode the birthplace automatically, build the
@@ -2291,13 +2253,24 @@ Rules:
             if lalkitab_plan.handled and (
                 getattr(lalkitab_plan, "awaiting_place_choice", False) or lalkitab_plan.missing_input
             ):
-                clarification = lalkitab_plan.clarification
+                clarification, clarification_metadata = self._apply_post_response_guardrails(
+                    lalkitab_plan.clarification,
+                    {
+                        "lalkitab_runtime": True,
+                        "validation_passed": True,
+                        "validation_confidence": 1.0,
+                    },
+                )
                 if short_term_enabled:
                     await self.short_term.add_message(
                         conversation_id=conversation_id,
                         role=MessageRole.ASSISTANT,
                         content=clarification,
-                        metadata={"user_id": user_id, "lalkitab_pending": lalkitab_plan.pending_state},
+                        metadata={
+                            "user_id": user_id,
+                            "lalkitab_pending": lalkitab_plan.pending_state,
+                            "evidence_validation": clarification_metadata.get("evidence_validation"),
+                        },
                     )
                 self.strapi.sync_conversation(
                     conversation_id=conversation_id,
@@ -2395,6 +2368,7 @@ Rules:
                 saved_cart_id = session_state["cart_id"]
 
             tool_results = agent_metadata.get("tool_results", {})
+            retrieval_health = _response_retrieval_health(tool_results, agent_metadata)
             cart_state = _safe_commerce_cart(
                 agent_metadata,
                 tool_results,
@@ -2440,6 +2414,11 @@ Rules:
                 "resolved_reference": _sanitize_for_json(agent_metadata.get("resolved_reference") or {}),
                 "cart": _sanitize_for_json(cart_state) if cart_state else None,
             } if is_commerce_agent or unique_products or unique_dealers or cart_state else None
+            if retrieval_health:
+                response_metadata = {
+                    **(response_metadata or {}),
+                    "retrieval": retrieval_health,
+                }
             if agent_metadata.get("kundali_chart"):
                 response_metadata = {
                     **(response_metadata or {}),
@@ -2462,6 +2441,7 @@ Rules:
                         "agent_steps": agent_metadata.get("steps_executed", 0),
                         "validation_passed": agent_metadata.get("validation_passed"),
                         "validation_issues": agent_metadata.get("validation_issues", []),
+                        "evidence_validation": agent_metadata.get("evidence_validation"),
                         "guardrail_action": agent_metadata.get("guardrail_action"),
                         "guardrail_reason": agent_metadata.get("guardrail_reason"),
                         "fallback_stage": agent_metadata.get("fallback_stage"),
@@ -2624,6 +2604,11 @@ Rules:
 
             # Set user_id
             user_id = request.user_id or "anonymous"
+            long_term_enabled = await self._long_term_memory_consent_granted(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
             self._bind_request_page_context_to_retrieval(request)
 
             escalations = []
@@ -2632,7 +2617,16 @@ Rules:
 
             guardrail_decision = self._evaluate_pre_response_guardrails(request.message, escalations)
             if guardrail_decision["action"] in {"block", "escalate"}:
-                response_text = guardrail_decision["message"]
+                response_text, guardrail_response_metadata = self._apply_post_response_guardrails(
+                    guardrail_decision["message"],
+                    {
+                        "validation_confidence": 1.0,
+                        "validation_passed": False,
+                        "guardrail_action": guardrail_decision["action"],
+                        "guardrail_reason": guardrail_decision["reason"],
+                        "_trusted_safety_template": True,
+                    },
+                )
                 if short_term_enabled:
                     await self.short_term.add_message(
                         conversation_id=conversation_id,
@@ -2640,10 +2634,11 @@ Rules:
                         content=response_text,
                         metadata={
                             "user_id": user_id,
-                            "guardrail_action": guardrail_decision["action"],
-                            "guardrail_reason": guardrail_decision["reason"],
+                            "guardrail_action": guardrail_response_metadata.get("guardrail_action"),
+                            "guardrail_reason": guardrail_response_metadata.get("guardrail_reason"),
                             "capability_scope": guardrail_decision.get("capability_scope"),
-                            "validation_passed": False,
+                            "validation_passed": guardrail_response_metadata.get("validation_passed"),
+                            "evidence_validation": guardrail_response_metadata.get("evidence_validation"),
                         },
                     )
                 self.strapi.sync_conversation(
@@ -2727,7 +2722,17 @@ Rules:
                     yield StreamingMessageResponse(**activity_stream_response_kwargs(activity, conversation_id))
 
             if turn_plan.should_short_circuit:
-                response_text = turn_plan.response_text
+                short_circuit_metadata = {
+                    "resolved_inputs": _sanitize_for_json(turn_plan.resolved_inputs),
+                    "pending_inputs": turn_plan.pending_inputs,
+                    "context_decision": turn_plan.context_decision,
+                    "validation_passed": True,
+                    "validation_confidence": 1.0,
+                }
+                response_text, short_circuit_metadata = self._apply_post_response_guardrails(
+                    turn_plan.response_text,
+                    short_circuit_metadata,
+                )
                 yield StreamingMessageResponse(
                     type="content",
                     content=response_text,
@@ -2753,7 +2758,8 @@ Rules:
                             "resolved_inputs": _sanitize_for_json(turn_plan.resolved_inputs),
                             "pending_inputs": turn_plan.pending_inputs,
                             "context_decision": turn_plan.context_decision,
-                            "validation_passed": True,
+                            "validation_passed": short_circuit_metadata.get("validation_passed"),
+                            "evidence_validation": short_circuit_metadata.get("evidence_validation"),
                         },
                     )
                 self.strapi.sync_conversation(
@@ -2768,7 +2774,10 @@ Rules:
                     content="",
                     conversation_id=conversation_id,
                     context_used=0,
-                    confidence_score=1.0,
+                    confidence_score=min(
+                        1.0,
+                        max(0.0, float(short_circuit_metadata.get("validation_confidence", 1.0))),
+                    ),
                     metadata={
                         "resolved_inputs": _sanitize_for_json(turn_plan.resolved_inputs),
                         "pending_inputs": turn_plan.pending_inputs,
@@ -2822,27 +2831,40 @@ Rules:
 
             # Birthplace disambiguation: pause and ask the user to pick a place.
             if agent_result is None and lalkitab_plan.handled and lalkitab_plan.awaiting_place_choice:
+                clarification, clarification_metadata = self._apply_post_response_guardrails(
+                    lalkitab_plan.clarification,
+                    {
+                        "lalkitab_runtime": True,
+                        "validation_passed": True,
+                        "validation_confidence": 1.0,
+                    },
+                )
                 disambiguation_metadata = {
                     "connector_id": "vedika_lal_kitab",
                     "connector_name": "Vedika Lal Kitab",
                     "endpoint_id": "geocode_search",
                     "endpoint_name": "Vedika Geocode Search",
-                    "candidates": lalkitab_plan.place_candidates,
-                    "normalized_birth_input": lalkitab_plan.normalized_birth_input,
+                    "candidates": _public_lalkitab_place_candidates(
+                        lalkitab_plan.place_candidates
+                    ),
                 }
                 yield StreamingMessageResponse(
                     type="place_disambiguation",
-                    content=lalkitab_plan.clarification,
+                    content=clarification,
                     conversation_id=conversation_id,
                     metadata=disambiguation_metadata,
                 )
-                yield StreamingMessageResponse(type="content", content=lalkitab_plan.clarification, conversation_id=conversation_id)
+                yield StreamingMessageResponse(type="content", content=clarification, conversation_id=conversation_id)
                 if short_term_enabled:
                     await self.short_term.add_message(
                         conversation_id=conversation_id,
                         role=MessageRole.ASSISTANT,
-                        content=lalkitab_plan.clarification,
-                        metadata={"user_id": user_id, "lalkitab_pending": lalkitab_plan.pending_state},
+                        content=clarification,
+                        metadata={
+                            "user_id": user_id,
+                            "lalkitab_pending": lalkitab_plan.pending_state,
+                            "evidence_validation": clarification_metadata.get("evidence_validation"),
+                        },
                     )
                 yield StreamingMessageResponse(
                     type="done",
@@ -2853,27 +2875,40 @@ Rules:
                 return
 
             if agent_result is None and lalkitab_plan.handled and lalkitab_plan.missing_input:
+                clarification, clarification_metadata = self._apply_post_response_guardrails(
+                    lalkitab_plan.clarification,
+                    {
+                        "lalkitab_runtime": True,
+                        "validation_passed": True,
+                        "validation_confidence": 1.0,
+                    },
+                )
                 missing_metadata = {
                     "connector_id": "vedika_lal_kitab",
                     "connector_name": "Vedika Lal Kitab",
                     "endpoint_id": "lalkitab_chart",
                     "endpoint_name": "Lal Kitab Chart",
-                    "missing_input": lalkitab_plan.missing_input,
-                    "normalized_birth_input": lalkitab_plan.normalized_birth_input,
+                    "missing_input": _public_lalkitab_missing_fields(
+                        lalkitab_plan.missing_input
+                    ),
                 }
                 yield StreamingMessageResponse(
                     type="missing_input",
-                    content=lalkitab_plan.clarification,
+                    content=clarification,
                     conversation_id=conversation_id,
                     metadata=missing_metadata,
                 )
-                yield StreamingMessageResponse(type="content", content=lalkitab_plan.clarification, conversation_id=conversation_id)
+                yield StreamingMessageResponse(type="content", content=clarification, conversation_id=conversation_id)
                 if short_term_enabled:
                     await self.short_term.add_message(
                         conversation_id=conversation_id,
                         role=MessageRole.ASSISTANT,
-                        content=lalkitab_plan.clarification,
-                        metadata={"user_id": user_id, "lalkitab_pending": lalkitab_plan.pending_state},
+                        content=clarification,
+                        metadata={
+                            "user_id": user_id,
+                            "lalkitab_pending": lalkitab_plan.pending_state,
+                            "evidence_validation": clarification_metadata.get("evidence_validation"),
+                        },
                     )
                 yield StreamingMessageResponse(
                     type="done",
@@ -2886,6 +2921,13 @@ Rules:
             connector_preflight = [] if turn_plan.tool_plan or lalkitab_plan.handled else self._connector_missing_inputs_for_message(runtime_message)
             if connector_preflight:
                 first_missing = connector_preflight[0]
+                clarification, _ = self._apply_post_response_guardrails(
+                    (
+                        "I need a little more information before I can call the configured source: "
+                        f"{', '.join(first_missing.get('missing_input') or [])}."
+                    ),
+                    {"validation_passed": True, "validation_confidence": 1.0},
+                )
                 yield StreamingMessageResponse(
                     type="missing_input",
                     content=(
@@ -2894,10 +2936,6 @@ Rules:
                     ),
                     conversation_id=conversation_id,
                     metadata=first_missing,
-                )
-                clarification = (
-                    "I need a little more information before I can call the configured source: "
-                    f"{', '.join(first_missing.get('missing_input') or [])}."
                 )
                 yield StreamingMessageResponse(type="content", content=clarification, conversation_id=conversation_id)
                 yield StreamingMessageResponse(
@@ -2916,41 +2954,14 @@ Rules:
                 recent_messages = conv_ctx["recent"]
                 conversation_summary = conv_ctx["summary"]
 
-            # Build chat history AND extract session state (e.g. cart_id) from
-            # previous assistant message metadata so the agent can reuse the cart.
-            chat_history = []
-            session_state: dict = {}
-            if conversation_summary:
-                # Lead with the rolling memory so older context survives compaction.
-                chat_history.append({
-                    "role": "system",
-                    "content": f"Conversation memory so far (earlier turns):\n{conversation_summary}",
-                    "metadata": {"memory_summary": True},
-                })
-            for msg in recent_messages:
-                role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
-                chat_history.append({
-                    "role": role,
-                    "content": msg.content,
-                    "metadata": msg.metadata or {}
-                })
-                # The most recent assistant message that carried session state wins.
-                if role == "assistant":
-                    meta = msg.metadata or {}
-                    if "cart_id" in meta:
-                        session_state["cart_id"] = meta["cart_id"]
-                    if "checkout_url" in meta:
-                        session_state["checkout_url"] = meta["checkout_url"]
-                    if "cart_lines" in meta:
-                        session_state["cart_lines"] = meta["cart_lines"]
-                    if "captured_ids" in meta:
-                        session_state["captured_ids"] = meta.get("captured_ids", {})
-                    if "last_searched" in meta:
-                        session_state["last_searched"] = meta.get("last_searched", {})
-                    # Remembered connector inputs (birthplace, location, account
-                    # id, …) so follow-up tool calls reuse them automatically.
-                    if isinstance(meta.get("connector_inputs"), dict) and meta["connector_inputs"]:
-                        session_state["connector_inputs"] = {**session_state.get("connector_inputs", {}), **meta["connector_inputs"]}
+            turn_context = self._build_stateful_turn_context(
+                conversation_summary=conversation_summary,
+                recent_messages=recent_messages,
+                request=request,
+                capability_scope=capability_scope,
+            )
+            chat_history = turn_context.chat_history
+            session_state = turn_context.session_state
 
             # Make remembered inputs available to any connector tool the
             # orchestrator may call this turn (universal for connector agents).
@@ -2968,14 +2979,7 @@ Rules:
                 for event in planner_events:
                     yield event
 
-            prompt_context = {
-                "session_state": session_state,
-                "prompt_runtime": self._build_prompt_runtime_context(request),
-                "prompt_metadata": self.prompt_metadata,
-                "capability_scope": capability_scope,
-            }
-            if is_commerce_agent_config(self.agent_config or {}):
-                prompt_context["commerce"] = (self.agent_config or {}).get("commerce") or {}
+            prompt_context = turn_context.context
             if lalkitab_plan.handled and lalkitab_plan.api_context:
                 prompt_context["prompt_runtime"]["calculated_api_context"] = {
                     "normalized_birth_input": lalkitab_plan.api_context.get("normalized_birth_input"),
@@ -3101,6 +3105,27 @@ Rules:
 
                 agent_result = await orchestrator_task
 
+            if _is_unrecoverable_generation_failure(agent_result):
+                # ``safe_canned`` means every generation path failed. Do not
+                # stream the canned fallback as a successful final answer:
+                # clients use ``error`` as their terminal event.  Provider
+                # diagnostics stay in server logs and are never sent to users.
+                failure_metadata = getattr(agent_result, "metadata", None)
+                if not isinstance(failure_metadata, dict):
+                    failure_metadata = {}
+                logger.warning(
+                    "stream_generation_unrecoverable",
+                    conversation_id=conversation_id,
+                    fallback_stage=failure_metadata.get("fallback_stage"),
+                )
+                yield StreamingMessageResponse(
+                    type="error",
+                    content=STREAM_GENERATION_ERROR_MESSAGE,
+                    conversation_id=conversation_id,
+                    metadata=dict(STREAM_GENERATION_ERROR_METADATA),
+                )
+                return
+
             # Extract final answer
             full_response, agent_metadata = self._apply_post_response_guardrails(
                 agent_result.answer,
@@ -3116,6 +3141,7 @@ Rules:
                 }
 
             tool_results = agent_metadata.get("tool_results", {})
+            retrieval_health = _response_retrieval_health(tool_results, agent_metadata)
             is_commerce_agent = is_commerce_agent_config(self.agent_config or {})
             for tool_name, tool_result in tool_results.items():
                 if not hasattr(tool_result, "metadata") or not tool_result.metadata:
@@ -3233,6 +3259,8 @@ Rules:
                 "api_context": _sanitize_for_json(agent_metadata.get("api_context") or {}),
                 "rag_context": _sanitize_for_json(agent_metadata.get("rag_context") or {}),
             }
+            if retrieval_health:
+                final_answer_metadata["retrieval"] = retrieval_health
             if agent_metadata.get("kundali_chart"):
                 # Structured chart payload the widget renders as the visual
                 # kundali artifact above the reading.
@@ -3286,6 +3314,7 @@ Rules:
                         "agent_steps": agent_metadata.get("steps_executed", 0),
                         "validation_passed": agent_metadata.get("validation_passed"),
                         "validation_issues": agent_metadata.get("validation_issues", []),
+                        "evidence_validation": agent_metadata.get("evidence_validation"),
                         "guardrail_action": agent_metadata.get("guardrail_action"),
                         "guardrail_reason": agent_metadata.get("guardrail_reason"),
                         "fallback_stage": agent_metadata.get("fallback_stage"),
@@ -3301,6 +3330,7 @@ Rules:
                         "products": _sanitize_for_json(agent_metadata.get("active_product_focus") or []),
                         "response_metadata": {
                             "cart": _sanitize_for_json(cart_state) if cart_state else None,
+                            **({"retrieval": retrieval_health} if retrieval_health else {}),
                         },
                         "captured_ids": agent_metadata.get("captured_ids"),
                         "last_searched": agent_metadata.get("last_searched"),
@@ -3415,6 +3445,30 @@ Rules:
                 "name",
             )
 
+            stream_response_metadata = {
+                "commerce_intent": _sanitize_for_json(agent_metadata.get("commerce_intent") or agent_metadata.get("last_constraints") or {}),
+                "active_product_focus": _sanitize_for_json(
+                    _normalize_commerce_products_currency(
+                        agent_metadata.get("active_product_focus") or [],
+                        self.agent_config or {},
+                    )
+                ),
+                "product_reference_map": _sanitize_for_json(agent_metadata.get("product_reference_map") or {}),
+                "original_query": agent_metadata.get("original_query") or agent_metadata.get("last_user_query"),
+                "search_query": agent_metadata.get("search_query") or agent_metadata.get("last_search_query"),
+                "rerank_results": _sanitize_for_json(agent_metadata.get("rerank_results") or []),
+                "resolved_reference": _sanitize_for_json(agent_metadata.get("resolved_reference") or {}),
+                "api_context": _sanitize_for_json(agent_metadata.get("api_context") or {}),
+                "rag_context": _sanitize_for_json(agent_metadata.get("rag_context") or {}),
+                "cart": _sanitize_for_json({
+                    "cart_id": cart_state.get("cart_id") if cart_state else saved_cart_id,
+                    "checkout_url": cart_state.get("checkout_url") if cart_state else None,
+                    "cart_lines": cart_state.get("cart_lines") if cart_state else [],
+                }),
+            }
+            if retrieval_health:
+                stream_response_metadata["retrieval"] = retrieval_health
+
             yield StreamingMessageResponse(
                 type="metadata",
                 content="",
@@ -3424,39 +3478,22 @@ Rules:
                 confidence_score=min(1.0, max(0.0, float(agent_metadata.get("validation_confidence", 1.0)))),
                 products=unique_products,
                 dealers=unique_dealers,
-                metadata={
-                    "commerce_intent": _sanitize_for_json(agent_metadata.get("commerce_intent") or agent_metadata.get("last_constraints") or {}),
-                    "active_product_focus": _sanitize_for_json(
-                        _normalize_commerce_products_currency(
-                            agent_metadata.get("active_product_focus") or [],
-                            self.agent_config or {},
-                        )
-                    ),
-                    "product_reference_map": _sanitize_for_json(agent_metadata.get("product_reference_map") or {}),
-                    "original_query": agent_metadata.get("original_query") or agent_metadata.get("last_user_query"),
-                    "search_query": agent_metadata.get("search_query") or agent_metadata.get("last_search_query"),
-                    "rerank_results": _sanitize_for_json(agent_metadata.get("rerank_results") or []),
-                    "resolved_reference": _sanitize_for_json(agent_metadata.get("resolved_reference") or {}),
-                    "api_context": _sanitize_for_json(agent_metadata.get("api_context") or {}),
-                    "rag_context": _sanitize_for_json(agent_metadata.get("rag_context") or {}),
-                    "cart": _sanitize_for_json({
-                        "cart_id": cart_state.get("cart_id") if cart_state else saved_cart_id,
-                        "checkout_url": cart_state.get("checkout_url") if cart_state else None,
-                        "cart_lines": cart_state.get("cart_lines") if cart_state else [],
-                    }),
-                },
+                metadata=stream_response_metadata,
                 commerce={"cart": cart_state} if cart_state else None,
             )
 
+            done_metadata = {
+                "latency_ms": int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000),
+                "context_used": len(tool_results),
+                "citations_count": len(citations),
+            }
+            if retrieval_health:
+                done_metadata["retrieval"] = retrieval_health
             yield StreamingMessageResponse(
                 type="done",
                 content="Run complete.",
                 conversation_id=conversation_id,
-                metadata={
-                    "latency_ms": int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000),
-                    "context_used": len(tool_results),
-                    "citations_count": len(citations),
-                },
+                metadata=done_metadata,
             )
 
             duration = (datetime.now(timezone.utc) - start_time).total_seconds()
@@ -3520,8 +3557,9 @@ Rules:
             logger.error("message_streaming_error", error=str(e), exc_info=True)
             yield StreamingMessageResponse(
                 type="error",
-                content=f"Error: {str(e)}",
-                conversation_id=conversation_id or str(uuid.uuid4())
+                content=STREAM_GENERATION_ERROR_MESSAGE,
+                conversation_id=conversation_id,
+                metadata=dict(STREAM_GENERATION_ERROR_METADATA),
             )
 
     async def inject_history(self, conversation_id: str, agent_id: str, messages: list) -> None:
@@ -3533,39 +3571,36 @@ Rules:
         """
         if not messages:
             return
-        try:
-            await self._load_agent_config(agent_id)
-            await self._ensure_memory_initialized()
-            if not self._short_term_memory_enabled():
-                logger.info("takeover_history_injection_skipped_memory_disabled", agent_id=agent_id)
-                return
+        await self._load_agent_config(agent_id)
+        await self._ensure_memory_initialized()
+        if not self._short_term_memory_enabled():
+            logger.info("takeover_history_injection_skipped_memory_disabled", agent_id=agent_id)
+            return
 
-            # Synthetic notice so the LLM is aware of the gap
+        # Synthetic notice so the LLM is aware of the gap
+        await self.short_term.add_message(
+            conversation_id=conversation_id,
+            role=MessageRole.ASSISTANT,
+            content="[System: The following messages were exchanged while a human support agent had control of this conversation.]",
+            metadata={"injected": True, "source": "human_takeover"},
+        )
+
+        for msg in messages:
+            role_str = msg.get("role", "user")
+            content = msg.get("content", "")
+            memory_role = MessageRole.USER if role_str == "user" else MessageRole.ASSISTANT
             await self.short_term.add_message(
                 conversation_id=conversation_id,
-                role=MessageRole.ASSISTANT,
-                content="[System: The following messages were exchanged while a human support agent had control of this conversation.]",
+                role=memory_role,
+                content=content,
                 metadata={"injected": True, "source": "human_takeover"},
             )
 
-            for msg in messages:
-                role_str = msg.get("role", "user")
-                content = msg.get("content", "")
-                memory_role = MessageRole.USER if role_str == "user" else MessageRole.ASSISTANT
-                await self.short_term.add_message(
-                    conversation_id=conversation_id,
-                    role=memory_role,
-                    content=content,
-                    metadata={"injected": True, "source": "human_takeover"},
-                )
-
-            logger.info(
-                "takeover_history_injected",
-                conversation_id=conversation_id,
-                messages_count=len(messages),
-            )
-        except Exception as e:
-            logger.warning("inject_history_failed", error=str(e), conversation_id=conversation_id)
+        logger.info(
+            "takeover_history_injected",
+            conversation_id=conversation_id,
+            messages_count=len(messages),
+        )
 
     async def _retrieve_context(self, request: MessageRequest) -> RetrievalContext:
         """Retrieve relevant context for the message."""
@@ -3591,8 +3626,8 @@ Rules:
             )
             return context
 
-        except Exception as e:
-            logger.error("Error retrieving context", error=str(e), exc_info=True)
+        except Exception as exc:
+            logger.error("retrieval_context_failed", error_type=type(exc).__name__, exc_info=True)
             # Return empty context on error
             from retrieval.types import RetrievalContext
             return RetrievalContext(
@@ -3600,7 +3635,11 @@ Rules:
                 confidence=0.0,
                 sources=[],
                 query=request.message,
-                retrieval_metadata={"error": str(e)}
+                retrieval_metadata={
+                    "status": "error",
+                    "reason": "retrieval_unavailable",
+                    "backend_status": "unavailable",
+                },
             )
 
     async def _build_memory_context(
@@ -3609,6 +3648,7 @@ Rules:
         user_id: str,
         query: str,
         escalations: list,
+        long_term_enabled: bool | None = None,
     ) -> dict:
         """
         Build unified memory context from all layers.
@@ -3621,7 +3661,8 @@ Rules:
         - summaries: Conversation summaries
         """
         short_term_enabled = self._short_term_memory_enabled()
-        long_term_enabled = self._long_term_memory_enabled()
+        if long_term_enabled is None:
+            long_term_enabled = False
 
         # Get short-term messages
         recent_messages = []

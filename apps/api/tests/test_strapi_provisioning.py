@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.v1.admin import agents as agents_module
+from app.services import runtime_settings_service as runtime_settings_module
 from app.services.runtime_settings_service import RuntimeSettingsService
 from app.services.strapi_provisioning_service import StrapiProvisioningService
 
@@ -34,7 +35,11 @@ class FakeRuntimeSettingsService:
 
 
 @pytest.mark.asyncio
-async def test_runtime_settings_service_resolves_strapi_values():
+async def test_runtime_settings_service_resolves_strapi_values(monkeypatch):
+    # This test covers the host/local configuration contract. The container
+    # rewrite has different intentional behavior and must not leak host Docker
+    # state into a deterministic unit assertion.
+    monkeypatch.setattr(runtime_settings_module.Path, "exists", lambda _path: False)
     service = RuntimeSettingsService(build_settings())
     config = await service.get_strapi_runtime_config()
 

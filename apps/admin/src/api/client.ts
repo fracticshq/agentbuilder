@@ -11,7 +11,7 @@ declare global {
 }
 
 const runtimeConfig = window.__APP_CONFIG__ || {};
-export const API_BASE_URL = runtimeConfig.API_BASE_URL || process.env.REACT_APP_API_URL || window.location.origin;
+export const API_BASE_URL = runtimeConfig.API_BASE_URL || import.meta.env.VITE_API_URL || window.location.origin;
 const AUTH_STORAGE_KEY = 'agentbuilder.auth_session';
 export const AUTH_SESSION_CHANGED_EVENT = 'agentbuilder.auth_session_changed';
 
@@ -959,11 +959,11 @@ export const documentApi = {
 
   getKnowledgeDocuments: async (agentId?: string): Promise<KnowledgeDocument[]> => {
     const params = agentId ? { agent_id: agentId } : {};
-    process.env.NODE_ENV !== 'production' && console.log('🔍 Fetching documents with params:', params);
+    import.meta.env.DEV && console.log('🔍 Fetching documents with params:', params);
     
     const response = await apiClient.get<{ documents: any[], count: number }>('/api/v1/ingest/documents', { params });
     
-    process.env.NODE_ENV !== 'production' && console.log('📥 Documents API response:', response.data);
+    import.meta.env.DEV && console.log('📥 Documents API response:', response.data);
     
     // Transform API response to match KnowledgeDocument interface
     const transformed = response.data.documents.map((doc: any) => ({
@@ -983,7 +983,7 @@ export const documentApi = {
       updated_at: doc.created_at || new Date().toISOString(),
     }));
     
-    process.env.NODE_ENV !== 'production' && console.log('✨ Transformed documents:', transformed);
+    import.meta.env.DEV && console.log('✨ Transformed documents:', transformed);
     return transformed;
   },
 

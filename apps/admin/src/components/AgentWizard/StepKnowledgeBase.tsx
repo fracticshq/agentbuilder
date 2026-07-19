@@ -10,6 +10,7 @@ import {
   PlusIcon,
 } from '@heroicons/react/24/outline';
 import DocumentUploadWizard from '../KnowledgeBase/DocumentUploadWizard';
+import { agentApi, brandApi } from '../../api/client';
 import { knowledgeApi } from '../../api/knowledge';
 import type {
   DocumentPreview,
@@ -19,7 +20,7 @@ import type {
   UploadJobStatus,
 } from '../../types/knowledge';
 
-const isDev = process.env.NODE_ENV !== 'production';
+const isDev = import.meta.env.DEV;
 
 interface StepKnowledgeBaseProps {
   data: {
@@ -195,15 +196,14 @@ export default function StepKnowledgeBase({ data, onChange, agentId, brandId }: 
     const resolveBrand = async () => {
       if (agentId) {
         try {
-          const clientModule = await import('../../api/client');
-          const resp = await clientModule.agentApi.get(agentId);
+          const resp = await agentApi.get(agentId);
           const agent = resp.data as any;
           const aliases = [agent?.brand_slug, agent?.brand_id, brandId].filter(Boolean) as string[];
           let primaryBrand = agent?.brand_slug || agent?.brand_id || brandId || null;
 
           if (agent?.brand_id) {
             try {
-              const brandResp = await clientModule.brandApi.get(agent.brand_id);
+              const brandResp = await brandApi.get(agent.brand_id);
               if (brandResp.data?.slug) {
                 primaryBrand = brandResp.data.slug;
                 aliases.unshift(brandResp.data.slug);
@@ -226,8 +226,7 @@ export default function StepKnowledgeBase({ data, onChange, agentId, brandId }: 
         }
       } else if (brandId) {
         try {
-          const clientModule = await import('../../api/client');
-          const brandResp = await clientModule.brandApi.get(brandId);
+          const brandResp = await brandApi.get(brandId);
           const primaryBrand = brandResp.data?.slug || brandId;
           setResolvedBrandId(primaryBrand);
           setBrandAliases(Array.from(new Set([primaryBrand, brandResp.data?.id, brandId].filter(Boolean) as string[])));
@@ -394,6 +393,7 @@ export default function StepKnowledgeBase({ data, onChange, agentId, brandId }: 
       <div className="max-w-6xl">
         <DocumentUploadWizard
           brandId={resolvedBrandId}
+          agentId={agentId}
           onComplete={handleUploadComplete}
           onCancel={() => setShowWizard(false)}
         />

@@ -157,20 +157,28 @@ class EpisodicMemory:
             await self._delete_oldest_fact(fact.user_id)
         
         # Prepare document
-        fact_doc = fact.dict()
+        fact_doc = fact.model_dump()
         
         # Encrypt PII if needed
-        if fact.pii_encrypted and self.pii_vault and self.pii_vault.enabled:
+        if fact.pii_encrypted:
+            if not self.pii_vault or not self.pii_vault.enabled:
+                logger.error("PII fact rejected because encryption is unavailable", fact_id=fact.id)
+                return None
             try:
                 # Encrypt the fact value
                 pii_field = self.pii_vault.encrypt_field(fact.fact, "fact")
-                fact_doc["fact"] = pii_field.dict()
+                fact_doc["fact"] = pii_field.model_dump()
                 fact_doc["pii_encrypted"] = True
+                # Entity extraction keeps the source text in metadata.context.
+                # Leaving it intact would defeat the encrypted fact envelope.
+                metadata = dict(fact_doc.get("metadata") or {})
+                metadata.pop("context", None)
+                metadata["context_redacted"] = True
+                fact_doc["metadata"] = metadata
                 logger.debug("Fact PII encrypted", fact_id=fact.id)
             except Exception as e:
                 logger.error("Failed to encrypt fact PII", error=str(e))
-                # Store unencrypted as fallback (log warning)
-                logger.warning("Storing fact without encryption")
+                return None
         
         # Insert into database
         try:

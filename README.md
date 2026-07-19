@@ -65,11 +65,15 @@ Core services:
 | Admin | `apps/admin` | http://localhost:3000 | NOVA dashboard for brands, agents, settings, KB, observability |
 | Widget | `apps/widget` | http://localhost:5174 | Embeddable chat widget |
 | Shopify MCP | `apps/shopify-mcp` | http://localhost:3005 | Shopify OAuth and MCP bridge |
+| Catalog sync worker | `apps/api/app/workers/catalog_sync_worker.py` | internal | Mongo-leased Shopify full sync, delete, and uninstall lifecycle work |
 | MongoDB | Compose service | internal | Agent data, knowledge, memory, source of truth |
-| Qdrant | Compose service | http://localhost:6333 | Local/self-hosted vector search |
+| Qdrant | Compose-only internal service | not host-published | Local/self-hosted vector search; requires an API key |
 | Redis | Compose service | internal | Rate limits, jobs, pub/sub, session state |
 
-Each app has its own Docker build context so API, admin, widget, and Shopify MCP can be built and deployed independently.
+The API image is built from the repository root so it installs the same canonical
+`packages/` source used in development and CI. There is no API-local copy of
+these packages; changes belong in the root tree. The admin, widget, and Shopify
+MCP services retain independent build contexts.
 
 ---
 
@@ -96,7 +100,9 @@ agentbuilder/
 └── README.md            # This file
 ```
 
-`apps/api/packages/` intentionally contains vendored copies of shared packages for the API container's isolated Docker build context.
+`packages/` is the single source of truth for shared Python packages. The legacy
+`apps/api/packages/` copies are excluded from image builds and must not be used
+for runtime changes.
 
 ---
 
@@ -116,10 +122,12 @@ SECRET_KEY=<openssl rand -hex 32>
 PII_ENCRYPTION_KEY=<openssl rand -hex 32>
 ADMIN_API_KEY=<openssl rand -hex 32>
 SESSION_SECRET=<openssl rand -hex 32>
+MCP_SERVICE_AUTH_TOKEN=<openssl rand -hex 32>
 MONGODB_URI=mongodb://mongodb:27017
 REDIS_URL=redis://redis:6379
 VECTOR_BACKEND=qdrant
 QDRANT_URL=http://qdrant:6333
+QDRANT_API_KEY=<openssl rand -hex 32>
 CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost:5174
 ENVIRONMENT=production
 DEBUG=false
@@ -273,7 +281,7 @@ npm test
 Full container build:
 
 ```bash
-docker compose build api admin widget shopify
+docker compose build api admin widget shopify catalog-sync-worker
 ```
 
 ---
@@ -308,6 +316,10 @@ Current docs:
 - [Vector Database Architecture](./docs/VECTOR_DATABASE_ARCHITECTURE.md)
 - [Hybrid RAG Workflow](./docs/HYBRID_RAG_WORKFLOW.md)
 - [API Documentation](./docs/api/API_DOCUMENTATION.md)
+- [Generated OpenAPI 3.1 Contract](./docs/api/openapi.json)
+- [Generated Postman Collection](./docs/api/Agent_Builder_Platform.postman_collection.json)
+- [Canonical Source and API Contract](./docs/api/P6_CANONICAL_SOURCE_AND_API_CONTRACT.md)
+- [GA Release and Operations Contract](./docs/operations/GA_RELEASE_OPERATIONS.md)
 - [Agent/Coding Contracts](./AGENTS.md)
 
 ---

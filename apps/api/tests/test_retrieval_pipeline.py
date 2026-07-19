@@ -16,18 +16,39 @@ class FakeSearch:
         self.events.append(f"{self.name}:start")
         await asyncio.sleep(0.01)
         self.events.append(f"{self.name}:end")
+        chunks = self.chunks if self.chunks is not None else [
+            DocumentChunk(
+                chunk_id=f"{self.name}-chunk",
+                doc_id=f"{self.name}-doc",
+                content=f"{self.name} result for {query}",
+                score=1.0,
+            )
+        ]
         return SearchResult(
-            chunks=self.chunks or [
-                DocumentChunk(
-                    chunk_id=f"{self.name}-chunk",
-                    doc_id=f"{self.name}-doc",
-                    content=f"{self.name} result for {query}",
-                    score=1.0,
-                )
-            ],
-            total_found=1,
+            chunks=chunks,
+            total_found=len(chunks),
             query=query,
             search_type=self.name,
+        )
+
+
+class FailingSearch:
+    def __init__(self, error_message="connection failed"):
+        self.error_message = error_message
+
+    async def search(self, *_args, **_kwargs):
+        raise RuntimeError(self.error_message)
+
+
+class UnavailableSearch:
+    async def search(self, query, **_kwargs):
+        return SearchResult(
+            chunks=[],
+            total_found=0,
+            query=query,
+            search_type="vector",
+            backend_status="unavailable",
+            backend_reason="authentication_failed",
         )
 
 
@@ -66,7 +87,17 @@ def build_pipeline(**config_overrides):
     pipeline.reranker = None
     pipeline.brand_boost = None
     pipeline.page_boost = None
+    pipeline.verticals = set()
     return pipeline
+
+
+def test_product_intent_uses_vertical_terms_only_when_explicitly_enabled():
+    generic = build_pipeline()
+    bathware = build_pipeline()
+    bathware.verticals = {"bathware"}
+
+    assert generic._detect_query_intent("show a faucet") == "general"
+    assert bathware._detect_query_intent("show a faucet") == "product_search"
 
 
 @pytest.mark.asyncio
@@ -80,6 +111,98 @@ async def test_retrieval_runs_vector_and_bm25_concurrently():
 
     assert len(result.chunks) == 2
     assert events.index("bm25:start") < events.index("vector:end")
+    assert result.retrieval_metadata["status"] == "evidence"
+    assert result.retrieval_metadata["search_methods"] == ["vector", "bm25"]
+    assert set(result.sources) == {"vector-doc", "bm25-doc"}
+
+
+@pytest.mark.asyncio
+async def test_successful_empty_searches_report_no_evidence():
+    events = []
+    pipeline = build_pipeline()
+    pipeline.vector_search = FakeSearch("vector", events, chunks=[])
+    pipeline.bm25_search = FakeSearch("bm25", events, chunks=[])
+
+    result = await pipeline.retrieve("unmatched query")
+
+    assert result.chunks == []
+    assert result.sources == []
+    assert result.retrieval_metadata["status"] == "no_evidence"
+    assert result.retrieval_metadata["backend_status"] == {
+        "vector": {"status": "success"},
+        "bm25": {"status": "success"},
+    }
+    assert result.retrieval_metadata["failed_backends"] == []
+    assert result.retrieval_metadata["total_candidates"] == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_backend_exception_reports_degraded_not_no_evidence():
+    pipeline = build_pipeline()
+    pipeline.vector_search = FailingSearch("mongodb://admin:super-secret@host unavailable")
+    pipeline.bm25_search = FakeSearch("bm25", [], chunks=[])
+
+    result = await pipeline.retrieve("unmatched query")
+
+    assert result.chunks == []
+    assert result.retrieval_metadata["status"] == "degraded"
+    assert result.retrieval_metadata["backend_status"]["vector"] == {
+        "status": "error",
+        "reason": "backend_error",
+    }
+    assert result.retrieval_metadata["successful_backends"] == ["bm25"]
+    assert result.retrieval_metadata["failed_backends"] == ["vector"]
+    assert "super-secret" not in str(result.retrieval_metadata)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_backend_result_reports_degraded_not_no_evidence():
+    pipeline = build_pipeline()
+    pipeline.vector_search = UnavailableSearch()
+    pipeline.bm25_search = FakeSearch("bm25", [], chunks=[])
+
+    result = await pipeline.retrieve("unmatched query")
+
+    assert result.chunks == []
+    assert result.retrieval_metadata["status"] == "degraded"
+    assert result.retrieval_metadata["backend_status"]["vector"] == {
+        "status": "unavailable",
+        "reason": "authentication_failed",
+    }
+    assert result.retrieval_metadata["failed_backends"] == ["vector"]
+
+
+@pytest.mark.asyncio
+async def test_all_backend_exceptions_report_error_not_no_evidence():
+    pipeline = build_pipeline()
+    pipeline.vector_search = FailingSearch("vector-key=super-secret")
+    pipeline.bm25_search = FailingSearch("mongo-password=super-secret")
+
+    result = await pipeline.retrieve("unmatched query")
+
+    assert result.chunks == []
+    assert result.retrieval_metadata["status"] == "error"
+    assert result.retrieval_metadata["reason"] == "no_search_backend_succeeded"
+    assert result.retrieval_metadata["successful_backends"] == []
+    assert result.retrieval_metadata["failed_backends"] == ["vector", "bm25"]
+    assert "super-secret" not in str(result.retrieval_metadata)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_configured_backends_report_error_not_no_evidence():
+    pipeline = build_pipeline()
+    pipeline.vector_search = None
+    pipeline.bm25_search = None
+
+    result = await pipeline.retrieve("unmatched query")
+
+    assert result.chunks == []
+    assert result.retrieval_metadata["status"] == "error"
+    assert result.retrieval_metadata["backend_status"] == {
+        "vector": {"status": "unavailable", "reason": "backend_unavailable"},
+        "bm25": {"status": "unavailable", "reason": "backend_unavailable"},
+    }
+    assert result.retrieval_metadata["failed_backends"] == ["vector", "bm25"]
 
 
 def test_deduplicate_uses_structured_product_identity_before_doc_id():

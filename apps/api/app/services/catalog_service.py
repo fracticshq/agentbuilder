@@ -1,21 +1,20 @@
-"""
-Catalog Service — multi-source product import with sync support.
-Supports: Shopify /products.json, JSON feed (auto-detect), CSV, Firecrawl scrape.
+"""Catalog Service — multi-source product import with sync support.
+
+Authenticated Shopify sync uses the versioned Admin GraphQL API. Public JSON
+feeds remain a separate, explicitly configured import source.
 """
 from __future__ import annotations
 
 import asyncio
 import csv
 import io
-import ipaddress
+import os
 import re
 import uuid
 from datetime import datetime
 from functools import partial
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 import structlog
@@ -23,17 +22,119 @@ import structlog
 from app.config import Settings
 from app.connections import connection_manager
 from app.services.knowledge_service import KnowledgeService
+from . import catalog_network_safety
+from .catalog_currency import (
+    currency_with_source as _currency_with_source,
+    extract_catalog_currency as _extract_catalog_currency,
+    normalize_currency as _normalize_currency,
+    normalize_currency_code,
+    price_amount as _price_amount,
+    to_cents as _to_cents,
+)
 from .job_store import JobStore
 
 logger = structlog.get_logger()
 
 _job_store = JobStore()
+_SHOPIFY_API_VERSION_PATTERN = re.compile(r"^20\d{2}-(?:01|04|07|10)$")
+_SHOPIFY_GRAPHQL_PRODUCTS_PAGE_SIZE = 10
+_SHOPIFY_GRAPHQL_VARIANTS_PAGE_SIZE = 100
+_SHOPIFY_GRAPHQL_MAX_RETRIES = 3
+_CATALOG_SYNC_FAILURE_CODE = "catalog_sync_failed"
+_SAFE_CATALOG_SYNC_FAILURE_CODES = frozenset(
+    {
+        _CATALOG_SYNC_FAILURE_CODE,
+        "shopify_graphql_throttled",
+        "shopify_graphql_query_failed",
+        "shopify_graphql_product_cursor_invalid",
+    }
+)
 
 
-async def create_job(job_id: str, job_type: str, total: int = 0) -> None:
+def _catalog_sync_failure_code(exc: Exception) -> str:
+    """Return a stable public/admin sync code, never a provider exception."""
+    if isinstance(exc, ShopifyGraphQLRequestError):
+        candidate = str(exc)
+        if candidate in _SAFE_CATALOG_SYNC_FAILURE_CODES:
+            return candidate
+    return _CATALOG_SYNC_FAILURE_CODE
+_CATALOG_ITEM_FAILURE_MESSAGE = "Catalog item import failed. Review server logs for details."
+
+_SHOPIFY_SHOP_CURRENCY_QUERY = """
+query ShopCurrency {
+  shop { currencyCode }
+}
+"""
+
+_SHOPIFY_PRODUCTS_QUERY = """
+query CatalogProducts($after: String, $first: Int!) {
+  products(first: $first, after: $after, sortKey: ID) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      legacyResourceId
+      title
+      handle
+      productType
+      vendor
+      tags
+      options { name position }
+      featuredImage { url }
+      variants(first: 25) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          legacyResourceId
+          sku
+          title
+          price { amount currencyCode }
+          inventoryQuantity
+          inventoryPolicy
+          image { url }
+          selectedOptions { name value }
+        }
+      }
+    }
+  }
+}
+"""
+
+_SHOPIFY_PRODUCT_VARIANTS_QUERY = """
+query CatalogProductVariants($productId: ID!, $after: String, $first: Int!) {
+  product(id: $productId) {
+    variants(first: $first, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id
+        legacyResourceId
+        sku
+        title
+        price { amount currencyCode }
+        inventoryQuantity
+        inventoryPolicy
+        image { url }
+        selectedOptions { name value }
+      }
+    }
+  }
+}
+"""
+
+
+def shopify_admin_api_version() -> str:
+    """Return an explicitly configured, current Shopify API release label."""
+    configured = str(os.environ.get("SHOPIFY_ADMIN_API_VERSION", "2026-04")).strip()
+    if not _SHOPIFY_API_VERSION_PATTERN.fullmatch(configured):
+        raise ValueError("SHOPIFY_ADMIN_API_VERSION must use the YYYY-MM Shopify release format.")
+    return configured
+
+
+async def create_job(job_id: str, job_type: str, brand_id: str, total: int = 0) -> None:
+    """Persist an owned catalog job before its asynchronous worker is queued."""
     await _job_store.set(job_id, {
         "job_id": job_id,
         "type": job_type,
+        "brand_id": brand_id,
         "status": "processing",
         "processed": 0,
         "total": total,
@@ -83,167 +184,33 @@ def _detect_format(data: Any) -> str:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _to_cents(value: Any) -> int:
-    try:
-        amount = Decimal(str(value).replace(",", "").strip())
-        return int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    except (InvalidOperation, ValueError, TypeError):
-        return 0
-
-
-def _price_amount(value: Any) -> Any:
-    if isinstance(value, dict):
-        return value.get("amount") or value.get("value") or value.get("price") or 0
-    return value
-
-
-def _normalize_currency(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    currency = str(value).strip()
-    return currency.upper() if currency else None
-
-
 def normalize_shopify_store_url(value: Any) -> str:
-    """Return a normalized Shopify store root URL or raise an actionable error."""
-    raw = str(value or "").strip()
-    if not raw:
-        raise ValueError("Shopify store URL is required, for example celavilifestyle.com.")
-
-    candidate = raw if "://" in raw else f"https://{raw}"
-    try:
-        parsed = urlsplit(candidate)
-        hostname = parsed.hostname
-        if parsed.scheme not in {"http", "https"} or not hostname:
-            raise ValueError
-        if parsed.username or parsed.password:
-            raise ValueError
-        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-            raise ValueError
-        host = hostname.rstrip(".").lower()
-        _validate_shopify_hostname(host)
-        port = f":{parsed.port}" if parsed.port else ""
-    except (ValueError, TypeError):
-        raise ValueError(
-            "Enter a Shopify store root URL such as https://celavilifestyle.com or https://store.myshopify.com."
-        ) from None
-
-    return urlunsplit((parsed.scheme, f"{host}{port}", "", "", ""))
+    """Compatibility wrapper for the catalog network-safety boundary."""
+    return catalog_network_safety.normalize_shopify_store_url(value)
 
 
-def _validate_shopify_hostname(hostname: str) -> None:
-    """Reject obvious local, private, and cloud-metadata destinations."""
-    host = hostname.rstrip(".").lower()
-    blocked_names = {
-        "localhost",
-        "localhost.localdomain",
-        "metadata",
-        "metadata.google.internal",
-        "host.docker.internal",
-        "kubernetes.default.svc",
-    }
-    if host in blocked_names or host.endswith((".localhost", ".local", ".internal", ".test", ".invalid")):
-        raise ValueError
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return
-    if (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-        or address.is_unspecified
-    ):
-        raise ValueError
+def normalize_authenticated_shopify_store_url(value: Any) -> str:
+    """Compatibility wrapper for the catalog network-safety boundary."""
+    return catalog_network_safety.normalize_authenticated_shopify_store_url(value)
 
 
-def _safe_shopify_redirect(base_host: str, location: str, request_url: str) -> Optional[str]:
-    """Resolve one redirect without sending the Admin token to an unrelated host."""
-    target = urljoin(request_url, location)
-    try:
-        original_host = base_host.rstrip(".").lower()
-        host_labels = [label for label in original_host.split(".") if label]
-        if host_labels and host_labels[0] == "www" and len(host_labels) > 1:
-            host_labels = host_labels[1:]
-        canonical_myshopify_host = (
-            original_host
-            if original_host.endswith(".myshopify.com")
-            else f"{host_labels[0]}.myshopify.com" if host_labels else ""
-        )
-        parsed = urlsplit(target)
-        target_host = (parsed.hostname or "").rstrip(".").lower()
-        if parsed.scheme not in {"http", "https"} or not target_host:
-            raise ValueError
-        if parsed.username or parsed.password or parsed.fragment:
-            raise ValueError
-        _validate_shopify_hostname(target_host)
-        if target_host not in {original_host, canonical_myshopify_host}:
-            raise ValueError
-        return target
-    except (TypeError, ValueError):
-        logger.warning("shopify_currency_redirect_rejected", location=location)
-        return None
+def _is_myshopify_hostname(hostname: str) -> bool:
+    """Compatibility seam for callers that patch Shopify host detection."""
+    return catalog_network_safety._is_myshopify_hostname(hostname)
 
 
-def normalize_currency_code(value: Any, *, allow_empty: bool = True) -> Optional[str]:
-    """Normalize an explicit ISO-style three-letter currency code."""
-    currency = _normalize_currency(value)
-    if not currency and allow_empty:
-        return None
-    if not currency or not re.fullmatch(r"[A-Z]{3}", currency):
-        raise ValueError("Currency must be a three-letter code such as INR, USD, or EUR.")
-    return currency
+async def _resolve_public_hostname(hostname: str) -> None:
+    """Compatibility seam for callers that inject catalog DNS resolution."""
+    await catalog_network_safety._resolve_public_hostname(hostname)
 
 
-def _extract_catalog_currency(*sources: Optional[Dict[str, Any]]) -> Optional[str]:
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-
-        for key in ("currency", "currencyCode", "currency_code", "price_currency", "priceCurrency"):
-            currency = _normalize_currency(source.get(key))
-            if currency:
-                return currency
-
-        for price_key in ("price", "priceV2", "compare_at_price", "compareAtPrice"):
-            price = source.get(price_key)
-            if isinstance(price, dict):
-                currency = _extract_catalog_currency(price)
-                if currency:
-                    return currency
-
-        presentment_prices = source.get("presentment_prices")
-        if isinstance(presentment_prices, list):
-            for presentment in presentment_prices:
-                if not isinstance(presentment, dict):
-                    continue
-                currency = _extract_catalog_currency(presentment.get("price"), presentment)
-                if currency:
-                    return currency
-
-    return None
-
-
-def _currency_with_source(
-    *catalog_sources: Optional[Dict[str, Any]],
-    shopify_currency: Optional[str] = None,
-    fallback_currency: Optional[str] = None,
-) -> tuple[Optional[str], str]:
-    authoritative_currency = _normalize_currency(shopify_currency)
-    if authoritative_currency:
-        return authoritative_currency, "shopify_store"
-
-    catalog_currency = _extract_catalog_currency(*catalog_sources)
-    if catalog_currency:
-        return catalog_currency, "catalog"
-
-    configured_currency = _normalize_currency(fallback_currency)
-    if configured_currency:
-        return configured_currency, "configured_default"
-
-    return None, "missing"
+async def validate_json_feed_url(value: Any) -> str:
+    """Validate a JSON feed URL through the isolated network-safety boundary."""
+    return await catalog_network_safety.validate_json_feed_url(
+        value,
+        resolve_public_hostname=_resolve_public_hostname,
+        is_myshopify_hostname=_is_myshopify_hostname,
+    )
 
 
 def _strip_html(text: str) -> str:
@@ -252,9 +219,10 @@ def _strip_html(text: str) -> str:
 
 def _shopify_product_group_id(product: Dict[str, Any], handle: str, product_url: Optional[str]) -> str:
     product_id = (
-        product.get("admin_graphql_api_id")
+        product.get("id")
+        or product.get("legacy_resource_id")
+        or product.get("admin_graphql_api_id")
         or product.get("graphql_id")
-        or product.get("id")
         or handle
         or product_url
         or uuid.uuid4()
@@ -328,6 +296,79 @@ def _shopify_variant_image(variant: Dict[str, Any], images: List[Any], primary_i
     return primary_image
 
 
+def _shopify_legacy_resource_id(value: Any) -> Optional[str]:
+    """Return Shopify's stable numeric REST-compatible identity from a GraphQL value."""
+    if value not in (None, ""):
+        raw = str(value).strip()
+        if raw.isdigit():
+            return raw
+        # ``legacyResourceId`` is expected, but parse a GID fallback rather
+        # than persisting a new identity format and duplicating existing rows.
+        match = re.search(r"/(\d+)$", raw)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _shopify_graphql_variant_to_legacy(variant: dict[str, Any]) -> dict[str, Any]:
+    variant_id = _shopify_legacy_resource_id(variant.get("legacyResourceId")) or _shopify_legacy_resource_id(variant.get("id")) or ""
+    if not variant_id:
+        raise ShopifyGraphQLRequestError("shopify_graphql_variant_identity_missing")
+    price = variant.get("price") if isinstance(variant.get("price"), dict) else {}
+    image = variant.get("image") if isinstance(variant.get("image"), dict) else {}
+    selected_options = variant.get("selectedOptions") if isinstance(variant.get("selectedOptions"), list) else []
+    legacy: dict[str, Any] = {
+        "id": variant_id,
+        "admin_graphql_api_id": str(variant.get("id") or ""),
+        "sku": variant.get("sku"),
+        "title": variant.get("title"),
+        "price": price.get("amount"),
+        "currency": price.get("currencyCode"),
+        "inventory_quantity": variant.get("inventoryQuantity"),
+        "inventory_policy": str(variant.get("inventoryPolicy") or "").lower(),
+        **({"image": {"src": image.get("url")}} if image.get("url") else {}),
+    }
+    for index, option in enumerate(selected_options[:3], start=1):
+        if isinstance(option, dict) and option.get("value") not in (None, ""):
+            legacy[f"option{index}"] = option["value"]
+    return legacy
+
+
+def _shopify_graphql_product_to_legacy(product: dict[str, Any]) -> dict[str, Any]:
+    """Adapt a GraphQL product node to the one canonical catalog normalizer.
+
+    Keeping this adapter deliberately small avoids split product/variant/money
+    contracts. Numeric ``legacyResourceId`` values preserve existing source
+    keys, deletion-webhook matching, and idempotent knowledge upserts.
+    """
+    product_id = _shopify_legacy_resource_id(product.get("legacyResourceId")) or _shopify_legacy_resource_id(product.get("id")) or ""
+    if not product_id:
+        raise ShopifyGraphQLRequestError("shopify_graphql_product_identity_missing")
+    featured_image = product.get("featuredImage") if isinstance(product.get("featuredImage"), dict) else {}
+    options = product.get("options") if isinstance(product.get("options"), list) else []
+    variants = product.get("variants") if isinstance(product.get("variants"), dict) else {}
+    return {
+        "id": product_id,
+        "admin_graphql_api_id": str(product.get("id") or ""),
+        "title": product.get("title") or "",
+        "handle": product.get("handle") or "",
+        "product_type": product.get("productType") or "General",
+        "vendor": product.get("vendor") or "",
+        "tags": product.get("tags") if isinstance(product.get("tags"), list) else [],
+        "options": [
+            {"name": option.get("name") or f"Option {index}"}
+            for index, option in enumerate(options, start=1)
+            if isinstance(option, dict)
+        ],
+        "images": ([{"src": featured_image["url"]}] if featured_image.get("url") else []),
+        "variants": [
+            _shopify_graphql_variant_to_legacy(variant)
+            for variant in (variants.get("nodes") or [])
+            if isinstance(variant, dict)
+        ],
+    }
+
+
 async def _resolve_configured_default_currency(brand_id: Optional[str]) -> Optional[str]:
     if not brand_id:
         return None
@@ -352,7 +393,11 @@ async def _resolve_configured_default_currency(brand_id: Optional[str]) -> Optio
         )
         return normalize_currency_code(explicit_currency)
     except Exception as exc:
-        logger.warning("catalog_default_currency_resolution_failed", brand_id=brand_id, error=str(exc))
+        logger.warning(
+            "catalog_default_currency_resolution_failed",
+            brand_id=brand_id,
+            error_type=type(exc).__name__,
+        )
         return None
 
 
@@ -367,7 +412,11 @@ async def _update_brand_sync_state(brand_id: Optional[str], updates: Dict[str, A
             {"$set": set_fields},
         )
     except Exception as exc:
-        logger.warning("catalog_sync_state_persist_failed", brand_id=brand_id, error=str(exc))
+        logger.warning(
+            "catalog_sync_state_persist_failed",
+            brand_id=brand_id,
+            error_type=type(exc).__name__,
+        )
 
 
 # ── Normalizers ───────────────────────────────────────────────────────────────
@@ -558,41 +607,161 @@ def _normalize_schema_org(raw: Any, fallback_currency: Optional[str] = None) -> 
 
 # ── Async fetch functions ─────────────────────────────────────────────────────
 
+class ShopifyGraphQLRequestError(ValueError):
+    """A safe, retryable-or-terminal failure returned by Shopify Admin GraphQL."""
+
+
+def _shopify_graphql_url(base_url: str) -> str:
+    base = normalize_authenticated_shopify_store_url(base_url)
+    return f"{base.rstrip('/')}/admin/api/{shopify_admin_api_version()}/graphql.json"
+
+
+def _shopify_graphql_error_codes(errors: Any) -> set[str]:
+    codes: set[str] = set()
+    for error in errors if isinstance(errors, list) else []:
+        if not isinstance(error, dict):
+            continue
+        extensions = error.get("extensions") if isinstance(error.get("extensions"), dict) else {}
+        code = extensions.get("code")
+        if code:
+            codes.add(str(code).upper())
+    return codes
+
+
+def _shopify_retry_delay(response: Any, attempt: int) -> float:
+    headers = getattr(response, "headers", {}) or {}
+    try:
+        retry_after = float(headers.get("Retry-After", ""))
+        if retry_after > 0:
+            return min(retry_after, 30.0)
+    except (TypeError, ValueError):
+        pass
+    return min(float(2 ** attempt), 10.0)
+
+
+async def _post_shopify_graphql(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: Dict[str, str],
+    query: str,
+    variables: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """POST one bounded GraphQL operation and fail closed on partial data.
+
+    Shopify reports GraphQL failures in a 200 response, so an HTTP success is
+    not sufficient. Throttle responses use a bounded retry with no token or
+    provider diagnostic in logs/job state.
+    """
+    if not headers.get("X-Shopify-Access-Token"):
+        raise ShopifyGraphQLRequestError("shopify_admin_token_missing")
+    request_headers = {
+        **headers,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    url = _shopify_graphql_url(base_url)
+    payload = {"query": query, "variables": variables or {}}
+    for attempt in range(_SHOPIFY_GRAPHQL_MAX_RETRIES):
+        try:
+            response = await client.post(url, headers=request_headers, json=payload)
+        except httpx.HTTPError as exc:
+            if attempt + 1 >= _SHOPIFY_GRAPHQL_MAX_RETRIES:
+                raise ShopifyGraphQLRequestError("shopify_graphql_transport_failed") from exc
+            await asyncio.sleep(_shopify_retry_delay(None, attempt))
+            continue
+
+        if bool(getattr(response, "is_redirect", False)) or response.status_code in {301, 302, 303, 307, 308}:
+            raise ShopifyGraphQLRequestError("shopify_graphql_redirect_rejected")
+        if response.status_code == 401:
+            raise ShopifyGraphQLRequestError("shopify_admin_token_rejected")
+        if response.status_code == 403:
+            raise ShopifyGraphQLRequestError("shopify_admin_scope_denied")
+        if response.status_code == 404:
+            raise ShopifyGraphQLRequestError("shopify_store_not_found")
+        if response.status_code == 429:
+            if attempt + 1 >= _SHOPIFY_GRAPHQL_MAX_RETRIES:
+                raise ShopifyGraphQLRequestError("shopify_graphql_throttled")
+            await asyncio.sleep(_shopify_retry_delay(response, attempt))
+            continue
+        try:
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise ShopifyGraphQLRequestError("shopify_graphql_response_invalid") from exc
+        if not isinstance(body, dict):
+            raise ShopifyGraphQLRequestError("shopify_graphql_response_invalid")
+        errors = body.get("errors")
+        if errors:
+            error_codes = _shopify_graphql_error_codes(errors)
+            if "THROTTLED" in error_codes and attempt + 1 < _SHOPIFY_GRAPHQL_MAX_RETRIES:
+                await asyncio.sleep(_shopify_retry_delay(response, attempt))
+                continue
+            raise ShopifyGraphQLRequestError("shopify_graphql_throttled" if "THROTTLED" in error_codes else "shopify_graphql_query_failed")
+        data = body.get("data")
+        if not isinstance(data, dict):
+            raise ShopifyGraphQLRequestError("shopify_graphql_response_invalid")
+        return data
+    raise ShopifyGraphQLRequestError("shopify_graphql_throttled")
+
+
 async def _fetch_shopify_default_currency(
     client: httpx.AsyncClient,
     base_url: str,
     headers: Dict[str, str],
 ) -> Optional[str]:
-    """Fetch the store's default currency from Shopify's authenticated shop API."""
-    if "X-Shopify-Access-Token" not in headers:
-        return None
+    """Fetch the store currency using Shopify Admin GraphQL only.
 
-    try:
-        base = normalize_shopify_store_url(base_url)
-        base_host = urlsplit(base).hostname or ""
-        url = f"{base.rstrip('/')}/admin/api/2024-01/shop.json"
-        response = await client.get(url, headers=headers)
-        is_redirect = bool(getattr(response, "is_redirect", False)) or response.status_code in {301, 302, 303, 307, 308}
-        if is_redirect:
-            location = (getattr(response, "headers", {}) or {}).get("location")
-            redirect_url = _safe_shopify_redirect(base_host, str(location or ""), url) if location else None
-            if not redirect_url:
-                return None
-            response = await client.get(redirect_url, headers=headers)
-            if bool(getattr(response, "is_redirect", False)) or response.status_code in {301, 302, 303, 307, 308}:
-                logger.warning("shopify_currency_redirect_rejected", reason="multiple_redirects")
-                return None
-        if response.status_code >= 400:
-            logger.warning("shopify_currency_fetch_failed", status=response.status_code)
-            return None
-        payload = response.json()
-        shop = payload.get("shop") if isinstance(payload, dict) else None
-        if not isinstance(shop, dict):
-            return None
-        return _normalize_currency(shop.get("currency") or shop.get("currency_code"))
-    except Exception as exc:
-        logger.warning("shopify_currency_fetch_failed", error=str(exc))
-        return None
+    The store currency is authoritative for the existing commerce contract, so
+    a failed/malformed currency operation fails the snapshot rather than
+    silently changing every product to a fallback currency.
+    """
+    data = await _post_shopify_graphql(
+        client,
+        base_url,
+        headers,
+        _SHOPIFY_SHOP_CURRENCY_QUERY,
+    )
+    shop = data.get("shop") if isinstance(data.get("shop"), dict) else None
+    currency = _normalize_currency(shop.get("currencyCode")) if shop else None
+    if not currency:
+        raise ShopifyGraphQLRequestError("shopify_graphql_currency_missing")
+    return currency
+
+
+async def _fetch_shopify_remaining_variants(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: Dict[str, str],
+    product: dict[str, Any],
+) -> None:
+    """Append every GraphQL product-variant page before publication."""
+    product_id = str(product.get("id") or "")
+    variants = product.get("variants") if isinstance(product.get("variants"), dict) else {}
+    page_info = variants.get("pageInfo") if isinstance(variants.get("pageInfo"), dict) else {}
+    after = page_info.get("endCursor")
+    seen_cursors: set[str] = set()
+    while page_info.get("hasNextPage"):
+        if not product_id or not isinstance(after, str) or not after or after in seen_cursors:
+            raise ShopifyGraphQLRequestError("shopify_graphql_variant_cursor_invalid")
+        seen_cursors.add(after)
+        data = await _post_shopify_graphql(
+            client,
+            base_url,
+            headers,
+            _SHOPIFY_PRODUCT_VARIANTS_QUERY,
+            {"productId": product_id, "after": after, "first": _SHOPIFY_GRAPHQL_VARIANTS_PAGE_SIZE},
+        )
+        result_product = data.get("product") if isinstance(data.get("product"), dict) else None
+        result_variants = result_product.get("variants") if result_product and isinstance(result_product.get("variants"), dict) else None
+        if not result_variants:
+            raise ShopifyGraphQLRequestError("shopify_graphql_variant_page_invalid")
+        nodes = result_variants.get("nodes")
+        if not isinstance(nodes, list):
+            raise ShopifyGraphQLRequestError("shopify_graphql_variant_page_invalid")
+        variants.setdefault("nodes", []).extend(node for node in nodes if isinstance(node, dict))
+        page_info = result_variants.get("pageInfo") if isinstance(result_variants.get("pageInfo"), dict) else {}
+        after = page_info.get("endCursor")
+    product["variants"] = variants
 
 async def fetch_shopify_products(
     store_url: str,
@@ -601,14 +770,17 @@ async def fetch_shopify_products(
     brand_id: Optional[str] = None,
     fallback_currency: Optional[str] = None,
 ) -> None:
-    """Background task: paginate Shopify /products.json and store results in job."""
+    """Read a complete Shopify Admin GraphQL snapshot before publishing it."""
     if not await _job_store.get(job_id):
         return
 
     all_items: List[dict] = []
     started_at = datetime.utcnow().isoformat()
     try:
+        if not access_token or not access_token.strip():
+            raise ValueError("Shopify catalog sync requires an Admin API access token.")
         base = normalize_shopify_store_url(store_url)
+        base = normalize_authenticated_shopify_store_url(base)
         explicit_fallback = normalize_currency_code(fallback_currency) if fallback_currency else await _resolve_configured_default_currency(brand_id)
         await _job_store.update(job_id, {
             "brand_id": brand_id,
@@ -649,62 +821,43 @@ async def fetch_shopify_products(
             await _job_store.update(job_id, {
                 "currency": resolved_currency,
                 "currency_source": currency_source,
-                "warning": None if access_token and access_token.strip() else "Public Shopify import: store currency and private products may be unavailable. Configure an Admin API token for production sync.",
+                "warning": None,
             })
-            page_info: Optional[str] = None
+            product_cursor: Optional[str] = None
+            seen_product_cursors: set[str] = set()
             page = 1
             while True:
-                # Use Admin API if token is provided; otherwise public products.json
-                # Admin API bypasses storefront password protection
-                has_token = bool(access_token and access_token.strip())
-                if has_token:
-                    url = f"{base}/admin/api/2024-01/products.json?limit=250"
-                else:
-                    url = f"{base}/products.json?limit=250"
-
-                if page_info:
-                    url += f"&page_info={page_info}"
-
-                logger.info("shopify_fetch_page", page=page, url=url, has_token=has_token)
-                
-                resp = await client.get(url, headers=headers)
-                
-                # Manual redirect handling
-                if resp.is_redirect:
-                    location = str(resp.headers.get("Location", ""))
-                    logger.info("shopify_fetch_redirect", location=location)
-                    
-                    if "/password" in location:
-                        raise ValueError(
-                            "The Shopify store is password-protected. Please go to 'Settings' in your Shopify Admin, "
-                            "configure Shopify app credentials for the agent MCP/UCP path, or use a public storefront cache import."
-                        )
-                    
-                    # Follow other redirects (domain changes, etc) once
-                    # update url for the next check/fetch
-                    url = str(resp.url.join(location))
-                    resp = await client.get(url, headers=headers)
-
-                if resp.status_code == 401:
-                    raise ValueError(
-                        "Store requires an access token (HTTP 401). "
-                        "Enable 'Store is private / password-protected?' and enter your Shopify Admin API token."
-                    )
-                if resp.status_code == 403:
-                    raise ValueError(
-                        "Access denied (HTTP 403). Ensure your token has the 'read_products' permission."
-                    )
-                if resp.status_code == 404:
-                    raise ValueError(f"Store not found at {base}. Check the URL.")
-                resp.raise_for_status()
-
-                data = resp.json()
-                products = data.get("products", [])
+                if product_cursor:
+                    if product_cursor in seen_product_cursors:
+                        raise ShopifyGraphQLRequestError("shopify_graphql_product_cursor_invalid")
+                    seen_product_cursors.add(product_cursor)
+                logger.info("shopify_graphql_fetch_page", page=page, has_cursor=bool(product_cursor))
+                data = await _post_shopify_graphql(
+                    client,
+                    base,
+                    headers,
+                    _SHOPIFY_PRODUCTS_QUERY,
+                    {"after": product_cursor, "first": _SHOPIFY_GRAPHQL_PRODUCTS_PAGE_SIZE},
+                )
+                connection = data.get("products") if isinstance(data.get("products"), dict) else None
+                if not connection:
+                    raise ShopifyGraphQLRequestError("shopify_graphql_product_page_invalid")
+                products = connection.get("nodes")
+                if not isinstance(products, list):
+                    raise ShopifyGraphQLRequestError("shopify_graphql_product_page_invalid")
                 if not products:
+                    page_info = connection.get("pageInfo") if isinstance(connection.get("pageInfo"), dict) else {}
+                    if product_cursor or page_info.get("hasNextPage"):
+                        raise ShopifyGraphQLRequestError("shopify_graphql_product_page_invalid")
                     break
 
+                for product in products:
+                    if not isinstance(product, dict):
+                        raise ShopifyGraphQLRequestError("shopify_graphql_product_page_invalid")
+                    await _fetch_shopify_remaining_variants(client, base, headers, product)
+
                 batch = _normalize_shopify(
-                    data,
+                    {"products": [_shopify_graphql_product_to_legacy(product) for product in products]},
                     base_url=base,
                     fallback_currency=explicit_fallback,
                     shopify_currency=shopify_currency,
@@ -716,11 +869,12 @@ async def fetch_shopify_products(
                     "page": page,
                 })
 
-                # Cursor-based pagination via Link header
-                link = resp.headers.get("Link", "")
-                m = re.search(r'<[^>]*page_info=([^&>]+)[^>]*>;\s*rel="next"', link)
-                if m:
-                    page_info = m.group(1)
+                page_info = connection.get("pageInfo") if isinstance(connection.get("pageInfo"), dict) else {}
+                if page_info.get("hasNextPage"):
+                    next_cursor = page_info.get("endCursor")
+                    if not isinstance(next_cursor, str) or not next_cursor:
+                        raise ShopifyGraphQLRequestError("shopify_graphql_product_cursor_invalid")
+                    product_cursor = next_cursor
                     page += 1
                 else:
                     break
@@ -751,11 +905,12 @@ async def fetch_shopify_products(
         logger.info("shopify_fetch_complete", items=len(all_items))
 
     except Exception as exc:
-        error_message = str(exc)
+        failure_code = _catalog_sync_failure_code(exc)
         finished_at = datetime.utcnow().isoformat()
         await _job_store.update(job_id, {
             "status": "error",
-            "error": error_message,
+            "error": failure_code,
+            "error_type": type(exc).__name__,
             "completed_at": finished_at,
             "counts": {
                 "products_seen": len(all_items),
@@ -767,7 +922,7 @@ async def fetch_shopify_products(
         await _update_brand_sync_state(brand_id, {
             "last_sync_status": "error",
             "last_sync_completed_at": finished_at,
-            "last_sync_error": error_message,
+            "last_sync_error": failure_code,
             "last_sync_counts": {
                 "products_seen": len(all_items),
                 "products_upserted": 0,
@@ -775,7 +930,7 @@ async def fetch_shopify_products(
                 "error_count": 1,
             },
         })
-        logger.error("shopify_fetch_failed", error=str(exc))
+        logger.error("shopify_fetch_failed", error_type=type(exc).__name__)
 
 
 async def _upsert_shopify_catalog_into_knowledge(
@@ -837,15 +992,11 @@ async def _upsert_shopify_catalog_into_knowledge(
 
 async def fetch_json_feed(url: str, fallback_currency: Optional[str] = None) -> dict:
     """Fetch a JSON URL, auto-detect format, return normalised items + detected format."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; AgentBuilder/1.0)",
-        "Accept": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        resp = await client.get(url, headers=headers)
-        if not resp.is_success:
-            raise ValueError(f"HTTP {resp.status_code} when fetching {url}")
-        data = resp.json()
+    data = await catalog_network_safety.fetch_json_feed_data(
+        url,
+        validate_url=validate_json_feed_url,
+        client_factory=httpx.AsyncClient,
+    )
 
     fmt = _detect_format(data)
     if fmt == "shopify":
@@ -877,11 +1028,14 @@ async def run_firecrawl_scrape(
     urls: List[str],
     job_id: str,
     api_key: str,
+    brand_id: str,
     *,
     fallback_currency: Optional[str] = None,
 ) -> None:
     """Background task: Firecrawl-extract product data from each URL."""
-    if not await _job_store.get(job_id):
+    job = await _job_store.get(job_id)
+    if not job or job.get("brand_id") != brand_id:
+        logger.warning("firecrawl_job_scope_mismatch", job_id=job_id, brand_id=brand_id)
         return
 
     try:
@@ -957,7 +1111,12 @@ async def run_firecrawl_scrape(
             elif isinstance(raw_extract, dict):
                 extracted = raw_extract
             else:
-                extracted = raw_extract.dict() if hasattr(raw_extract, "dict") else {}
+                if hasattr(raw_extract, "model_dump"):
+                    extracted = raw_extract.model_dump()
+                elif hasattr(raw_extract, "dict"):
+                    extracted = raw_extract.dict()
+                else:
+                    extracted = {}
 
             # Normalise common LLM field-name variations → our schema keys
             field_aliases = {
@@ -1033,8 +1192,17 @@ async def run_firecrawl_scrape(
             })
 
         except Exception as exc:
-            logger.error("firecrawl_url_error", url=url, error=str(exc))
-            per_url.append({"url": url, "status": "error", "error": str(exc), "item_count": 0})
+            logger.error(
+                "firecrawl_url_error",
+                url=url,
+                error_type=type(exc).__name__,
+            )
+            per_url.append({
+                "url": url,
+                "status": "error",
+                "error": _CATALOG_ITEM_FAILURE_MESSAGE,
+                "item_count": 0,
+            })
 
     await _job_store.update(job_id, {
         "items": all_items,

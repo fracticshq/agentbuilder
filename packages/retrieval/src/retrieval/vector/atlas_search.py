@@ -79,6 +79,8 @@ class AtlasVectorSearch:
                 search_type="vector",
                 execution_time_ms=0.0,
                 metadata={"disabled_reason": "voyage_auth_failed"},
+                backend_status="unavailable",
+                backend_reason="authentication_failed",
             )
 
         try:

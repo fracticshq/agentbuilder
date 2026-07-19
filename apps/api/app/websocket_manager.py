@@ -14,13 +14,14 @@ Architecture:
       LIST  conv:{conv_id}:buffer  → [json, json, ...]
 
 Fallback:
-  When Redis is unavailable, all operations degrade gracefully to in-process
-  equivalents so a single-instance deployment works without Redis.
+  When Redis is not configured, all operations degrade gracefully to
+  in-process equivalents so a single-instance deployment works without Redis.
+  A configured Redis client that fails is not equivalent to an absent client:
+  falling back in that case would split human-takeover state between API
+  instances.
 """
 
 import asyncio
-import hashlib
-import hmac
 import json
 import uuid
 from typing import Dict, Set, Optional
@@ -34,6 +35,7 @@ logger = structlog.get_logger(__name__)
 
 _STATE_TTL = 86400   # 24 h — auto-expire idle conversation state
 _PUB_PREFIX = "conv:"
+_SUBSCRIPTION_RETRY_SECONDS = 0.05
 
 
 def _state_key(conversation_id: str) -> str:
@@ -44,6 +46,14 @@ def _buffer_key(conversation_id: str) -> str:
 
 def _channel(conversation_id: str, target: str) -> str:
     return f"{_PUB_PREFIX}{conversation_id}:{target}"
+
+
+class TakeoverStateUnavailableError(RuntimeError):
+    """Redis-backed takeover state cannot be read or written safely."""
+
+
+class TakeoverBufferIntegrityError(TakeoverStateUnavailableError):
+    """The shared takeover buffer could not be decoded as trusted turns."""
 
 
 class ConnectionManager:
@@ -58,7 +68,6 @@ class ConnectionManager:
         self._local_control:  Dict[str, bool]   = {}
         self._local_agent_ids: Dict[str, str]   = {}
         self._local_buffers:  Dict[str, list]   = {}
-        self._local_widget_secret_hashes: Dict[str, str] = {}
 
         # asyncio tasks running the Redis subscription loops
         self._sub_tasks: Dict[str, asyncio.Task] = {}
@@ -68,13 +77,10 @@ class ConnectionManager:
     def _redis(self):
         return connection_manager.redis_client
 
-    def _hash_widget_secret(self, control_secret: str) -> str:
-        return hashlib.sha256(control_secret.encode("utf-8")).hexdigest()
-
     async def _publish(self, channel: str, message: dict) -> bool:
         """Publish to Redis. Returns True on success, False if Redis is unavailable."""
         r = self._redis()
-        if not r:
+        if r is None:
             return False
         try:
             await r.publish(channel, json.dumps({
@@ -82,8 +88,12 @@ class ConnectionManager:
                 "message": message,
             }))
             return True
-        except Exception as e:
-            logger.warning("redis_publish_failed", channel=channel, error=str(e))
+        except Exception as exc:
+            logger.warning(
+                "redis_publish_failed",
+                channel=channel,
+                error_type=type(exc).__name__,
+            )
             return False
 
     async def _send_local(
@@ -94,11 +104,30 @@ class ConnectionManager:
     ):
         """Deliver message to all local WebSocket connections for a conversation."""
         websockets = list(connections.get(conversation_id, set()))
+        failed_sockets: Set[WebSocket] = set()
         for ws in websockets:
             try:
                 await ws.send_json(message)
-            except Exception as e:
-                logger.error("ws_send_failed", error=str(e), conversation_id=conversation_id)
+            except Exception as exc:
+                failed_sockets.add(ws)
+                logger.info(
+                    "ws_send_failed",
+                    conversation_id=conversation_id,
+                    error_type=type(exc).__name__,
+                )
+
+        if failed_sockets:
+            current = connections.get(conversation_id)
+            if current is not None:
+                current.difference_update(failed_sockets)
+                if not current:
+                    connections.pop(conversation_id, None)
+                    target = "widget" if connections is self.widget_connections else "admin"
+                    self._stop_sub(conversation_id, target)
+
+    def _has_local_recipients(self, conversation_id: str, target: str) -> bool:
+        registry = self.widget_connections if target == "widget" else self.admin_connections
+        return bool(registry.get(conversation_id))
 
     async def _subscribe_loop(self, conversation_id: str, target: str):
         """
@@ -106,56 +135,81 @@ class ConnectionManager:
         arriving messages to local WebSocket connections.
         Runs until the task is cancelled (on disconnect).
         """
-        r = self._redis()
-        if not r:
-            return
-
         channel = _channel(conversation_id, target)
-        pubsub = r.pubsub()
-        try:
-            await pubsub.subscribe(channel)
-            logger.debug("redis_subscribed", channel=channel)
+        while self._has_local_recipients(conversation_id, target):
+            r = self._redis()
+            if r is None:
+                return
 
-            async for raw in pubsub.listen():
-                if raw["type"] != "message":
-                    continue
-                try:
-                    data = json.loads(raw["data"])
-                except (json.JSONDecodeError, TypeError):
-                    continue
-
-                if isinstance(data, dict) and "message" in data:
-                    if data.get("origin") == self._instance_id:
-                        continue
-                    data = data.get("message")
-
-                if not isinstance(data, dict):
-                    continue
-
-                registry = (
-                    self.widget_connections if target == "widget"
-                    else self.admin_connections
-                )
-                await self._send_local(registry, conversation_id, data)
-
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error("redis_subscribe_loop_error", channel=channel, error=str(e))
-        finally:
+            pubsub = None
+            retry = False
             try:
-                await pubsub.unsubscribe(channel)
-                await pubsub.aclose()
-            except Exception:
-                pass
-            logger.debug("redis_unsubscribed", channel=channel)
+                pubsub = r.pubsub()
+                await pubsub.subscribe(channel)
+                logger.debug("redis_subscribed", channel=channel)
+
+                async for raw in pubsub.listen():
+                    if not self._has_local_recipients(conversation_id, target):
+                        return
+                    if raw["type"] != "message":
+                        continue
+                    try:
+                        data = json.loads(raw["data"])
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    if isinstance(data, dict) and "message" in data:
+                        if data.get("origin") == self._instance_id:
+                            continue
+                        data = data.get("message")
+
+                    if not isinstance(data, dict):
+                        continue
+
+                    registry = (
+                        self.widget_connections if target == "widget"
+                        else self.admin_connections
+                    )
+                    await self._send_local(registry, conversation_id, data)
+
+                # A listener that ends without an explicit cancellation is as
+                # transient as a listener exception while local recipients
+                # still exist.
+                retry = True
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                retry = True
+                logger.warning(
+                    "redis_subscribe_loop_error",
+                    channel=channel,
+                    error_type=type(exc).__name__,
+                )
+            finally:
+                if pubsub is not None:
+                    try:
+                        await pubsub.unsubscribe(channel)
+                        await pubsub.aclose()
+                    except Exception as exc:
+                        logger.debug(
+                            "redis_unsubscribe_failed",
+                            channel=channel,
+                            error_type=type(exc).__name__,
+                        )
+                logger.debug("redis_unsubscribed", channel=channel)
+
+            if retry and self._has_local_recipients(conversation_id, target):
+                try:
+                    await asyncio.sleep(_SUBSCRIPTION_RETRY_SECONDS)
+                except asyncio.CancelledError:
+                    return
 
     def _start_sub(self, conversation_id: str, target: str):
         """Start a subscription loop task if Redis is available and not already running."""
         key = f"{conversation_id}:{target}"
         if key in self._sub_tasks and not self._sub_tasks[key].done():
             return
-        if not self._redis():
+        if self._redis() is None:
             return
         task = asyncio.create_task(self._subscribe_loop(conversation_id, target))
         self._sub_tasks[key] = task
@@ -175,20 +229,35 @@ class ConnectionManager:
 
     # ── connect / disconnect ─────────────────────────────────────────────────
 
-    async def connect_widget(self, websocket: WebSocket, conversation_id: str):
-        await websocket.accept()
+    async def connect_widget(
+        self,
+        websocket: WebSocket,
+        conversation_id: str,
+        *,
+        subprotocol: str | None = None,
+    ):
+        await websocket.accept(subprotocol=subprotocol)
         self.widget_connections.setdefault(conversation_id, set()).add(websocket)
         self._start_sub(conversation_id, "widget")
         logger.info("widget_websocket_connected", conversation_id=conversation_id)
 
-    async def connect_admin(self, websocket: WebSocket, conversation_id: str):
-        await websocket.accept()
+    async def connect_admin(
+        self,
+        websocket: WebSocket,
+        conversation_id: str,
+        *,
+        subprotocol: str | None = None,
+    ):
+        # Read shared control before admitting the socket.  If Redis is
+        # configured but unavailable, do not register a local socket that
+        # might incorrectly believe it owns a fallback takeover state.
+        is_human = await self.is_human_in_control(conversation_id)
+        await websocket.accept(subprotocol=subprotocol)
         self.admin_connections.setdefault(conversation_id, set()).add(websocket)
         self._start_sub(conversation_id, "admin")
         logger.info("admin_websocket_connected", conversation_id=conversation_id)
 
         # Notify admin of current control state immediately on connect
-        is_human = await self.is_human_in_control(conversation_id)
         await self.send_to_admin(conversation_id, {
             "type": "control_status",
             "is_human_in_control": is_human,
@@ -226,11 +295,11 @@ class ConnectionManager:
         await self._send_local(self.admin_connections, conversation_id, message)
         await self._publish(_channel(conversation_id, "admin"), message)
 
-    # ── shared state — Redis hash with local fallback ────────────────────────
+    # ── shared state — Redis hash with local fallback only when absent ───────
 
     async def set_human_control(self, conversation_id: str, is_active: bool):
         r = self._redis()
-        if r:
+        if r is not None:
             try:
                 await r.hset(
                     _state_key(conversation_id),
@@ -240,9 +309,9 @@ class ConnectionManager:
                 if is_active:
                     # Start a fresh buffer by deleting the old list
                     await r.delete(_buffer_key(conversation_id))
-            except Exception as e:
-                logger.warning("redis_set_human_control_failed", error=str(e))
-                self._local_control[conversation_id] = is_active
+            except Exception as exc:
+                logger.warning("redis_set_human_control_failed", error_type=type(exc).__name__)
+                raise TakeoverStateUnavailableError("Human takeover state is unavailable") from exc
         else:
             self._local_control[conversation_id] = is_active
             if is_active:
@@ -251,107 +320,126 @@ class ConnectionManager:
 
     async def is_human_in_control(self, conversation_id: str) -> bool:
         r = self._redis()
-        if r:
+        if r is not None:
             try:
                 val = await r.hget(_state_key(conversation_id), "is_human_in_control")
                 return val == "1"
-            except Exception as e:
-                logger.warning("redis_get_human_control_failed", error=str(e))
+            except Exception as exc:
+                logger.warning("redis_get_human_control_failed", error_type=type(exc).__name__)
+                raise TakeoverStateUnavailableError("Human takeover state is unavailable") from exc
         return self._local_control.get(conversation_id, False)
 
     async def register_agent_id(self, conversation_id: str, agent_id: str):
         r = self._redis()
-        if r:
+        if r is not None:
             try:
                 await r.hset(_state_key(conversation_id), mapping={"agent_id": agent_id})
                 await r.expire(_state_key(conversation_id), _STATE_TTL)
                 return
-            except Exception as e:
-                logger.warning("redis_register_agent_id_failed", error=str(e))
+            except Exception as exc:
+                logger.warning("redis_register_agent_id_failed", error_type=type(exc).__name__)
+                raise TakeoverStateUnavailableError("Human takeover state is unavailable") from exc
         self._local_agent_ids[conversation_id] = agent_id
 
     async def get_agent_id(self, conversation_id: str) -> Optional[str]:
         r = self._redis()
-        if r:
+        if r is not None:
             try:
                 val = await r.hget(_state_key(conversation_id), "agent_id")
                 return val
-            except Exception as e:
-                logger.warning("redis_get_agent_id_failed", error=str(e))
+            except Exception as exc:
+                logger.warning("redis_get_agent_id_failed", error_type=type(exc).__name__)
+                raise TakeoverStateUnavailableError("Human takeover state is unavailable") from exc
         return self._local_agent_ids.get(conversation_id)
-
-    async def authorize_widget_control(
-        self,
-        conversation_id: str,
-        agent_id: str,
-        control_secret: str,
-    ) -> bool:
-        """Authorize widget control traffic with a per-conversation secret."""
-        if not agent_id or len(control_secret) < 32:
-            return False
-
-        secret_hash = self._hash_widget_secret(control_secret)
-        r = self._redis()
-        if r:
-            try:
-                state = await r.hgetall(_state_key(conversation_id))
-                stored_hash = state.get("widget_control_secret_hash")
-                stored_agent_id = state.get("agent_id")
-
-                if not stored_hash:
-                    await r.hset(
-                        _state_key(conversation_id),
-                        mapping={
-                            "agent_id": agent_id,
-                            "widget_control_secret_hash": secret_hash,
-                        },
-                    )
-                    await r.expire(_state_key(conversation_id), _STATE_TTL)
-                    return True
-
-                if stored_agent_id and stored_agent_id != agent_id:
-                    return False
-
-                return hmac.compare_digest(stored_hash, secret_hash)
-            except Exception as e:
-                logger.warning("redis_widget_auth_failed", error=str(e))
-
-        stored_hash = self._local_widget_secret_hashes.get(conversation_id)
-        stored_agent_id = self._local_agent_ids.get(conversation_id)
-        if not stored_hash:
-            self._local_agent_ids[conversation_id] = agent_id
-            self._local_widget_secret_hashes[conversation_id] = secret_hash
-            return True
-
-        if stored_agent_id and stored_agent_id != agent_id:
-            return False
-
-        return hmac.compare_digest(stored_hash, secret_hash)
 
     async def buffer_takeover_message(self, conversation_id: str, role: str, content: str):
         entry = json.dumps({"role": role, "content": content})
         r = self._redis()
-        if r:
+        if r is not None:
             try:
                 await r.rpush(_buffer_key(conversation_id), entry)
                 await r.expire(_buffer_key(conversation_id), _STATE_TTL)
                 return
-            except Exception as e:
-                logger.warning("redis_buffer_message_failed", error=str(e))
+            except Exception as exc:
+                logger.warning("redis_buffer_message_failed", error_type=type(exc).__name__)
+                raise TakeoverStateUnavailableError("Human takeover state is unavailable") from exc
         buf = self._local_buffers.setdefault(conversation_id, [])
         buf.append({"role": role, "content": content})
 
-    async def pop_takeover_buffer(self, conversation_id: str) -> list:
+    async def get_takeover_buffer(self, conversation_id: str) -> list:
+        """Read buffered human-takeover turns without acknowledging them.
+
+        Release control is a two-step operation: durable memory injection must
+        finish before the buffer is deleted.  Returning a copy here lets a
+        caller retry safely after a transient store failure instead of losing
+        the intervening conversation.
+        """
         r = self._redis()
-        if r:
+        if r is not None:
             try:
-                key = _buffer_key(conversation_id)
-                raw = await r.lrange(key, 0, -1)
-                await r.delete(key)
-                return [json.loads(m) for m in raw]
-            except Exception as e:
-                logger.warning("redis_pop_buffer_failed", error=str(e))
-        messages = self._local_buffers.pop(conversation_id, [])
+                raw = await r.lrange(_buffer_key(conversation_id), 0, -1)
+            except Exception as exc:
+                logger.warning("redis_get_buffer_failed", error_type=type(exc).__name__)
+                raise TakeoverStateUnavailableError("Human takeover history is unavailable") from exc
+            try:
+                messages = [json.loads(message) for message in raw]
+                if not all(isinstance(message, dict) for message in messages):
+                    raise TypeError("takeover buffer entries must be objects")
+                return messages
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as exc:
+                logger.warning("redis_takeover_buffer_invalid", error_type=type(exc).__name__)
+                raise TakeoverBufferIntegrityError("Human takeover history is invalid") from exc
+        return list(self._local_buffers.get(conversation_id, []))
+
+    async def clear_takeover_buffer(self, conversation_id: str) -> None:
+        """Acknowledge a buffer only after its turns are durably persisted."""
+        r = self._redis()
+        if r is not None:
+            try:
+                await r.delete(_buffer_key(conversation_id))
+                return
+            except Exception as exc:
+                logger.warning("redis_clear_buffer_failed", error_type=type(exc).__name__)
+                raise TakeoverStateUnavailableError("Takeover history acknowledgement is unavailable") from exc
+        self._local_buffers.pop(conversation_id, None)
+
+    async def purge_conversation_state(self, conversation_id: str) -> None:
+        """Invalidate local and shared takeover state for a deleted subject."""
+        for websocket in list(self.widget_connections.get(conversation_id, set())):
+            try:
+                await websocket.close(code=1008, reason="Conversation data deleted")
+            except (RuntimeError, asyncio.CancelledError):
+                pass
+        for websocket in list(self.admin_connections.get(conversation_id, set())):
+            try:
+                await websocket.close(code=1008, reason="Conversation data deleted")
+            except (RuntimeError, asyncio.CancelledError):
+                pass
+        self.widget_connections.pop(conversation_id, None)
+        self.admin_connections.pop(conversation_id, None)
+        self._stop_sub(conversation_id, "widget")
+        self._stop_sub(conversation_id, "admin")
+        self._local_control.pop(conversation_id, None)
+        self._local_agent_ids.pop(conversation_id, None)
+        self._local_buffers.pop(conversation_id, None)
+
+        r = self._redis()
+        if r is not None:
+            try:
+                await r.delete(_state_key(conversation_id), _buffer_key(conversation_id))
+            except Exception as exc:
+                # Mongo-side erasure is still authoritative.  A residual Redis
+                # key cannot be reused because the session scope is revoked.
+                logger.warning(
+                    "redis_privacy_purge_failed",
+                    conversation_id=conversation_id,
+                    error_type=type(exc).__name__,
+                )
+
+    async def pop_takeover_buffer(self, conversation_id: str) -> list:
+        """Compatibility helper for callers that explicitly need destructive read."""
+        messages = await self.get_takeover_buffer(conversation_id)
+        await self.clear_takeover_buffer(conversation_id)
         return messages
 
 

@@ -1,30 +1,31 @@
+import { vi, type Mock } from 'vitest';
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import KnowledgeExplorer from './KnowledgeExplorer';
 import { knowledgeApi } from '../../api/knowledge';
 
-jest.mock('../../api/knowledge', () => ({
+vi.mock('../../api/knowledge', () => ({
   knowledgeApi: {
-    getTree: jest.fn(),
-    getDocuments: jest.fn(),
-    createFolder: jest.fn(),
-    moveItem: jest.fn(),
-    renameItem: jest.fn(),
-    deleteItem: jest.fn(),
-    retrieve: jest.fn(),
+    getTree: vi.fn(),
+    getDocuments: vi.fn(),
+    createFolder: vi.fn(),
+    moveItem: vi.fn(),
+    renameItem: vi.fn(),
+    deleteItem: vi.fn(),
+    retrieve: vi.fn(),
   },
 }));
 
-const mockGetTree = knowledgeApi.getTree as jest.Mock;
-const mockRetrieve = knowledgeApi.retrieve as jest.Mock;
+const mockGetTree = knowledgeApi.getTree as Mock;
+const mockRetrieve = knowledgeApi.retrieve as Mock;
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  vi.clearAllMocks();
 });
 
 test('renders folders, selected folder files, and uploads into the selected path', async () => {
-  const onUpload = jest.fn();
+  const onUpload = vi.fn();
   mockGetTree.mockResolvedValue({
     root: {
       id: null,
@@ -107,7 +108,7 @@ test('runs retrieval scoped to the selected folder', async () => {
     ],
   });
 
-  render(<KnowledgeExplorer brandId="brand-123" onUpload={jest.fn()} />);
+  render(<KnowledgeExplorer brandId="brand-123" onUpload={vi.fn()} />);
 
   fireEvent.change(await screen.findByPlaceholderText(/Ask what this folder should answer/i), {
     target: { value: 'warranty' },

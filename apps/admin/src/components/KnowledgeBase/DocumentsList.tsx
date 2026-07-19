@@ -3,7 +3,7 @@ import { TrashIcon, DocumentTextIcon, ArrowPathIcon } from '@heroicons/react/24/
 import { knowledgeApi } from '../../api/knowledge';
 import type { DocumentSummary, ContentType } from '../../types/knowledge';
 
-const isDev = process.env.NODE_ENV !== 'production';
+const isDev = import.meta.env.DEV;
 
 interface DocumentsListProps {
   brandId: string;

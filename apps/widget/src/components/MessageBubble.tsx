@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useEffect } from 'react';
+import DOMPurify from 'dompurify';
 import MarkdownIt from 'markdown-it';
 import { ThumbsUp, ThumbsDown, Copy, RotateCcw } from 'lucide-react';
 import type { Message, ProductData, KundaliChartData } from '../types';
@@ -301,10 +302,17 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         {isUser ? (
           <p className="message-text">{message.content}</p>
         ) : (
-          <div
-            className="message-text markdown-content"
-            dangerouslySetInnerHTML={{ __html: renderedContent }}
-          />
+          <>
+            {/* markdown-it rejects raw HTML; DOMPurify protects this final browser sink. */}
+            <div
+              className="message-text markdown-content"
+              dangerouslySetInnerHTML={{
+                __html: DOMPurify.sanitize(renderedContent, {
+                  USE_PROFILES: { html: true },
+                }),
+              }}
+            />
+          </>
         )}
         
         {/* Phase 5: Product Cards - from metadata OR extracted from <product_info> tags */}

@@ -121,22 +121,12 @@ def test_built_in_skill_registry_contains_plan_ids():
 
 
 def test_tool_registry_contains_plan_ids_and_secret_schema():
-    tools = {tool["id"]: tool for tool in ToolRegistryService().list_tools()}
+    registry = ToolRegistryService()
+    tools = {tool["id"]: tool for tool in registry.list_tools()}
 
-    assert set(tools) == {
-        "shopify",
-        "http_webhook",
-        "hubspot",
-        "salesforce",
-        "zendesk",
-        "slack",
-        "google_sheets",
-        "airtable",
-        "notion",
-        "zapier_webhook",
-        "n8n_webhook",
-    }
-    assert "access_token" in tools["hubspot"]["secret_fields"]
+    assert set(tools) == {"shopify", "http_webhook"}
+    assert registry.get_tool("hubspot")["publicly_available"] is False
+    assert "access_token" in registry.secret_fields_for("hubspot")
     assert tools["http_webhook"]["provider"] == "http"
 
 
@@ -149,7 +139,10 @@ def test_admin_registry_routes_return_authenticated_shapes():
 
     assert client.get("/skills/").json()["skills"][0]["id"]
     assert "enabled_skills" in client.get("/skills/agent-config-shape").json()
-    assert "tools" in client.get("/tools/agent-config-shape").json()
+    public_tools = client.get("/tools/").json()["tools"]
+    config_shape = client.get("/tools/agent-config-shape").json()["tools"]
+    assert {tool["id"] for tool in public_tools} == {"shopify", "http_webhook"}
+    assert set(config_shape) == {"shopify", "http_webhook"}
 
 
 def test_tool_config_secrets_are_encrypted_masked_and_decryptable():
@@ -177,6 +170,7 @@ def test_tool_config_secrets_are_encrypted_masked_and_decryptable():
 
     runtime = decrypt_full_agent_configuration_for_runtime(protected, service)
     assert runtime["tools"]["hubspot"]["access_token"] == "pat-secret"
+    assert ToolRegistryService().enabled_runtime_tools(runtime) == []
 
 
 def test_api_data_source_secret_is_encrypted_masked_preserved_and_decryptable():

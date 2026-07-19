@@ -2,6 +2,12 @@
   "name": "admin",
   "version": "0.1.0",
   "private": true,
+  "scripts": {
+    "start": "vite --host 0.0.0.0 --port 3000",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
   "dependencies": {
     "@headlessui/react": "^2.2.7",
     "@heroicons/react": "^2.1.3",
@@ -11,47 +17,22 @@
     "@testing-library/jest-dom": "^6.8.0",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.5.2",
-    "@types/jest": "^29.5.12",
     "@types/node": "^20.12.2",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.8",
     "@types/react-router-dom": "^5.3.3",
-    "autoprefixer": "^10.4.21",
     "axios": "^1.11.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-router-dom": "^7.8.2",
-    "typescript": "^5.4.3",
-    "web-vitals": "^3.5.2"
-  },
-  "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject"
-  },
-  "eslintConfig": {
-    "extends": [
-      "react-app",
-      "react-app/jest"
-    ]
-  },
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
+    "typescript": "^5.4.3"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.4",
+    "jsdom": "^28.1.0",
     "postcss": "^8.5.6",
-    "postcss-loader": "^8.1.1",
-    "react-scripts": "^5.0.1",
-    "tailwindcss": "^4.1.12"
+    "tailwindcss": "^4.1.12",
+    "vite": "^7.3.4",
+    "vitest": "^4.0.18"
   }
 }

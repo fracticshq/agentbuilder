@@ -201,7 +201,12 @@ async def get_public_catalog_products(
                 {"product_data.variant_id": {"$in": request.variant_ids}},
                 {"product_data.id": {"$in": request.variant_ids}},
             ])
-        cursor = collection.find({"content_type": "product", "$or": clauses})
+        cursor = collection.find({
+            "content_type": "product",
+            "product_data.source_active": {"$ne": False},
+            "metadata.catalog_source.active": {"$ne": False},
+            "$or": clauses,
+        })
         matched = []
         async for document in cursor:
             product_data = document.get("product_data") or {}

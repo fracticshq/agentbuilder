@@ -1,46 +1,69 @@
 import fetch from 'node-fetch';
 import 'dotenv/config';
+import {
+  normalizeShopifyShopDomain,
+  validateShopifyIdentityEndpoint,
+  validateShopifyMcpEndpoint,
+} from './security.js';
 
 // Cache for discovered MCP endpoints to avoid redundant network calls
 const discoveryCache = new Map();
+
+export class ShopifyMcpDiscoveryError extends Error {
+  constructor(message = 'Shopify MCP tool discovery is unavailable') {
+    super(message);
+    this.name = 'ShopifyMcpDiscoveryError';
+  }
+}
 
 /**
  * Discovers the Shopify MCP endpoints from the shop's storefront domain.
  * Uses the /.well-known/customer-account-api discovery endpoint.
  */
 export async function discoverMcpEndpoints(shopUrl) {
-  const cleanUrl = shopUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  const shopDomain = normalizeShopifyShopDomain(shopUrl);
   
-  if (discoveryCache.has(cleanUrl)) {
-    return discoveryCache.get(cleanUrl);
+  if (discoveryCache.has(shopDomain)) {
+    return discoveryCache.get(shopDomain);
   }
 
-  const discoveryUrl = `https://${cleanUrl}/.well-known/customer-account-api`;
+  const discoveryUrl = `https://${shopDomain}/.well-known/customer-account-api`;
   try {
-    const response = await fetch(discoveryUrl);
+    const response = await fetch(discoveryUrl, { redirect: 'manual' });
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error('Shopify discovery redirect rejected');
+    }
     if (!response.ok) throw new Error(`Discovery failed: ${response.statusText}`);
     
     const config = await response.json();
     const endpoints = {
-      storefrontMcp: `https://${cleanUrl}/api/mcp`,
-      ucpCatalogMcp: `https://${cleanUrl}/api/ucp/mcp`,
-      customerAccountMcp: config.mcp_api || `https://${cleanUrl}/customer/api/mcp`,
+      shopDomain,
+      storefrontMcp: `https://${shopDomain}/api/mcp`,
+      ucpCatalogMcp: `https://${shopDomain}/api/ucp/mcp`,
+      customerAccountMcp: config.mcp_api
+        ? validateShopifyMcpEndpoint(config.mcp_api, shopDomain)
+        : `https://${shopDomain}/customer/api/mcp`,
       auth: {
-        authorization_endpoint: config.authorization_endpoint,
-        token_endpoint: config.token_endpoint,
+        authorization_endpoint: validateShopifyIdentityEndpoint(config.authorization_endpoint),
+        token_endpoint: validateShopifyIdentityEndpoint(config.token_endpoint),
         userinfo_endpoint: config.userinfo_endpoint
+          ? validateShopifyIdentityEndpoint(config.userinfo_endpoint)
+          : undefined,
       }
     };
     
-    discoveryCache.set(cleanUrl, endpoints);
+    discoveryCache.set(shopDomain, endpoints);
     return endpoints;
   } catch (err) {
-    console.error(`Error discovering MCP for ${shopUrl}:`, err);
+    console.error('Shopify MCP discovery failed', {
+      errorType: err instanceof Error ? err.name : 'unknown',
+    });
     // Fallback to standard patterns if discovery fails
     return {
-      storefrontMcp: `https://${cleanUrl}/api/mcp`,
-      ucpCatalogMcp: `https://${cleanUrl}/api/ucp/mcp`,
-      customerAccountMcp: `https://${cleanUrl}/customer/api/mcp`,
+      shopDomain,
+      storefrontMcp: `https://${shopDomain}/api/mcp`,
+      ucpCatalogMcp: `https://${shopDomain}/api/ucp/mcp`,
+      customerAccountMcp: `https://${shopDomain}/customer/api/mcp`,
       auth: null
     };
   }
@@ -49,7 +72,8 @@ export async function discoverMcpEndpoints(shopUrl) {
 /**
  * Fetches the list of tools from a specific MCP endpoint.
  */
-export async function fetchTools(url, headers = {}) {
+export async function fetchTools(url, headers = {}, expectedShopDomain) {
+  const targetUrl = validateShopifyMcpEndpoint(url, expectedShopDomain);
   const payload = {
     jsonrpc: '2.0',
     id: 'discovery-' + Date.now(),
@@ -61,23 +85,36 @@ export async function fetchTools(url, headers = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout
 
-    const response = await fetch(url, {
+    const response = await fetch(targetUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...headers
       },
       body: JSON.stringify(payload),
-      signal: controller.signal
+      signal: controller.signal,
+      redirect: 'manual',
     });
 
     clearTimeout(timeout);
-    if (!response.ok) return [];
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error('Shopify MCP redirect rejected');
+    }
+    if (!response.ok) {
+      throw new ShopifyMcpDiscoveryError('Shopify MCP tool discovery returned a non-success status');
+    }
     const body = await response.json();
-    return body.result?.tools || [];
+    const tools = body?.result?.tools;
+    if (!Array.isArray(tools)) {
+      throw new ShopifyMcpDiscoveryError('Shopify MCP tool discovery returned an invalid catalogue');
+    }
+    return tools;
   } catch (err) {
-    console.error(`Error fetching tools from ${url}:`, err.message);
-    return [];
+    console.error('Shopify MCP tool discovery failed', {
+      errorType: err instanceof Error ? err.name : 'unknown',
+    });
+    if (err instanceof ShopifyMcpDiscoveryError) throw err;
+    throw new ShopifyMcpDiscoveryError();
   }
 }
 
@@ -85,27 +122,35 @@ export async function fetchTools(url, headers = {}) {
  * Forwards a JSON-RPC request to an official Shopify MCP endpoint.
  * Retries up to 3 times on 429 (rate limited) with exponential backoff.
  */
-export async function forwardMcpRequest(url, payload, headers = {}, attempt = 1) {
+export async function forwardMcpRequest(url, payload, headers = {}, expectedShopDomain, attempt = 1) {
+  const targetUrl = validateShopifyMcpEndpoint(url, expectedShopDomain);
   const MAX_ATTEMPTS = 3;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetch(targetUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify(payload),
       signal: controller.signal,
+      redirect: 'manual',
     });
 
     clearTimeout(timeout);
 
+    if (response.status >= 300 && response.status < 400) {
+      const err = new Error('Shopify MCP redirect rejected');
+      err.status = response.status;
+      throw err;
+    }
+
     if (response.status === 429 && attempt < MAX_ATTEMPTS) {
       const retryAfterMs = parseInt(response.headers.get('retry-after') || '0', 10) * 1000
         || (attempt * 1000); // fallback: 1s, 2s
-      console.warn(`Shopify MCP rate limited (429). Retrying in ${retryAfterMs}ms (attempt ${attempt}/${MAX_ATTEMPTS})`);
+      console.warn('Shopify MCP rate limited; retrying request', { retryAfterMs, attempt, maxAttempts: MAX_ATTEMPTS });
       await new Promise(resolve => setTimeout(resolve, retryAfterMs));
-      return forwardMcpRequest(url, payload, headers, attempt + 1);
+      return forwardMcpRequest(targetUrl, payload, headers, expectedShopDomain, attempt + 1);
     }
 
     if (!response.ok) {
@@ -117,7 +162,9 @@ export async function forwardMcpRequest(url, payload, headers = {}, attempt = 1)
     return response.json();
   } catch (err) {
     clearTimeout(timeout);
-    console.error(`Error forwarding MCP request to ${url}:`, err.message);
+    console.error('Shopify MCP request forwarding failed', {
+      errorType: err instanceof Error ? err.name : 'unknown',
+    });
     throw err;
   }
 }

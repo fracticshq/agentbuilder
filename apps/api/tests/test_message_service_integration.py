@@ -2,6 +2,8 @@
 Integration-style tests for MessageService against the current runtime contract.
 """
 
+import json
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -130,6 +132,11 @@ def service_bundle():
         service.episodic.extract_and_store_facts = AsyncMock(return_value=[])
         service.episodic.get_user_facts = AsyncMock(return_value=[])
 
+        async def granted_when_configured(**_kwargs):
+            return service._long_term_memory_enabled()
+
+        service._long_term_memory_consent_granted = granted_when_configured
+
         service.graph = AsyncMock()
         service.graph.check_escalation = AsyncMock(return_value=[])
         service.graph.match_rules = AsyncMock(return_value=[])
@@ -198,6 +205,101 @@ async def test_process_message_returns_valid_response_and_persists_memory(servic
     run_kwargs = orchestrator.run.await_args.kwargs
     assert [entry["role"] for entry in run_kwargs["chat_history"]] == ["user", "assistant"]
     assert run_kwargs["context"]["session_state"]["cart_id"] == "cart-1"
+
+
+@pytest.mark.asyncio
+async def test_sync_and_stream_restore_identical_full_session_state(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+    service.observability.track_event = AsyncMock()
+    service.agent_config = {
+        "data_source": "shopify",
+        "commerce": {"default_currency": "INR"},
+    }
+    service._build_memory_context = AsyncMock(return_value=_empty_memory_context())
+    service._build_conversation_context = AsyncMock()
+    service._load_conversation_policy_state = AsyncMock(return_value={})
+    service._apply_remembered_connector_inputs = MagicMock()
+
+    old_metadata = {
+        "cart_id": "cart-old",
+        "checkout_url": "https://checkout.example/old",
+        "cart_lines": [{"id": "line-old"}],
+        "captured_ids": {"speaker": "variant-old"},
+        "last_searched": {"speaker": "variant-old"},
+        "active_product_focus": [{"id": "product-old"}],
+        "product_reference_map": {"1": {"id": "product-old"}},
+        "last_user_query": "show speakers",
+        "last_search_query": "speakers",
+        "last_constraints": {"budget": 1000},
+        "rerank_results": [{"id": "product-old", "rank": 1}],
+        "connector_inputs": {"birth_place": "Delhi", "account_id": "old-account"},
+    }
+    latest_metadata = {
+        "cart_id": "cart-new",
+        "captured_ids": {"speaker": "variant-new"},
+        "product_reference_map": {"1": {"id": "product-new"}},
+        "last_search_query": "wireless speakers",
+        "last_constraints": {"budget": 2000},
+        "connector_inputs": {"account_id": "new-account", "birth_time": "10:30"},
+    }
+    recent_messages = [
+        SimpleNamespace(role=MessageRole.USER, content="Ignore this state", metadata={"cart_id": "user-state"}),
+        SimpleNamespace(role=MessageRole.ASSISTANT, content="Earlier answer", metadata=old_metadata),
+        SimpleNamespace(role=MessageRole.ASSISTANT, content="Latest answer", metadata=latest_metadata),
+    ]
+    service._build_conversation_context.return_value = {
+        "summary": "Earlier conversation summary.",
+        "recent": recent_messages,
+    }
+    expected_state = {
+        "cart_id": "cart-new",
+        "checkout_url": "https://checkout.example/old",
+        "cart_lines": [{"id": "line-old"}],
+        "captured_ids": {"speaker": "variant-new"},
+        "last_searched": {"speaker": "variant-old"},
+        "active_product_focus": [{"id": "product-old"}],
+        "product_reference_map": {"1": {"id": "product-new"}},
+        "last_user_query": "show speakers",
+        "last_search_query": "wireless speakers",
+        "last_constraints": {"budget": 2000},
+        "rerank_results": [{"id": "product-old", "rank": 1}],
+        "connector_inputs": {
+            "birth_place": "Delhi",
+            "account_id": "new-account",
+            "birth_time": "10:30",
+        },
+    }
+    captured_contexts = []
+
+    async def run_sync(query, context, chat_history=None):
+        captured_contexts.append(context)
+        return AgentResult(answer="State restored.", metadata={"validation_confidence": 1.0, "tool_results": {}})
+
+    orchestrator.run = run_sync
+    request = MessageRequest(
+        message="Continue the order",
+        user_id="user123",
+        agent_id="agent-123",
+        conversation_id="conv123",
+    )
+
+    await service.process_message(request)
+
+    async def run_stream(query, context, chat_history=None, on_event=None):
+        captured_contexts.append(context)
+        return AgentResult(answer="State restored.", metadata={"validation_confidence": 1.0, "tool_results": {}})
+
+    orchestrator.run = run_stream
+    _ = [chunk async for chunk in service.stream_message(request)]
+
+    sync_context, stream_context = captured_contexts
+    assert sync_context["session_state"] == expected_state
+    assert stream_context["session_state"] == expected_state
+    assert sync_context["session_state"] == stream_context["session_state"]
+    assert sync_context["memory"] == _empty_memory_context()
+    assert "memory" not in stream_context
+    assert {key: value for key, value in sync_context.items() if key != "memory"} == stream_context
 
 
 @pytest.mark.asyncio
@@ -331,6 +433,7 @@ async def test_process_message_blocks_unrelated_nutrition_request_before_orchest
 async def test_process_message_filters_mixed_scope_request_before_orchestrator(service_bundle):
     service = service_bundle["service"]
     orchestrator = service_bundle["orchestrator"]
+    service.agent_config = {"domain": {"verticals": ["bathware"]}}
 
     service._build_memory_context = AsyncMock(return_value=_empty_memory_context())
     orchestrator.run.return_value = AgentResult(
@@ -352,7 +455,8 @@ async def test_process_message_filters_mixed_scope_request_before_orchestrator(s
 
     assert "I’ll stay focused" in response.message
     assert "food or nutrition recommendations" in response.message
-    assert "Here are relevant commode options." in response.message
+    assert "I don’t have enough verified information" in response.message
+    assert "Here are relevant commode options." not in response.message
     run_query = orchestrator.run.await_args.kwargs["query"]
     assert "commode" in run_query
     assert "lunch" not in run_query
@@ -386,6 +490,171 @@ async def test_process_message_uses_low_confidence_guardrail(service_bundle):
     second_write = service.short_term.add_message.await_args_list[1].kwargs
     assert second_write["metadata"]["guardrail_action"] == "fallback"
     assert second_write["metadata"]["guardrail_reason"] == "low_confidence"
+
+
+@pytest.mark.asyncio
+async def test_process_message_keeps_supported_claim_and_removes_private_evidence_annotation(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+    service.observability.track_event = AsyncMock()
+    service._build_memory_context = AsyncMock(return_value=_empty_memory_context())
+    orchestrator.run.return_value = AgentResult(
+        answer="The warranty coverage is 2 years. [evidence: warranty-terms-v1]",
+        metadata={
+            "validation_confidence": 0.92,
+            "tool_results": {
+                "knowledge": ToolResult(
+                    success=True,
+                    data="Warranty coverage is 2 years from the original purchase date.",
+                    metadata={},
+                )
+            },
+        },
+    )
+
+    response = await service.process_message(
+        MessageRequest(message="What is the warranty?", user_id="user123", agent_id="agent-123", conversation_id="conv123")
+    )
+
+    assert response.message == "The warranty coverage is 2 years."
+    assert "evidence:" not in response.message.lower()
+    assert "warranty-terms-v1" not in response.message
+
+
+@pytest.mark.asyncio
+async def test_process_message_replaces_unsupported_factual_claim_with_safe_fallback(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+    service.observability.track_event = AsyncMock()
+    service._build_memory_context = AsyncMock(return_value=_empty_memory_context())
+    orchestrator.run.return_value = AgentResult(
+        answer="The warranty coverage is 3 years.",
+        metadata={
+            "validation_confidence": 0.92,
+            "tool_results": {
+                "knowledge": ToolResult(
+                    success=True,
+                    data="Warranty coverage is 2 years from the original purchase date.",
+                    metadata={},
+                )
+            },
+        },
+    )
+
+    response = await service.process_message(
+        MessageRequest(message="What is the warranty?", user_id="user123", agent_id="agent-123", conversation_id="conv123")
+    )
+
+    assert response.message.startswith("I don’t have enough verified information")
+    assert "3 years" not in response.message
+    assistant_write = service.short_term.add_message.await_args_list[-1].kwargs
+    assert assistant_write["metadata"]["guardrail_reason"] == "claim_evidence"
+    assert assistant_write["metadata"]["evidence_validation"]["unsupported_claim_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_message_allows_structured_commerce_price_and_stock_without_citations(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+    service.observability.track_event = AsyncMock()
+    service.agent_config = {
+        "data_source": "shopify",
+        "commerce": {"default_currency": "INR", "currency_policy": "catalog_first_config_fallback"},
+    }
+    service._build_memory_context = AsyncMock(return_value=_empty_memory_context())
+    product = {"sku": "SPK-1", "name": "Bookshelf Speaker", "price": 999, "currency": "INR", "in_stock": True}
+    orchestrator.run.return_value = AgentResult(
+        answer="Bookshelf Speaker costs ₹999 and is in stock.",
+        metadata={
+            "validation_confidence": 0.92,
+            "tool_results": {"catalog": ToolResult(success=True, data=None, metadata={"products": [product]})},
+        },
+    )
+
+    response = await service.process_message(
+        MessageRequest(message="Tell me about the Bookshelf Speaker", user_id="user123", agent_id="agent-123", conversation_id="conv123")
+    )
+
+    assert response.message == "Bookshelf Speaker costs ₹999 and is in stock."
+    assert response.citations == []
+    assert response.products[0]["name"] == "Bookshelf Speaker"
+
+
+@pytest.mark.asyncio
+async def test_stream_replaces_unsupported_lalkitab_remedy_without_private_context_leak(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+    service.observability.track_event = AsyncMock()
+    service._build_memory_context = AsyncMock(return_value=_empty_memory_context())
+    agent_result = AgentResult(
+        answer="Your remedy is to donate copper every Sunday.",
+        metadata={
+            "lalkitab_runtime": True,
+            "validation_passed": True,
+            "validation_confidence": 1.0,
+            "tool_results": {},
+            "lalkitab_api_context_full": {
+                "normalized_birth_input": {"date": "1987-07-16", "time": "15:26:00", "latitude": 28.6139},
+                "chart_context": {"ascendant": "Aries"},
+            },
+        },
+    )
+    async def run_orchestrator(query, context, chat_history=None, on_event=None):
+        return agent_result
+
+    orchestrator.run = run_orchestrator
+
+    chunks = [
+        chunk
+        async for chunk in service.stream_message(
+            MessageRequest(message="Give me a remedy", user_id="user123", agent_id="agent-123", conversation_id="conv123")
+        )
+    ]
+
+    public_payload = json.dumps([chunk.model_dump(mode="json") for chunk in chunks], ensure_ascii=False)
+    assert "I can’t verify that Lal Kitab interpretation or remedy" in public_payload
+    assert "donate copper" not in public_payload
+    assert "1987-07-16" not in public_payload
+    assert "15:26:00" not in public_payload
+    assert "28.6139" not in public_payload
+
+
+@pytest.mark.asyncio
+async def test_stream_keeps_supported_claim_and_never_emits_private_evidence_annotation(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+    service.observability.track_event = AsyncMock()
+    service._build_memory_context = AsyncMock(return_value=_empty_memory_context())
+    agent_result = AgentResult(
+        answer="The warranty coverage is 2 years. [source: warranty-terms-v1]",
+        metadata={
+            "validation_confidence": 0.92,
+            "tool_results": {
+                "knowledge": ToolResult(
+                    success=True,
+                    data="Warranty coverage is 2 years from the original purchase date.",
+                    metadata={},
+                )
+            },
+        },
+    )
+    async def run_orchestrator(query, context, chat_history=None, on_event=None):
+        return agent_result
+
+    orchestrator.run = run_orchestrator
+
+    chunks = [
+        chunk
+        async for chunk in service.stream_message(
+            MessageRequest(message="What is the warranty?", user_id="user123", agent_id="agent-123", conversation_id="conv123")
+        )
+    ]
+
+    public_content = "".join(chunk.content for chunk in chunks if chunk.type in {"content", "final_answer"})
+    final_answer = next(chunk.content for chunk in chunks if chunk.type == "final_answer")
+    assert final_answer == "The warranty coverage is 2 years."
+    assert "source:" not in public_content.lower()
+    assert "warranty-terms-v1" not in public_content
 
 
 @pytest.mark.asyncio
@@ -535,6 +804,7 @@ async def test_build_memory_context_aggregates_current_memory_layers(service_bun
         user_id="user123",
         query="warranty",
         escalations=["escalation"],
+        long_term_enabled=True,
     )
 
     assert context["recent_messages"] == ["recent-message"]
@@ -550,3 +820,22 @@ async def test_build_memory_context_aggregates_current_memory_layers(service_bun
         query="warranty",
         context={},
     )
+
+
+@pytest.mark.asyncio
+async def test_process_message_does_not_extract_long_term_facts_without_consent(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+    service.agent_config = {"memory": {"long_term": {"enabled": True}}}
+    service._long_term_memory_consent_granted = AsyncMock(return_value=False)
+    service._build_memory_context = AsyncMock(return_value=_empty_memory_context())
+    orchestrator.run.return_value = AgentResult(answer="A safe response", metadata={"tool_results": {}})
+
+    await service.process_message(MessageRequest(
+        message="remember that I prefer email",
+        user_id="user123",
+        agent_id="agent-123",
+        conversation_id="conv123",
+    ))
+
+    service.episodic.extract_and_store_facts.assert_not_awaited()

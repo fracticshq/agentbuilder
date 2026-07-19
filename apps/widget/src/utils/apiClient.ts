@@ -1,4 +1,14 @@
-import type { Message, StreamingMessage, PageContext, APIError } from '../types';
+import type {
+  APIError,
+  CommerceCart,
+  CommerceMetadata,
+  DealerData,
+  Message,
+  Metadata,
+  PageContext,
+  ProductData,
+  StreamingMessage,
+} from '../types';
 
 const isDev = import.meta.env.DEV;
 
@@ -16,6 +26,46 @@ export interface WidgetSession {
   conversationId: string;
   userId: string;
   sessionToken: string;
+}
+
+interface WidgetSessionResponse {
+  conversation_id: string;
+  user_id: string;
+  session_token: string;
+}
+
+interface WidgetMetadata extends Metadata {
+  products?: ProductData[];
+  dealers?: DealerData[];
+  commerce?: CommerceMetadata;
+  cart?: CommerceCart;
+}
+
+interface APIMessageData {
+  id?: string;
+  message_id?: string;
+  content?: string;
+  message?: string;
+  role?: Message['role'];
+  timestamp?: string | number;
+  citations?: Message['citations'];
+  products?: ProductData[];
+  dealers?: DealerData[];
+  metadata?: WidgetMetadata;
+  commerce?: CommerceMetadata;
+}
+
+interface APIHistoryResponse {
+  messages?: APIMessageData[];
+}
+
+interface MessageRequestBody {
+  message: string;
+  user_id: string;
+  conversation_id?: string;
+  agent_id?: string;
+  page_context?: PageContext;
+  stream: boolean;
 }
 
 const mergeStreamingMetadata = (messageData: Partial<Message>, chunk: StreamingMessage): void => {
@@ -66,7 +116,7 @@ export class APIClient {
     if (!response.ok) {
       throw new Error(`Failed to start session: HTTP ${response.status}`);
     }
-    const data = await response.json();
+    const data = await response.json() as WidgetSessionResponse;
     this.sessionToken = data.session_token;
     return {
       conversationId: data.conversation_id,
@@ -84,8 +134,8 @@ export class APIClient {
     if (!response.ok) {
       throw new Error(`Failed to load conversation history: HTTP ${response.status}`);
     }
-    const data = await response.json();
-    return (data.messages || []).map((message: Record<string, any>) => this.formatMessage({
+    const data = await response.json() as APIHistoryResponse;
+    return (data.messages || []).map((message) => this.formatMessage({
       id: message.message_id,
       content: message.content,
       role: message.role,
@@ -124,8 +174,7 @@ export class APIClient {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async sendDirectMessage(requestBody: any): Promise<Message> {
+  private async sendDirectMessage(requestBody: MessageRequestBody): Promise<Message> {
     const response = await fetch(`${this.baseUrl}/api/v1/messages/`, {
       method: 'POST',
       headers: {
@@ -139,16 +188,17 @@ export class APIClient {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
-    const data = await response.json();
+    const data = await response.json() as APIMessageData;
     return this.formatMessage(data);
   }
 
   private async streamMessage(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    requestBody: any,
+    requestBody: MessageRequestBody,
     onStream: (chunk: StreamingMessage) => void
   ): Promise<Message> {
-    isDev && console.log('[APIClient] Starting stream with body:', requestBody);
+    if (isDev) {
+      console.log('[APIClient] Starting stream with body:', requestBody);
+    }
     
     return new Promise((resolve, reject) => {
       // Use fetch API for POST streaming (EventSource doesn't support POST)
@@ -161,7 +211,9 @@ export class APIClient {
         },
         body: JSON.stringify(requestBody),
       }).then(async (response) => {
-        isDev && console.log('[APIClient] Stream response received:', response.status, response.statusText);
+        if (isDev) {
+          console.log('[APIClient] Stream response received:', response.status, response.statusText);
+        }
         
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -179,39 +231,57 @@ export class APIClient {
         let buffer = '';
 
         try {
-          isDev && console.log('[APIClient] Starting to read stream...');
+          if (isDev) {
+            console.log('[APIClient] Starting to read stream...');
+          }
           while (true) {
             const { done, value } = await reader.read();
             
             if (done) {
-              isDev && console.log('[APIClient] Stream complete');
+              if (isDev) {
+                console.log('[APIClient] Stream complete');
+              }
               break;
             }
 
             // Decode and append to buffer
             const chunk = decoder.decode(value, { stream: true });
-            isDev && console.log('[APIClient] Received chunk:', chunk);
-            isDev && console.log('[APIClient] Buffer before split:', buffer.length, 'chars');
+            if (isDev) {
+              console.log('[APIClient] Received chunk:', chunk);
+              console.log('[APIClient] Buffer before split:', buffer.length, 'chars');
+            }
             buffer += chunk;
-            isDev && console.log('[APIClient] Buffer after append:', buffer.length, 'chars');
+            if (isDev) {
+              console.log('[APIClient] Buffer after append:', buffer.length, 'chars');
+            }
             
             // Process complete SSE messages (separated by \n\n)
             const lines = buffer.split('\n\n');
-            isDev && console.log('[APIClient] Split into', lines.length, 'lines');
+            if (isDev) {
+              console.log('[APIClient] Split into', lines.length, 'lines');
+            }
             buffer = lines.pop() || ''; // Keep incomplete message in buffer
-            isDev && console.log('[APIClient] Lines to process:', lines.length);
+            if (isDev) {
+              console.log('[APIClient] Lines to process:', lines.length);
+            }
 
             for (const line of lines) {
-              isDev && console.log('[APIClient] Processing line:', line.substring(0, 100));
+              if (isDev) {
+                console.log('[APIClient] Processing line:', line.substring(0, 100));
+              }
               // Skip empty lines
               if (!line.trim()) {
-                isDev && console.log('[APIClient] Skipping empty line');
+                if (isDev) {
+                  console.log('[APIClient] Skipping empty line');
+                }
                 continue;
               }
               
               // SSE format is "data: <json>"
               if (!line.startsWith('data: ')) {
-                isDev && console.warn('[APIClient] Unexpected line format:', line);
+                if (isDev) {
+                  console.warn('[APIClient] Unexpected line format:', line);
+                }
                 continue;
               }
 
@@ -220,13 +290,19 @@ export class APIClient {
                 
                 // Skip empty data lines
                 if (!data) {
-                  isDev && console.log('[APIClient] Skipping empty data');
+                  if (isDev) {
+                    console.log('[APIClient] Skipping empty data');
+                  }
                   continue;
                 }
                 
-                isDev && console.log('[APIClient] Parsing SSE data:', data);
+                if (isDev) {
+                  console.log('[APIClient] Parsing SSE data:', data);
+                }
                 const chunk: StreamingMessage = JSON.parse(data);
-                isDev && console.log('[APIClient] Parsed chunk:', chunk);
+                if (isDev) {
+                  console.log('[APIClient] Parsed chunk:', chunk);
+                }
                 mergeStreamingMetadata(messageData, chunk);
                 
                 if (chunk.type === 'content') {
@@ -265,7 +341,9 @@ export class APIClient {
             commerce: messageData.commerce,
           };
           
-          isDev && console.log('[APIClient] Resolving with final message:', finalMessage);
+          if (isDev) {
+            console.log('[APIClient] Resolving with final message:', finalMessage);
+          }
           resolve(finalMessage);
         } catch (error) {
           console.error('[APIClient] Stream reading error:', error);
@@ -275,8 +353,7 @@ export class APIClient {
     });
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private formatMessage(data: Record<string, any>): Message {
+  private formatMessage(data: APIMessageData): Message {
     return {
       id: data.id || Date.now().toString(),
       content: data.content || data.message || '',

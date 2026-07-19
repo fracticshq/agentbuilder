@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { CheckCircleIcon, ExclamationTriangleIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
-import type { AzureOpenAIDeployment } from '../../api/client';
+import { API_BASE_URL, type AzureOpenAIDeployment } from '../../api/client';
 import { getModelLabel, getProviderLabel } from '../../utils/llmOptions';
 
-const isDev = process.env.NODE_ENV !== 'production';
+const isDev = import.meta.env.DEV;
 
 function parseStructuredPreview(value: any, fallback: any): any {
   if (value === undefined || value === null || value === '') {
@@ -171,6 +171,7 @@ export default function StepReview({
 
   const handleTest = async () => {
     if (!testMessage.trim()) return;
+    const apiBaseUrl = API_BASE_URL;
     
     // Check if agent is deployed
     if (!agentId) {
@@ -191,8 +192,6 @@ export default function StepReview({
     
     try {
       // Use the real messaging API to test the agent
-      const apiBaseUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
-      
       console.log('🧪 Testing agent with message:', testMessage);
       isDev && console.log('📡 Agent ID:', agentId);
       isDev && console.log('📡 API URL:', `${apiBaseUrl}/api/v1/messages/`);
@@ -237,7 +236,7 @@ export default function StepReview({
         if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
           setTestResponse(
             `⚠️ Cannot connect to API server.\n\n` +
-            `Make sure the API is running at ${process.env.REACT_APP_API_URL || 'http://localhost:8000'}\n\n` +
+            `Make sure the API is running at ${apiBaseUrl}\n\n` +
             `Expected endpoint: /api/v1/messages/\n\n` +
             `To start the API:\n` +
             `1. Open terminal\n` +

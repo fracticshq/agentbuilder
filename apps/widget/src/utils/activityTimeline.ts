@@ -12,19 +12,61 @@ export const EMPTY_ACTIVITY: ActivityState = { steps: [], disambiguation: undefi
 // envelopes, not template-specific frontend mappings.
 const ENDPOINT_LABELS: Record<string, string> = {};
 
-function connectorLabel(meta: Record<string, any>, fallback: string): string {
-  const id = String(meta.endpoint_id || '');
-  return ENDPOINT_LABELS[id] || meta.endpoint_name || meta.connector_name || fallback;
+type StreamingMetadata = Record<string, unknown>;
+
+function isMetadata(value: unknown): value is StreamingMetadata {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string {
+  return value ? String(value) : '';
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function isActivityControl(value: unknown): value is ActivityControl {
+  return isMetadata(value)
+    && typeof value.type === 'string'
+    && typeof value.id === 'string'
+    && typeof value.label === 'string';
+}
+
+function getActivityControls(value: unknown): ActivityControl[] {
+  return Array.isArray(value) ? value.filter(isActivityControl) : [];
+}
+
+function getPlaceCandidates(value: unknown): PlaceCandidate[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.filter(isMetadata).map((candidate) => {
+    const name = optionalString(candidate.name);
+    const adminRegion = optionalString(candidate.adminRegion);
+    const country = optionalString(candidate.country);
+    return {
+      placeId: optionalString(candidate.placeId),
+      label: stringValue(candidate.label) || [name, adminRegion, country].filter(Boolean).join(', '),
+      name,
+      adminRegion,
+      country,
+    };
+  });
+}
+
+function connectorLabel(meta: StreamingMetadata, fallback: string): string {
+  const id = stringValue(meta.endpoint_id);
+  return ENDPOINT_LABELS[id] || stringValue(meta.endpoint_name) || stringValue(meta.connector_name) || fallback;
 }
 
 // Orchestrator tool steps key/label by tool_name (e.g.
 // "tool_context_vedika_lal_kitab_lalkitab_chart" or "skill_knowledge_qa").
-function toolKey(meta: Record<string, any>, fallback: string): string {
-  return String(meta.step_id || meta.tool_id || meta.tool_name || fallback);
+function toolKey(meta: StreamingMetadata, fallback: string): string {
+  return stringValue(meta.step_id || meta.tool_id || meta.tool_name || fallback);
 }
 
-function toolLabel(meta: Record<string, any>, fallback: string): string {
-  const name = String(meta.tool_name || '');
+function toolLabel(meta: StreamingMetadata, fallback: string): string {
+  const name = stringValue(meta.tool_name);
   // A connector tool embeds the endpoint id at the end → reuse friendly labels.
   for (const key of Object.keys(ENDPOINT_LABELS)) {
     if (name.endsWith(key)) return ENDPOINT_LABELS[key];
@@ -40,7 +82,7 @@ function toolLabel(meta: Record<string, any>, fallback: string): string {
   return fallback;
 }
 
-function latencyDetail(meta: Record<string, any>): string | undefined {
+function latencyDetail(meta: StreamingMetadata): string | undefined {
   const ms = Number(meta.latency_ms);
   if (!Number.isFinite(ms) || ms <= 0) return undefined;
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
@@ -54,7 +96,7 @@ function upsert(steps: ActivityStep[], id: string, patch: Partial<ActivityStep>)
   return next;
 }
 
-function activityStatus(status: string | undefined): ActivityStep['status'] {
+function activityStatus(status: unknown): ActivityStep['status'] {
   if (status === 'completed') return 'done';
   if (status === 'failed') return 'error';
   return 'running';
@@ -72,15 +114,15 @@ export function reduceActivity(state: ActivityState, chunk: StreamingMessage): A
 
   switch (chunk.type) {
     case 'activity': {
-      const activity = meta.activity || meta;
+      const activity = isMetadata(meta.activity) ? meta.activity : meta;
       if (activity.visibility && activity.visibility !== 'public') {
         return state;
       }
-      const id = String(activity.activity_id || activity.id || activity.kind || content || 'activity');
-      const controls: ActivityControl[] = Array.isArray(activity.controls) ? activity.controls : [];
+      const id = stringValue(activity.activity_id || activity.id || activity.kind || content || 'activity');
+      const controls = getActivityControls(activity.controls);
       steps = upsert(steps, id, {
-        label: activity.label || content || 'Working',
-        detail: activity.summary || undefined,
+        label: stringValue(activity.label) || content || 'Working',
+        detail: stringValue(activity.summary) || undefined,
         status: activityStatus(activity.status),
       });
       if (activity.kind === 'user_input_request' && controls.length) {
@@ -88,7 +130,7 @@ export function reduceActivity(state: ActivityState, chunk: StreamingMessage): A
           steps,
           disambiguation: state.disambiguation,
           prompt: {
-            question: activity.summary || activity.label || content || 'Please choose an option.',
+            question: stringValue(activity.summary) || stringValue(activity.label) || content || 'Please choose an option.',
             controls,
           },
         };
@@ -165,13 +207,7 @@ export function reduceActivity(state: ActivityState, chunk: StreamingMessage): A
       break;
 
     case 'place_disambiguation': {
-      const candidates: PlaceCandidate[] = (meta.candidates || []).map((c: any) => ({
-        placeId: c.placeId,
-        label: c.label || [c.name, c.adminRegion, c.country].filter(Boolean).join(', '),
-        name: c.name,
-        adminRegion: c.adminRegion,
-        country: c.country,
-      }));
+      const candidates = getPlaceCandidates(meta.candidates);
       return { steps, disambiguation: { question: content, candidates }, prompt: state.prompt };
     }
 

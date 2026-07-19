@@ -5,12 +5,38 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import re
 from typing import Any
+import structlog
 
 from tools.types import ToolResult
 
 from .artifact_registry import LAL_KITAB_TEMPLATE, normalize_agent_template
-from .context_connector_packs import built_in_geocode_endpoints, default_geocoding_config
+from .context_connector_packs import built_in_geocode_endpoints
+from . import lalkitab_geocoding as _geocoding
+from . import lalkitab_birth_input as _birth_input
+from .lalkitab_birth_input import (
+    CITY_GEO_LOOKUP,
+    _MONTHS_PATTERN,
+    _NAME_PATTERNS,
+    _NAME_TOKEN,
+    _clean_birth_place,
+    _extract_name,
+    _extract_place_only_reply,
+    _infer_unlabeled_place,
+    _looks_like_question_or_intent,
+    _normalize_date,
+    _normalize_time,
+    _normalize_timezone,
+    _resolve_place,
+    _strip_question_clauses,
+    extract_lalkitab_birth_input,
+    format_lalkitab_missing_input_clarification,
+    message_contains_birth_details,
+)
 from .tool_registry import ContextConnectorTool
+from .kundali_chart import extract_kundali_chart_summary
+
+
+logger = structlog.get_logger(__name__)
 
 
 LAL_KITAB_CHART_ENDPOINT = "lalkitab_chart"
@@ -24,220 +50,17 @@ LAL_KITAB_SECONDARY_ENDPOINTS = (
     "lalkitab_varshphal",
 )
 
-CITY_GEO_LOOKUP = {
-    "delhi": {"latitude": 28.6139, "longitude": 77.2090, "timezone": "+05:30", "label": "Delhi, India"},
-    "new delhi": {"latitude": 28.6139, "longitude": 77.2090, "timezone": "+05:30", "label": "New Delhi, India"},
-    "mumbai": {"latitude": 19.0760, "longitude": 72.8777, "timezone": "+05:30", "label": "Mumbai, India"},
-    "bombay": {"latitude": 19.0760, "longitude": 72.8777, "timezone": "+05:30", "label": "Mumbai, India"},
-    "bangalore": {"latitude": 12.9716, "longitude": 77.5946, "timezone": "+05:30", "label": "Bengaluru, India"},
-    "bengaluru": {"latitude": 12.9716, "longitude": 77.5946, "timezone": "+05:30", "label": "Bengaluru, India"},
-    "chennai": {"latitude": 13.0827, "longitude": 80.2707, "timezone": "+05:30", "label": "Chennai, India"},
-    "kolkata": {"latitude": 22.5726, "longitude": 88.3639, "timezone": "+05:30", "label": "Kolkata, India"},
-    "calcutta": {"latitude": 22.5726, "longitude": 88.3639, "timezone": "+05:30", "label": "Kolkata, India"},
-    "hyderabad": {"latitude": 17.3850, "longitude": 78.4867, "timezone": "+05:30", "label": "Hyderabad, India"},
-    "pune": {"latitude": 18.5204, "longitude": 73.8567, "timezone": "+05:30", "label": "Pune, India"},
-    "jaipur": {"latitude": 26.9124, "longitude": 75.7873, "timezone": "+05:30", "label": "Jaipur, India"},
-    "ahmedabad": {"latitude": 23.0225, "longitude": 72.5714, "timezone": "+05:30", "label": "Ahmedabad, India"},
-    "lucknow": {"latitude": 26.8467, "longitude": 80.9462, "timezone": "+05:30", "label": "Lucknow, India"},
-}
-
-
-GEOCODE_SEARCH_ENDPOINT = "geocode_search"
-GEOCODE_RESOLVE_ENDPOINT = "geocode_resolve"
-
-
-# ── Kundali chart summary (for the visual chart widget) ──────────────────────
-
-KUNDALI_RASHIS = [
-    ("Aries", "Mesh"),
-    ("Taurus", "Vrishabh"),
-    ("Gemini", "Mithun"),
-    ("Cancer", "Kark"),
-    ("Leo", "Simha"),
-    ("Virgo", "Kanya"),
-    ("Libra", "Tula"),
-    ("Scorpio", "Vrishchik"),
-    ("Sagittarius", "Dhanu"),
-    ("Capricorn", "Makar"),
-    ("Aquarius", "Kumbh"),
-    ("Pisces", "Meen"),
-]
-
-# Full English + Sanskrit planet names only — short aliases would false-match
-# arbitrary keys while scanning an unknown API response shape.
-KUNDALI_PLANET_CODES = {
-    "sun": "Su", "surya": "Su",
-    "moon": "Mo", "chandra": "Mo",
-    "mars": "Ma", "mangal": "Ma",
-    "mercury": "Me", "budh": "Me", "budha": "Me",
-    "jupiter": "Ju", "guru": "Ju", "brihaspati": "Ju",
-    "venus": "Ve", "shukra": "Ve",
-    "saturn": "Sa", "shani": "Sa",
-    "rahu": "Ra",
-    "ketu": "Ke",
-}
-
-KUNDALI_PLANET_ORDER = ["Su", "Mo", "Ma", "Me", "Ju", "Ve", "Sa", "Ra", "Ke"]
-
-_KUNDALI_HOUSE_KEYS = ("house", "house_number", "house_no", "bhava", "bhav", "which_house", "house_id")
-_KUNDALI_SIGN_KEYS = (
-    "sign", "rashi", "zodiac", "sign_name", "rashi_name", "zodiac_sign",
-    "sign_number", "rashi_number", "sign_id", "rashi_id",
+# Public activity events must not disclose the user's full birth profile or a
+# provider's diagnostic response.  The detailed data remains in the runtime
+# context only, where it is needed to make a subsequent chart request.
+LAL_KITAB_CHART_UNAVAILABLE_MESSAGE = (
+    "I can’t safely give a Lal Kitab prediction or remedy until I can verify the "
+    "calculated chart. Please try again shortly; if needed, confirm your birth "
+    "date, time, and birthplace so I can recalculate it."
 )
-_KUNDALI_ASC_KEYS = ("ascendant", "lagna", "asc", "lagna_sign", "ascendant_sign", "lagna_rashi")
 
-
-def _kundali_parse_sign(value: Any, _depth: int = 0) -> int | None:
-    """Parse a rashi as 1..12 from a number, an English/Hindi name, or a nested dict."""
-    if isinstance(value, bool) or value is None or _depth > 2:
-        return None
-    if isinstance(value, (int, float)):
-        number = int(value)
-        return number if 1 <= number <= 12 else None
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text.isdigit():
-            number = int(text)
-            return number if 1 <= number <= 12 else None
-        for index, (english, hindi) in enumerate(KUNDALI_RASHIS):
-            if text.startswith(english.lower()) or text.startswith(hindi.lower()):
-                return index + 1
-        return None
-    if isinstance(value, dict):
-        for key in ("name", "sign", "rashi", "sign_number", "number", "id"):
-            parsed = _kundali_parse_sign(value.get(key), _depth + 1)
-            if parsed:
-                return parsed
-    return None
-
-
-def _kundali_parse_house(value: Any) -> int | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, (int, float)):
-        number = int(value)
-        return number if 1 <= number <= 12 else None
-    if isinstance(value, str):
-        match = re.match(r"\s*(\d{1,2})\s*(?:st|nd|rd|th)?\b", value.strip().lower())
-        if match:
-            number = int(match.group(1))
-            return number if 1 <= number <= 12 else None
-    return None
-
-
-def _kundali_first(parser, node: dict[str, Any], keys: tuple[str, ...]) -> int | None:
-    for key in keys:
-        if key in node:
-            parsed = parser(node[key])
-            if parsed:
-                return parsed
-    return None
-
-
-def _kundali_walk(node: Any, found: dict[str, dict[str, int]], asc_holder: dict[str, Any]) -> None:
-    """Recursively scan an arbitrary chart payload for planet→house/sign facts.
-
-    Shape-agnostic on purpose: the Vedika response format is treated as opaque,
-    so this recognises both `{"planets": [{"name": "Sun", "house": 11}]}` and
-    `{"Sun": {"sign": "Capricorn"}}` style structures, plus any ascendant/lagna
-    marker at any depth.
-    """
-    if isinstance(node, dict):
-        if asc_holder.get("sign") is None:
-            for key in _KUNDALI_ASC_KEYS:
-                if key in node:
-                    parsed = _kundali_parse_sign(node[key])
-                    if parsed:
-                        asc_holder["sign"] = parsed
-                        break
-        name_value = None
-        for name_key in ("name", "planet", "planet_name", "graha"):
-            if isinstance(node.get(name_key), str):
-                name_value = node[name_key]
-                break
-        code = KUNDALI_PLANET_CODES.get(str(name_value).strip().lower()) if name_value else None
-        if code:
-            entry = found.setdefault(code, {})
-            house = _kundali_first(_kundali_parse_house, node, _KUNDALI_HOUSE_KEYS)
-            sign = _kundali_first(_kundali_parse_sign, node, _KUNDALI_SIGN_KEYS)
-            if house and "house" not in entry:
-                entry["house"] = house
-            if sign and "sign" not in entry:
-                entry["sign"] = sign
-        for key, value in node.items():
-            key_code = KUNDALI_PLANET_CODES.get(str(key).strip().lower())
-            if key_code and isinstance(value, dict):
-                entry = found.setdefault(key_code, {})
-                house = _kundali_first(_kundali_parse_house, value, _KUNDALI_HOUSE_KEYS)
-                sign = _kundali_first(_kundali_parse_sign, value, _KUNDALI_SIGN_KEYS)
-                if house and "house" not in entry:
-                    entry["house"] = house
-                if sign and "sign" not in entry:
-                    entry["sign"] = sign
-            _kundali_walk(value, found, asc_holder)
-    elif isinstance(node, list):
-        for item in node:
-            _kundali_walk(item, found, asc_holder)
-
-
-def extract_kundali_chart_summary(api_context: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Derive a render-ready kundali summary from the calculated chart context.
-
-    Returns {"style", "ascendant", "houses": [{house, sign_number, rashi,
-    rashi_hindi, planets}]} or None when no placements can be derived. Used by
-    the widget to draw the visual North-Indian chart, so it must never guess:
-    missing facts stay None/empty.
-    """
-    if not isinstance(api_context, dict):
-        return None
-    chart = api_context.get("chart_context")
-    if not isinstance(chart, (dict, list)):
-        return None
-    found: dict[str, dict[str, int]] = {}
-    asc_holder: dict[str, Any] = {"sign": None}
-    _kundali_walk(chart, found, asc_holder)
-    if not found:
-        return None
-
-    asc_sign = asc_holder.get("sign")
-    # If the ascendant was not labelled but some planet has both house and
-    # sign, the lagna rashi follows arithmetically.
-    if not asc_sign:
-        for entry in found.values():
-            if entry.get("house") and entry.get("sign"):
-                asc_sign = (entry["sign"] - entry["house"]) % 12 + 1
-                break
-
-    placements: dict[int, list[str]] = {}
-    for code, entry in found.items():
-        house = entry.get("house")
-        if house is None and asc_sign and entry.get("sign"):
-            house = (entry["sign"] - asc_sign) % 12 + 1
-        if house:
-            placements.setdefault(house, []).append(code)
-    if not placements:
-        return None
-
-    houses = []
-    for house_number in range(1, 13):
-        sign_number = ((asc_sign - 1 + house_number - 1) % 12 + 1) if asc_sign else None
-        houses.append(
-            {
-                "house": house_number,
-                "sign_number": sign_number,
-                "rashi": KUNDALI_RASHIS[sign_number - 1][0] if sign_number else None,
-                "rashi_hindi": KUNDALI_RASHIS[sign_number - 1][1] if sign_number else None,
-                "planets": sorted(placements.get(house_number, []), key=KUNDALI_PLANET_ORDER.index),
-            }
-        )
-    ascendant = None
-    if asc_sign:
-        ascendant = {
-            "sign_number": asc_sign,
-            "name": KUNDALI_RASHIS[asc_sign - 1][0],
-            "hindi": KUNDALI_RASHIS[asc_sign - 1][1],
-        }
-    return {"style": "north_indian", "ascendant": ascendant, "houses": houses}
+GEOCODE_SEARCH_ENDPOINT = _geocoding.GEOCODE_SEARCH_ENDPOINT
+GEOCODE_RESOLVE_ENDPOINT = _geocoding.GEOCODE_RESOLVE_ENDPOINT
 
 
 @dataclass
@@ -259,6 +82,12 @@ class LalKitabPlanResult:
     # True when this turn can answer from previously calculated chart/API
     # context without calling Vedika again.
     used_cached_context: bool = False
+    # A chart is usable only after a successful, non-empty structured result
+    # has been checked.  This blocks synthesis from failed, absent, or malformed
+    # connector data.
+    chart_validated: bool = False
+    requires_safe_abstention: bool = False
+    abstention_reason: str | None = None
 
 
 def is_lalkitab_agent(config: dict[str, Any] | None) -> bool:
@@ -339,138 +168,6 @@ def message_is_lalkitab_followup(message: str) -> bool:
         "this mean",
     )
     return any(term in text for term in followup_terms)
-
-
-def _normalize_date(value: str) -> str | None:
-    value = value.strip().replace(",", " ")
-    formats = (
-        "%Y-%m-%d",
-        "%d-%m-%Y",
-        "%d/%m/%Y",
-        "%d-%m-%y",
-        "%d/%m/%y",
-        "%d %B %Y",
-        "%d %b %Y",
-        "%B %d %Y",
-        "%b %d %Y",
-    )
-    for fmt in formats:
-        try:
-            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-    return None
-
-
-def _normalize_time(value: str) -> str | None:
-    raw = value.strip().lower().replace(".", "")
-    if re.fullmatch(r"\d{3,4}", raw):
-        raw = raw.zfill(4)
-        return f"{raw[:2]}:{raw[2:]}:00"
-    if re.fullmatch(r"\d{3,4}\s*(?:hrs|hours?)", raw):
-        digits = re.match(r"(\d{3,4})", raw).group(1)  # type: ignore[union-attr]
-        raw = digits.zfill(4)
-        return f"{raw[:2]}:{raw[2:]}:00"
-    formats = ("%H:%M:%S", "%H:%M", "%I:%M %p", "%I %p")
-    normalized = raw.upper()
-    for fmt in formats:
-        try:
-            return datetime.strptime(normalized, fmt).strftime("%H:%M:%S")
-        except ValueError:
-            continue
-    return None
-
-
-def _normalize_timezone(value: str) -> str:
-    timezone = value.strip()
-    lowered = timezone.lower()
-    aliases = {
-        "ist": "+05:30",
-        "asia/kolkata": "+05:30",
-        "asia/calcutta": "+05:30",
-        "utc": "+00:00",
-        "z": "+00:00",
-    }
-    if lowered in aliases:
-        return aliases[lowered]
-    offset_match = re.fullmatch(r"UTC?([+-]\d{1,2})(?::?(\d{2}))?", timezone, re.IGNORECASE)
-    if offset_match:
-        hours = int(offset_match.group(1))
-        minutes = offset_match.group(2) or "00"
-        return f"{hours:+03d}:{minutes}"
-    plain_offset = re.fullmatch(r"([+-]\d{1,2})(?::?(\d{2}))?", timezone)
-    if plain_offset:
-        hours = int(plain_offset.group(1))
-        minutes = plain_offset.group(2) or "00"
-        return f"{hours:+03d}:{minutes}"
-    return timezone
-
-
-def _clean_birth_place(value: str) -> str:
-    # Stop the place capture at the next field label or the start of the question
-    # (e.g. "Delhi, India. TOB: 1526" → "Delhi, India"). Also cut on an arrow.
-    cleaned = re.split(
-        r"(?:->|→|\|)|"
-        r"\b(?:question|query|ask|will|should|can|dob|tob|pob|"
-        r"date\s+of\s+birth|time\s+of\s+birth|birth\s+time|place\s+of\s+birth)\b",
-        value,
-        maxsplit=1,
-        flags=re.IGNORECASE,
-    )[0]
-    cleaned = re.sub(r"\b(?:born|birthplace)\b", " ", cleaned, flags=re.IGNORECASE)
-    # Drop time/preposition fragments that ride along with an unlabeled place
-    # ("1526 hrs time. delhi" → "delhi", "at in mumbai" → "mumbai").
-    cleaned = re.sub(r"\b(?:hrs?|hours?|ist|india\s+timezone)\b", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = cleaned.strip(" .,-")
-    cleaned = re.sub(
-        r"^(?:(?:time|at|in|on|around|near)\b[\s.,-]*)+",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    cleaned = cleaned.strip(" .,-")
-    return cleaned
-
-
-def _resolve_place(place: str) -> dict[str, Any] | None:
-    text = re.sub(r"[^a-zA-Z,\s]", " ", place or "").lower()
-    parts = [part.strip() for part in text.split(",") if part.strip()]
-    candidates = [text.strip(), *parts]
-    for candidate in candidates:
-        candidate = re.sub(r"\s+", " ", candidate).strip()
-        if candidate in CITY_GEO_LOOKUP:
-            return CITY_GEO_LOOKUP[candidate]
-    for key, value in CITY_GEO_LOOKUP.items():
-        if re.search(rf"\b{re.escape(key)}\b", text):
-            return value
-    return None
-
-
-def _extract_place_only_reply(text: str) -> str | None:
-    cleaned = _clean_birth_place(text or "")
-    if not cleaned:
-        return None
-    if re.search(r"\d", cleaned) or _looks_like_question_or_intent(cleaned):
-        return None
-    words = [word for word in re.split(r"[\s,]+", cleaned) if word]
-    if not 1 <= len(words) <= 6:
-        return None
-    return cleaned
-
-
-def _looks_like_question_or_intent(text: str) -> bool:
-    lowered = (text or "").lower()
-    if "?" in lowered:
-        return True
-    return bool(
-        re.search(
-            r"\b(what|why|how|when|where|which|who|will|should|can|could|would|"
-            r"career|marriage|finance|relationship|health|remed\w*|predict\w*|"
-            r"kundli|kundali|horoscope|chart|please|question|query)\b",
-            lowered,
-        )
-    )
 
 
 _MONTHS_PATTERN = (
@@ -747,6 +444,27 @@ def format_lalkitab_missing_input_clarification(normalized: dict[str, Any], miss
     return f"{prefix}Please share the missing detail(s): {', '.join(deduped_missing)}."
 
 
+# Compatibility re-exports. The deterministic behavior is owned by the leaf
+# module; existing imports from this runtime remain valid.
+CITY_GEO_LOOKUP = _birth_input.CITY_GEO_LOOKUP
+_MONTHS_PATTERN = _birth_input._MONTHS_PATTERN
+_NAME_TOKEN = _birth_input._NAME_TOKEN
+_NAME_PATTERNS = _birth_input._NAME_PATTERNS
+_normalize_date = _birth_input._normalize_date
+_normalize_time = _birth_input._normalize_time
+_normalize_timezone = _birth_input._normalize_timezone
+_clean_birth_place = _birth_input._clean_birth_place
+_resolve_place = _birth_input._resolve_place
+_extract_place_only_reply = _birth_input._extract_place_only_reply
+_looks_like_question_or_intent = _birth_input._looks_like_question_or_intent
+_strip_question_clauses = _birth_input._strip_question_clauses
+_extract_name = _birth_input._extract_name
+_infer_unlabeled_place = _birth_input._infer_unlabeled_place
+message_contains_birth_details = _birth_input.message_contains_birth_details
+extract_lalkitab_birth_input = _birth_input.extract_lalkitab_birth_input
+format_lalkitab_missing_input_clarification = _birth_input.format_lalkitab_missing_input_clarification
+
+
 def select_lalkitab_endpoint_ids(message: str) -> list[str]:
     text = (message or "").lower()
     if any(term in text for term in ("full reading", "complete reading", "full profile", "complete profile", "overall", "all endpoints")):
@@ -828,45 +546,19 @@ def normalize_lalkitab_endpoint(endpoint: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-COUNTRY_ALIASES = {
-    "india": "IN",
-    "bharat": "IN",
-    "pakistan": "PK",
-    "usa": "US",
-    "us": "US",
-    "united states": "US",
-    "america": "US",
-    "uk": "GB",
-    "england": "GB",
-    "britain": "GB",
-    "united kingdom": "GB",
-    "canada": "CA",
-    "australia": "AU",
-    "nepal": "NP",
-    "bangladesh": "BD",
-    "sri lanka": "LK",
-    "uae": "AE",
-}
-
-# Deliberately excludes bare number words ("one", "two") — they collide with
-# natural phrasing like "the Illinois one".
-ORDINAL_WORDS = {
-    "first": 0, "1st": 0,
-    "second": 1, "2nd": 1,
-    "third": 2, "3rd": 2,
-    "fourth": 3, "4th": 3,
-    "fifth": 4, "5th": 4,
-}
-
-
-def get_geocoding_config(connector: dict[str, Any] | None) -> dict[str, Any]:
-    """Merge a connector's geocoding overrides onto the built-in defaults."""
-    config = default_geocoding_config()
-    input_resolution = (connector or {}).get("input_resolution")
-    overrides = input_resolution.get("geocoding") if isinstance(input_resolution, dict) else None
-    if isinstance(overrides, dict):
-        config.update({k: v for k, v in overrides.items() if v is not None})
-    return config
+# Compatibility re-exports. The resolver owns deterministic geocoding behavior;
+# public imports from this runtime remain valid.
+COUNTRY_ALIASES = _geocoding.COUNTRY_ALIASES
+ORDINAL_WORDS = _geocoding.ORDINAL_WORDS
+default_geocoding_config = _geocoding.default_geocoding_config
+get_geocoding_config = _geocoding.get_geocoding_config
+_country_hint_from_text = _geocoding._country_hint_from_text
+candidate_label = _geocoding.candidate_label
+_normalize_candidate = _geocoding._normalize_candidate
+_filter_candidates_by_hint = _geocoding._filter_candidates_by_hint
+match_place_choice = _geocoding.match_place_choice
+format_place_disambiguation = _geocoding.format_place_disambiguation
+_iana_to_offset = _geocoding._iana_to_offset
 
 
 def _geocode_endpoint(connector: dict[str, Any], endpoint_id: str) -> dict[str, Any] | None:
@@ -880,86 +572,6 @@ def _geocode_endpoint(connector: dict[str, Any], endpoint_id: str) -> dict[str, 
     return None
 
 
-def _country_hint_from_text(text: str) -> str | None:
-    lowered = (text or "").lower()
-    for alias, code in COUNTRY_ALIASES.items():
-        if re.search(rf"\b{re.escape(alias)}\b", lowered):
-            return code
-    iso = re.search(r"\b([A-Z]{2})\b", text or "")
-    if iso and iso.group(1) in {code for code in COUNTRY_ALIASES.values()}:
-        return iso.group(1)
-    return None
-
-
-def candidate_label(candidate: dict[str, Any]) -> str:
-    parts = [candidate.get("name")]
-    if candidate.get("adminRegion"):
-        parts.append(candidate.get("adminRegion"))
-    if candidate.get("country"):
-        parts.append(candidate.get("country"))
-    return ", ".join(part for part in parts if part)
-
-
-def _normalize_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "placeId": candidate.get("placeId"),
-        "name": candidate.get("name"),
-        "adminRegion": candidate.get("adminRegion"),
-        "country": candidate.get("country"),
-        "countryCode": candidate.get("countryCode"),
-        "latitude": candidate.get("latitude"),
-        "longitude": candidate.get("longitude"),
-        "timezone": candidate.get("timezone"),
-        "population": candidate.get("population"),
-        "label": candidate_label(candidate),
-    }
-
-
-def _filter_candidates_by_hint(candidates: list[dict[str, Any]], hint_text: str) -> list[dict[str, Any]]:
-    """Keep candidates matching a country/region token mentioned by the user."""
-    country_code = _country_hint_from_text(hint_text)
-    lowered = (hint_text or "").lower()
-    if country_code:
-        narrowed = [c for c in candidates if str(c.get("countryCode")).upper() == country_code]
-        if narrowed:
-            return narrowed
-    # Region/state token match (e.g. "Hyderabad Telangana").
-    region_matches = [
-        c for c in candidates
-        if c.get("adminRegion") and re.search(rf"\b{re.escape(str(c.get('adminRegion')).lower())}\b", lowered)
-    ]
-    if region_matches:
-        return region_matches
-    return candidates
-
-
-def match_place_choice(message: str, candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Interpret a follow-up reply as a selection among pending place candidates."""
-    if not candidates:
-        return None
-    lowered = (message or "").lower().strip()
-    # 1) Country / region / name token match — the strongest signal.
-    narrowed = _filter_candidates_by_hint(candidates, message)
-    if len(narrowed) == 1:
-        return narrowed[0]
-    for candidate in candidates:
-        for key in ("country", "adminRegion", "placeId"):
-            value = str(candidate.get(key) or "").lower()
-            if value and value in lowered:
-                return candidate
-    # 2) Explicit numeric selection ("2").
-    number = re.search(r"\b(\d{1,2})\b", lowered)
-    if number:
-        idx = int(number.group(1)) - 1
-        if 0 <= idx < len(candidates):
-            return candidates[idx]
-    # 3) Ordinal words ("the second one").
-    for word, index in ORDINAL_WORDS.items():
-        if re.search(rf"\b{re.escape(word)}\b", lowered) and index < len(candidates):
-            return candidates[index]
-    return None
-
-
 async def _call_geocode_endpoint(
     connector: dict[str, Any],
     endpoint_id: str,
@@ -970,17 +582,16 @@ async def _call_geocode_endpoint(
     if not endpoint:
         return None
     tool = ContextConnectorTool(connector, endpoint)
-    return await tool.run(query=message, payload=payload)
-
-
-def format_place_disambiguation(birth_place: str, candidates: list[dict[str, Any]]) -> str:
-    options = "\n".join(
-        f"{index + 1}. {candidate.get('label')}" for index, candidate in enumerate(candidates)
-    )
-    return (
-        f"There are a few places named \"{birth_place}\". Which one is the birthplace?\n{options}\n"
-        "Reply with the number or the country/state."
-    )
+    try:
+        return await tool.run(query=message, payload=payload)
+    except Exception as exc:  # pragma: no cover - provider failures are environment-specific
+        logger.warning("lalkitab_geocode_call_failed", endpoint_id=endpoint_id, error=str(exc))
+        return ToolResult(
+            success=False,
+            data=None,
+            error="connector call failed",
+            metadata={"endpoint_id": endpoint_id},
+        )
 
 
 async def resolve_birthplace_via_geocoding(
@@ -991,75 +602,13 @@ async def resolve_birthplace_via_geocoding(
     datetime_iso: str | None,
     message: str,
 ) -> dict[str, Any]:
-    """Resolve a birthplace string to coordinates + timezone.
-
-    Returns a dict with `status` in {"resolved", "ambiguous", "failed"} and
-    accompanying data (coordinates/timezone, or candidate list, plus events).
-    """
-    events: list[dict[str, Any]] = []
-    search_id = geocoding_cfg.get("search_endpoint_id") or GEOCODE_SEARCH_ENDPOINT
-    resolve_id = geocoding_cfg.get("resolve_endpoint_id") or GEOCODE_RESOLVE_ENDPOINT
-    max_candidates = int(geocoding_cfg.get("max_candidates") or 5)
-
-    events.append({
-        "type": "geocode_start",
-        "content": f"Resolving birthplace \"{birth_place}\"…",
-        "metadata": {"birth_place": birth_place, "endpoint_id": search_id},
-    })
-    search_result = await _call_geocode_endpoint(
-        connector, search_id, {"q": birth_place, "limit": max_candidates}, message
-    )
-    if not search_result or not search_result.success:
-        events.append({
-            "type": "geocode_result",
-            "content": f"Could not look up \"{birth_place}\".",
-            "metadata": {"success": False, "error": getattr(search_result, "error", None)},
-        })
-        return {"status": "failed", "events": events}
-
-    raw_results = []
-    data = search_result.data if isinstance(search_result.data, dict) else {}
-    if isinstance(data.get("results"), list):
-        raw_results = [c for c in data["results"] if isinstance(c, dict) and c.get("placeId")]
-    candidates = [_normalize_candidate(c) for c in raw_results]
-    if not candidates:
-        events.append({
-            "type": "geocode_result",
-            "content": f"No place matched \"{birth_place}\".",
-            "metadata": {"success": True, "count": 0},
-        })
-        return {"status": "failed", "events": events}
-
-    # 1) Narrow by any country/region token the user already gave.
-    narrowed = _filter_candidates_by_hint(candidates, message)
-    # 2) Apply the configured default-country bias if still ambiguous.
-    default_country = str(geocoding_cfg.get("default_country") or "").upper()
-    if len(narrowed) > 1 and default_country:
-        biased = [c for c in narrowed if str(c.get("countryCode")).upper() == default_country]
-        if len(biased) == 1:
-            narrowed = biased
-
-    if len(narrowed) > 1:
-        strategy = str(geocoding_cfg.get("ambiguous_strategy") or "ask").lower()
-        if strategy == "highest_population" or geocoding_cfg.get("confirm_when_ambiguous") is False:
-            narrowed = [max(narrowed, key=lambda c: c.get("population") or 0)]
-        else:
-            top = narrowed[:max_candidates]
-            events.append({
-                "type": "geocode_result",
-                "content": f"\"{birth_place}\" matches {len(top)} places — asking which one.",
-                "metadata": {"success": True, "ambiguous": True, "count": len(top)},
-            })
-            return {"status": "ambiguous", "candidates": top, "events": events}
-
-    chosen = narrowed[0]
-    return await _finalize_geocode_choice(
+    return await _geocoding.resolve_birthplace_via_geocoding(
         connector=connector,
-        resolve_id=resolve_id,
-        candidate=chosen,
+        geocoding_cfg=geocoding_cfg,
+        birth_place=birth_place,
         datetime_iso=datetime_iso,
         message=message,
-        events=events,
+        call_endpoint=_call_geocode_endpoint,
     )
 
 
@@ -1072,66 +621,41 @@ async def _finalize_geocode_choice(
     message: str,
     events: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Resolve a chosen place into coordinates + (historical) timezone offset."""
-    latitude = candidate.get("latitude")
-    longitude = candidate.get("longitude")
-    timezone_offset: str | None = None
-    resolve_payload = {"placeId": candidate.get("placeId")}
-    if datetime_iso:
-        resolve_payload["birthDate"] = datetime_iso
-    resolve_result = await _call_geocode_endpoint(connector, resolve_id, resolve_payload, message)
-    if resolve_result and resolve_result.success and isinstance(resolve_result.data, dict):
-        place = resolve_result.data.get("place") if isinstance(resolve_result.data.get("place"), dict) else {}
-        tz_at_birth = resolve_result.data.get("timezoneAtBirth") if isinstance(resolve_result.data.get("timezoneAtBirth"), dict) else {}
-        latitude = place.get("latitude", latitude)
-        longitude = place.get("longitude", longitude)
-        timezone_offset = tz_at_birth.get("utcOffsetString") or timezone_offset
-
-    if timezone_offset is None and candidate.get("timezone"):
-        # Fall back to the IANA zone's offset only if the resolve endpoint gave none.
-        timezone_offset = _iana_to_offset(str(candidate.get("timezone")))
-
-    if latitude is None or longitude is None or not timezone_offset:
-        events.append({
-            "type": "geocode_result",
-            "content": f"Resolved {candidate.get('label')} but could not derive a timezone.",
-            "metadata": {"success": False, "candidate": candidate},
-        })
-        return {"status": "failed", "events": events}
-
-    events.append({
-        "type": "geocode_result",
-        "content": f"Birthplace resolved to {candidate.get('label')}.",
-        "metadata": {
-            "success": True,
-            "label": candidate.get("label"),
-            "latitude": latitude,
-            "longitude": longitude,
-            "timezone": timezone_offset,
-        },
-    })
-    return {
-        "status": "resolved",
-        "latitude": float(latitude),
-        "longitude": float(longitude),
-        "timezone": timezone_offset,
-        "label": candidate.get("label"),
-        "events": events,
-    }
+    return await _geocoding.finalize_geocode_choice(
+        connector=connector,
+        resolve_id=resolve_id,
+        candidate=candidate,
+        datetime_iso=datetime_iso,
+        message=message,
+        events=events,
+        call_endpoint=_call_geocode_endpoint,
+    )
 
 
-def _iana_to_offset(iana_zone: str) -> str | None:
-    """Best-effort IANA → fixed offset for the few zones we ship offline."""
-    static = {
-        "Asia/Kolkata": "+05:30",
-        "Asia/Calcutta": "+05:30",
-        "Asia/Karachi": "+05:00",
-        "Asia/Kathmandu": "+05:45",
-        "Asia/Dhaka": "+06:00",
-        "Asia/Colombo": "+05:30",
-        "UTC": "+00:00",
-    }
-    return static.get(iana_zone)
+def is_valid_lalkitab_context_payload(payload: Any) -> bool:
+    """Return whether a connector supplied usable structured Lal Kitab data.
+
+    The provider payload is intentionally treated as schema-flexible, but a
+    successful HTTP/tool invocation alone is not evidence: it must contain a
+    non-empty JSON object or list and must not carry an explicit failure shape.
+    This gives the runtime a stable boundary for malformed responses without
+    guessing at a provider-specific chart schema.
+    """
+    if isinstance(payload, list):
+        return bool(payload)
+    if not isinstance(payload, dict) or not payload:
+        return False
+
+    for key in ("error", "errors", "exception"):
+        if payload.get(key) not in (None, "", [], {}):
+            return False
+    status = str(payload.get("status") or "").strip().lower()
+    if status in {"error", "failed", "failure", "invalid", "unavailable"}:
+        return False
+    status_code = payload.get("status_code") or payload.get("statusCode")
+    if isinstance(status_code, int) and status_code >= 400:
+        return False
+    return True
 
 
 async def build_lalkitab_runtime_context(
@@ -1149,7 +673,7 @@ async def build_lalkitab_runtime_context(
         if isinstance(pending_state.get("api_context"), dict)
         else {}
     )
-    has_previous_chart = bool(previous_api_context.get("chart_context"))
+    has_previous_chart = is_valid_lalkitab_context_payload(previous_api_context.get("chart_context"))
     # A message that *is* birth details ("16 July 1987, 15:26, Delhi India")
     # counts as astrology intent even without any keyword — whether detected
     # deterministically or by the LLM understanding layer.
@@ -1174,7 +698,14 @@ async def build_lalkitab_runtime_context(
 
     connector = find_lalkitab_connector(config)
     if not connector:
-        return LalKitabPlanResult(handled=False)
+        # A Lal Kitab request without a chart connector cannot safely fall
+        # through to the general synthesizer; there is no calculated evidence
+        # to ground a prediction or remedy.
+        return LalKitabPlanResult(
+            handled=True,
+            requires_safe_abstention=True,
+            abstention_reason="chart_connector_unavailable",
+        )
 
     input_resolution = connector.get("input_resolution") if isinstance(connector.get("input_resolution"), dict) else {}
     extracted, _ = extract_lalkitab_birth_input(
@@ -1282,13 +813,9 @@ async def build_lalkitab_runtime_context(
             result.events.append(
                 {
                     "type": "geocode_result",
-                    "content": f"Birthplace resolved to {resolved_place['label']}.",
+                    "content": "Birthplace resolved.",
                     "metadata": {
                         "success": True,
-                        "label": resolved_place["label"],
-                        "latitude": resolved_place["latitude"],
-                        "longitude": resolved_place["longitude"],
-                        "timezone": resolved_place["timezone"],
                         "source": "known_place_cache",
                     },
                 }
@@ -1396,19 +923,39 @@ async def build_lalkitab_runtime_context(
         api_context["secondary_endpoint_results"] = {}
         api_context["source_provenance"] = []
 
+    # Never reuse a truthy-but-malformed cached chart.  Secondary results depend
+    # on the chart, so they are not safe to reuse either in that situation.
+    if not is_valid_lalkitab_context_payload(api_context.get("chart_context")):
+        api_context["chart_context"] = None
+        api_context["secondary_endpoint_results"] = {}
+        api_context["source_provenance"] = []
+
     endpoints_to_call: list[str] = []
     existing_secondaries = api_context.get("secondary_endpoint_results") or {}
     for endpoint_id in selected_endpoint_ids:
-        if endpoint_id == LAL_KITAB_CHART_ENDPOINT and api_context.get("chart_context"):
+        if endpoint_id == LAL_KITAB_CHART_ENDPOINT and is_valid_lalkitab_context_payload(api_context.get("chart_context")):
             continue
         if endpoint_id != LAL_KITAB_CHART_ENDPOINT and endpoint_id in existing_secondaries:
-            continue
+            if is_valid_lalkitab_context_payload(existing_secondaries[endpoint_id]):
+                continue
+            # A cached secondary result without usable structured data is not
+            # evidence for a prediction/remedy; retry it rather than synthesize.
+            api_context["secondary_endpoint_results"].pop(endpoint_id, None)
         endpoints_to_call.append(endpoint_id)
 
     for endpoint_id in endpoints_to_call:
         endpoint = endpoints_by_id.get(endpoint_id)
         if not endpoint:
-            continue
+            result.events.append(
+                {
+                    "type": "connector_error",
+                    "content": "The required Lal Kitab calculation is unavailable right now.",
+                    "metadata": {"success": False, "endpoint_id": endpoint_id},
+                }
+            )
+            result.requires_safe_abstention = True
+            result.abstention_reason = "required_endpoint_unavailable"
+            break
         tool = ContextConnectorTool(connector, endpoint)
         endpoint_name = endpoint.get("name") or endpoint_id
         connector_name = connector.get("name") or connector.get("id") or "Lal Kitab Connector"
@@ -1421,37 +968,49 @@ async def build_lalkitab_runtime_context(
                     "connector_name": connector_name,
                     "endpoint_id": endpoint_id,
                     "endpoint_name": endpoint_name,
-                    "normalized_birth_input": normalized_birth_input,
                 },
             }
         )
-        tool_result = await tool.run(query=message, payload=normalized_birth_input)
+        try:
+            tool_result = await tool.run(query=message, payload=normalized_birth_input)
+        except Exception as exc:  # pragma: no cover - provider failures are environment-specific
+            logger.warning("lalkitab_connector_call_failed", endpoint_id=endpoint_id, error=str(exc))
+            tool_result = ToolResult(
+                success=False,
+                data=None,
+                error="connector call failed",
+                metadata={"endpoint_id": endpoint_id, "endpoint_name": endpoint_name},
+            )
         result.tool_results[tool.name] = tool_result
         metadata = tool_result.metadata or {}
-        event_type = "connector_result" if tool_result.success else "connector_error"
+        payload_valid = tool_result.success and is_valid_lalkitab_context_payload(tool_result.data)
+        event_type = "connector_result" if payload_valid else "connector_error"
         result.events.append(
             {
                 "type": event_type,
                 "content": (
                     f"{endpoint_name} returned calculated context."
-                    if tool_result.success
-                    else f"{endpoint_name} failed: {tool_result.error or 'unknown connector error'}"
+                    if payload_valid
+                    else f"{endpoint_name} could not provide verified context."
                 ),
                 "metadata": {
-                    "success": tool_result.success,
+                    "success": payload_valid,
                     "connector_id": metadata.get("connector_id") or connector.get("id"),
                     "connector_name": metadata.get("connector_name") or connector_name,
                     "endpoint_id": metadata.get("endpoint_id") or endpoint_id,
                     "endpoint_name": metadata.get("endpoint_name") or endpoint_name,
-                    "request_shape": metadata.get("request_shape"),
-                    "response_summary": metadata.get("response_summary"),
                     "latency_ms": metadata.get("latency_ms"),
-                    "error": tool_result.error,
                 },
             }
         )
-        if not tool_result.success:
-            continue
+        if not payload_valid:
+            result.requires_safe_abstention = True
+            result.abstention_reason = (
+                "chart_context_unavailable"
+                if endpoint_id == LAL_KITAB_CHART_ENDPOINT
+                else "required_context_unavailable"
+            )
+            break
         if endpoint_id == LAL_KITAB_CHART_ENDPOINT:
             api_context["chart_context"] = tool_result.data
         else:
@@ -1464,19 +1023,32 @@ async def build_lalkitab_runtime_context(
             }
         )
 
+    result.chart_validated = is_valid_lalkitab_context_payload(api_context.get("chart_context"))
+    if not result.chart_validated:
+        result.requires_safe_abstention = True
+        result.abstention_reason = result.abstention_reason or "chart_context_unavailable"
+        api_context["chart_context"] = None
+        api_context["secondary_endpoint_results"] = {}
+        api_context["source_provenance"] = []
+        result.pending_state = {"normalized_birth_input": normalized_birth_input}
+
     result.api_context = api_context
-    result.used_cached_context = bool(previous_api_context and not endpoints_to_call)
+    result.used_cached_context = bool(
+        previous_api_context and not endpoints_to_call and result.chart_validated
+    )
     if endpoints_to_call:
         result.events.append(
             {
                 "type": "api_context",
-                "content": "Calculated Lal Kitab API context is ready.",
+                "content": (
+                    "Calculated Lal Kitab API context is ready."
+                    if result.chart_validated and not result.requires_safe_abstention
+                    else "Verified Lal Kitab context is unavailable for this request."
+                ),
                 "metadata": {
-                    "normalized_birth_input": normalized_birth_input,
                     "selected_endpoint_ids": selected_endpoint_ids,
-                    "chart_available": bool(api_context.get("chart_context")),
+                    "chart_available": result.chart_validated,
                     "secondary_endpoint_ids": sorted((api_context.get("secondary_endpoint_results") or {}).keys()),
-                    "source_provenance": api_context.get("source_provenance") or [],
                 },
             }
         )

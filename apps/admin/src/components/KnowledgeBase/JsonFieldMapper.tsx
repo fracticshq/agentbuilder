@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ArrowRightIcon, CheckCircleIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 
-const isDev = process.env.NODE_ENV !== 'production';
+const isDev = import.meta.env.DEV;
 
 interface JsonFieldMapperProps {
   jsonData: any[];
@@ -165,7 +165,7 @@ export default function JsonFieldMapper({
       }
       return value; // For 'string' type
     } catch (error) {
-      console.error(`Error parsing field "${field}" with value "${value}":`, error);
+      console.error('Unable to parse configured JSON field value', { field, error });
       return value;
     }
   };
@@ -282,7 +282,10 @@ export default function JsonFieldMapper({
           newItem[field] = parsedValue;
 
           if (idx === 0) {
-            isDev && console.log(`[JsonFieldMapper] Fixed field "${field}": "${config.value}" → type: ${typeof parsedValue}, value:`, parsedValue);
+            isDev && console.log('[JsonFieldMapper] Parsed fixed field', {
+              field,
+              valueType: typeof parsedValue,
+            });
           }
         }
       });

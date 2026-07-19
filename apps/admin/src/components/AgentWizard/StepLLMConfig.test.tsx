@@ -1,3 +1,4 @@
+import { vi, type Mock } from 'vitest';
 import React from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -5,13 +6,13 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import StepLLMConfig from './StepLLMConfig';
 import { api } from '../../api/client';
 
-jest.mock('../../api/client', () => ({
+vi.mock('../../api/client', () => ({
   api: {
-    getAzureDeployments: jest.fn(),
+    getAzureDeployments: vi.fn(),
   },
 }));
 
-const mockGetAzureDeployments = api.getAzureDeployments as jest.Mock;
+const mockGetAzureDeployments = api.getAzureDeployments as Mock;
 
 function renderStep(initialData?: Partial<React.ComponentProps<typeof StepLLMConfig>['data']>) {
   const queryClient = new QueryClient({

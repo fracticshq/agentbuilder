@@ -19,7 +19,7 @@ from typing import Any
 
 import structlog
 
-from .lalkitab_runtime import (
+from .lalkitab_birth_input import (
     _extract_name,
     _normalize_date,
     _normalize_time,

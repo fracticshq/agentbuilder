@@ -1,17 +1,18 @@
+import { vi, type Mock } from 'vitest';
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import DocumentsList from './DocumentsList';
 import { knowledgeApi } from '../../api/knowledge';
 
-jest.mock('../../api/knowledge', () => ({
+vi.mock('../../api/knowledge', () => ({
   knowledgeApi: {
-    getDocuments: jest.fn(),
-    deleteDocument: jest.fn(),
+    getDocuments: vi.fn(),
+    deleteDocument: vi.fn(),
   },
 }));
 
-const mockGetDocuments = knowledgeApi.getDocuments as jest.Mock;
+const mockGetDocuments = knowledgeApi.getDocuments as Mock;
 
 beforeEach(() => {
   mockGetDocuments.mockReset();

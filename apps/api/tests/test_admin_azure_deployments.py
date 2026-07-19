@@ -9,6 +9,7 @@ from app.auth.dependencies import get_db, require_dashboard_access
 from app.dependencies import get_settings
 from app.services.azure_openai_deployment_service import (
     AzureDeploymentAuthError,
+    AzureDeploymentConfigError,
     AzureDeploymentRequestError,
     AzureOpenAIDeploymentService,
 )
@@ -82,6 +83,14 @@ async def test_service_filters_non_succeeded_deployments(monkeypatch):
         "gpt-5.4-mini",
     ]
     assert response["deployments"][0]["model_name"] == "gpt-4.1-mini"
+
+
+@pytest.mark.asyncio
+async def test_service_surfaces_missing_arm_configuration():
+    service = AzureOpenAIDeploymentService(build_settings(AZURE_SUBSCRIPTION_ID=""))
+
+    with pytest.raises(AzureDeploymentConfigError, match="AZURE_SUBSCRIPTION_ID"):
+        await service.list_deployments()
 
 
 def test_route_rejects_missing_dashboard_auth():

@@ -6,6 +6,11 @@ import fetch from 'node-fetch';
 import 'dotenv/config';
 import { handleMcpRequest } from './mcp.js';
 import { discoverMcpEndpoints } from './shopify.js';
+import {
+  insecureLocalDevAuthBypassEnabled,
+  isValidMcpServiceAuthorization,
+  normalizeShopifyShopDomain,
+} from './security.js';
 
 const app = express();
 const port = process.env.PORT || 3005;
@@ -28,6 +33,18 @@ const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) {
   console.error('FATAL: SESSION_SECRET environment variable is not set');
   process.exit(1);
+}
+
+const mcpServiceAuthToken = process.env.MCP_SERVICE_AUTH_TOKEN;
+const allowInsecureLocalDevMcp = insecureLocalDevAuthBypassEnabled();
+if (!mcpServiceAuthToken && !allowInsecureLocalDevMcp) {
+  console.error(
+    'FATAL: MCP_SERVICE_AUTH_TOKEN must be set. To bypass only for local development, set NODE_ENV=development and SHOPIFY_MCP_ALLOW_INSECURE_LOCAL_DEV=true.',
+  );
+  process.exit(1);
+}
+if (allowInsecureLocalDevMcp) {
+  console.warn('WARNING: Shopify MCP service authentication bypass is enabled for local development.');
 }
 
 const allowedOrigins = process.env.CORS_ALLOW_ORIGINS
@@ -67,6 +84,16 @@ app.use((req, res, next) => {
   }
 });
 
+function requireMcpServiceAuthentication(req, res, next) {
+  if (allowInsecureLocalDevMcp) {
+    return next();
+  }
+  if (!isValidMcpServiceAuthorization(req.get('authorization'), mcpServiceAuthToken)) {
+    return res.status(401).json({ error: 'MCP service authentication required' });
+  }
+  return next();
+}
+
 // Helper for PKCE
 function base64URLEncode(str) {
   return str.toString('base64')
@@ -79,8 +106,8 @@ function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest();
 }
 
-// Main MCP Endpoint
-app.get('/mcp', (_req, res) => {
+// Main MCP Endpoint. Only the configured internal service may invoke it.
+app.get('/mcp', requireMcpServiceAuthentication, (_req, res) => {
   res.status(200).json({
     service: 'agentbuilder-shopify-mcp',
     endpoint: '/mcp',
@@ -96,7 +123,7 @@ app.get('/mcp', (_req, res) => {
   });
 });
 
-app.post('/mcp', async (req, res) => {
+app.post('/mcp', requireMcpServiceAuthentication, async (req, res) => {
   try {
     const response = await handleMcpRequest(req.body, req.session, req.headers);
     res.json(response);
@@ -125,10 +152,10 @@ app.post('/mcp', async (req, res) => {
  * Initiates the OAuth 2.0 PKCE Authorization Code flow.
  */
 app.get('/auth/login', async (req, res) => {
-  const shopUrl = req.query.shop;
+  let shopUrl;
   const forcedSessionId = req.query.session_id;
   
-  if (!shopUrl) {
+  if (!req.query.shop) {
     return res.status(400).json({
       service: 'agentbuilder-shopify-mcp',
       endpoint: '/auth/login',
@@ -139,6 +166,12 @@ app.get('/auth/login', async (req, res) => {
       },
       example: '/auth/login?shop=your-store.myshopify.com'
     });
+  }
+
+  try {
+    shopUrl = normalizeShopifyShopDomain(req.query.shop);
+  } catch (err) {
+    return res.status(400).send(err.message);
   }
 
   // If session_id is provided, we want to ensure we're using that session
@@ -188,7 +221,13 @@ app.get('/auth/callback', async (req, res) => {
   if (error) return res.status(400).send(`Auth Error: ${error}`);
   if (state !== req.session.oauth_state) return res.status(400).send('Invalid state');
 
-  const endpoints = await discoverMcpEndpoints(req.session.shop_url);
+  let endpoints;
+  try {
+    endpoints = await discoverMcpEndpoints(normalizeShopifyShopDomain(req.session.shop_url));
+  } catch (err) {
+    return res.status(400).send(err.message);
+  }
+  if (!endpoints.auth) return res.status(500).send('Auth endpoints not discovered for this shop');
   
   const tokenParams = new URLSearchParams({
     client_id: req.session.shopify_client_id || process.env.SHOPIFY_CLIENT_ID,
@@ -203,8 +242,13 @@ app.get('/auth/callback', async (req, res) => {
     const response = await fetch(endpoints.auth.token_endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: tokenParams.toString()
+      body: tokenParams.toString(),
+      redirect: 'manual',
     });
+
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error('Shopify token endpoint redirect rejected');
+    }
 
     const data = await response.json();
     if (data.error) throw new Error(data.error_description || data.error);
@@ -259,11 +303,41 @@ app.post('/webhooks', (req, res) => {
 
   const topic = req.headers['x-shopify-topic'] || 'unknown';
   const shop  = req.headers['x-shopify-shop-domain'] || 'unknown';
-  console.log(`Shopify webhook received: topic=${topic} shop=${shop}`);
+  const forwardUrl = process.env.SHOPIFY_WEBHOOK_FORWARD_URL;
+  if (!forwardUrl) {
+    // The bridge is not the source of truth for tenant mapping or catalog
+    // state. Acking here would permanently discard a valid Shopify event.
+    console.error('SHOPIFY_WEBHOOK_FORWARD_URL is not configured; webhook was not acknowledged', { topic, shop });
+    return res.status(503).send('Webhook processing is not configured');
+  }
 
-  // TODO: dispatch to topic-specific handlers (e.g. orders/create, products/update)
-
-  res.status(200).send('OK');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  fetch(forwardUrl, {
+    method: 'POST',
+    headers: {
+      'content-type': req.get('content-type') || 'application/json',
+      'x-shopify-hmac-sha256': hmacHeader,
+      'x-shopify-topic': topic,
+      'x-shopify-shop-domain': shop,
+      ...(req.get('x-shopify-webhook-id') ? { 'x-shopify-webhook-id': req.get('x-shopify-webhook-id') } : {}),
+    },
+    body: req.rawBody,
+    redirect: 'manual',
+    signal: controller.signal,
+  }).then((response) => {
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error('Webhook forward redirect rejected');
+    }
+    if (!response.ok) {
+      throw new Error(`Webhook forward returned HTTP ${response.status}`);
+    }
+    console.log('Shopify webhook queued', { topic, shop });
+    return res.status(200).send('OK');
+  }).catch((err) => {
+    console.error('Shopify webhook forwarding failed', { topic, shop, error: err.name });
+    return res.status(503).send('Webhook queue unavailable');
+  }).finally(() => clearTimeout(timeout));
 });
 
 // Health check
@@ -282,5 +356,5 @@ app.get('/', (_req, res) => {
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 app.listen(port, () => {
-  console.log(`Shopify MCP Hub running on port ${port}`);
+  console.log('Shopify MCP Hub running', { port });
 });

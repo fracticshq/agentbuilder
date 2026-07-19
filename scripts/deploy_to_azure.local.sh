@@ -11,6 +11,9 @@ set -euo pipefail
 #   ./scripts/deploy_to_azure.local.sh --service all --env-file .env.azure
 #   ./scripts/deploy_to_azure.local.sh --service all --show-secrets
 #   ./scripts/deploy_to_azure.local.sh --service all --use-existing-secrets
+#   ./scripts/deploy_to_azure.local.sh --service api --no-create --use-existing-secrets \
+#     --release-evidence /tmp/release.json --sbom /tmp/agentbuilder.sbom.cdx.json \
+#     --ci-run-url https://github.example/org/repo/actions/runs/123 --approver release-owner
 #
 # Required shell/env values:
 #   SUBSCRIPTION_ID RESOURCE_GROUP ACR_NAME ACA_ENV
@@ -25,6 +28,17 @@ TAG=""
 SHOW_SECRETS=false
 DRY_RUN=false
 USE_EXISTING_SECRETS=false
+RELEASE_EVIDENCE_OUTPUT=""
+RELEASE_SBOM=""
+RELEASE_CI_RUN_URL=""
+RELEASE_APPROVER=""
+
+# Bash 3 compatible image cache. The `all` deployment path re-applies the API
+# after dependent URLs exist; it must reuse the exact digest instead of
+# rebuilding the same mutable tag.
+BUILT_IMAGE_NAMES=()
+BUILT_IMAGE_REFS=()
+LAST_BUILT_IMAGE_REF=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -55,6 +69,22 @@ while [[ $# -gt 0 ]]; do
     --use-existing-secrets)
       USE_EXISTING_SECRETS=true
       shift
+      ;;
+    --release-evidence)
+      RELEASE_EVIDENCE_OUTPUT="${2:?Missing value for --release-evidence}"
+      shift 2
+      ;;
+    --sbom)
+      RELEASE_SBOM="${2:?Missing value for --sbom}"
+      shift 2
+      ;;
+    --ci-run-url)
+      RELEASE_CI_RUN_URL="${2:?Missing value for --ci-run-url}"
+      shift 2
+      ;;
+    --approver)
+      RELEASE_APPROVER="${2:?Missing value for --approver}"
+      shift 2
       ;;
     --dry-run)
       DRY_RUN=true
@@ -100,6 +130,12 @@ require_var RESOURCE_GROUP
 require_var ACR_NAME
 require_var ACA_ENV
 
+if [[ -n "$RELEASE_EVIDENCE_OUTPUT" ]]; then
+  [[ -n "$RELEASE_SBOM" ]] || { echo "--sbom is required with --release-evidence" >&2; exit 1; }
+  [[ -n "$RELEASE_CI_RUN_URL" ]] || { echo "--ci-run-url is required with --release-evidence" >&2; exit 1; }
+  [[ -n "$RELEASE_APPROVER" ]] || { echo "--approver is required with --release-evidence" >&2; exit 1; }
+fi
+
 LOCATION="${LOCATION:-eastus}"
 API_APP="${API_APP:-agentbuilder-api}"
 ADMIN_APP="${ADMIN_APP:-agentbuilder-admin}"
@@ -130,8 +166,6 @@ fi
 
 az account set --subscription "$SUBSCRIPTION_ID"
 ACR_LOGIN_SERVER="$(az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --query loginServer -o tsv)"
-ACR_USERNAME="$(az acr credential show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --query username -o tsv)"
-ACR_PASSWORD="$(az acr credential show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --query passwords[0].value -o tsv)"
 
 secret_name_for() {
   echo "$1" | tr '[:upper:]_' '[:lower:]-'
@@ -327,6 +361,13 @@ create_app_if_missing() {
     exit 1
   fi
 
+  # Existing applications keep their pre-provisioned registry identity. Only a
+  # local/bootstrap creation path needs the ACR admin credential, so protected
+  # OIDC releases never retrieve a registry password.
+  local acr_username acr_password
+  acr_username="$(az acr credential show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --query username -o tsv)"
+  acr_password="$(az acr credential show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --query passwords[0].value -o tsv)"
+
   echo "Creating Container App: $app"
   az containerapp create \
     --name "$app" \
@@ -336,8 +377,8 @@ create_app_if_missing() {
     --target-port "$port" \
     --ingress external \
     --registry-server "$ACR_LOGIN_SERVER" \
-    --registry-username "$ACR_USERNAME" \
-    --registry-password "$ACR_PASSWORD" \
+    --registry-username "$acr_username" \
+    --registry-password "$acr_password" \
     --cpu "$cpu" \
     --memory "$memory" \
     --min-replicas 1 \
@@ -348,12 +389,22 @@ build_image() {
   local image_name="$1"
   local dockerfile="$2"
   local context="$3"
-  local image_ref="$ACR_LOGIN_SERVER/$image_name:$TAG"
+  local image_ref=""
+  local digest=""
+  local index
+
+  for index in "${!BUILT_IMAGE_NAMES[@]}"; do
+    if [[ "${BUILT_IMAGE_NAMES[$index]}" == "$image_name" ]]; then
+      echo "Reusing already-built image: ${BUILT_IMAGE_REFS[$index]}" >&2
+      LAST_BUILT_IMAGE_REF="${BUILT_IMAGE_REFS[$index]}"
+      return 0
+    fi
+  done
 
   if [[ "$USE_EXISTING_IMAGE" == true ]]; then
-    echo "Using existing image: $image_ref" >&2
+    echo "Using existing image tag: $ACR_LOGIN_SERVER/$image_name:$TAG" >&2
   else
-    echo "Building image: $image_ref" >&2
+    echo "Building image tag: $ACR_LOGIN_SERVER/$image_name:$TAG" >&2
     az acr build \
       --registry "$ACR_NAME" \
       --image "$image_name:$TAG" \
@@ -361,7 +412,16 @@ build_image() {
       "$context" >&2
   fi
 
-  echo "$image_ref"
+  digest="$(az acr repository show --name "$ACR_NAME" --image "$image_name:$TAG" --query digest -o tsv)"
+  if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Could not resolve an immutable digest for $image_name:$TAG" >&2
+    exit 1
+  fi
+  image_ref="$ACR_LOGIN_SERVER/$image_name@$digest"
+  BUILT_IMAGE_NAMES+=("$image_name")
+  BUILT_IMAGE_REFS+=("$image_ref")
+  echo "Promoting immutable image: $image_ref" >&2
+  LAST_BUILT_IMAGE_REF="$image_ref"
 }
 
 update_image() {
@@ -394,10 +454,12 @@ url_for() {
 
 deploy_api() {
   local image
-  image="$(build_image nova-api apps/api/Dockerfile apps/api)"
+  build_image nova-api apps/api/Dockerfile .
+  image="$LAST_BUILT_IMAGE_REF"
   ensure_local_secret_values_for_new_app "$API_APP" \
     SECRET_KEY ADMIN_API_KEY SETTINGS_ENCRYPTION_KEY PII_ENCRYPTION_KEY \
-    MONGODB_URI REDIS_URL VOYAGE_API_KEY AZURE_OPENAI_API_KEY STRAPI_API_TOKEN
+    MONGODB_URI REDIS_URL VOYAGE_API_KEY AZURE_OPENAI_API_KEY STRAPI_API_TOKEN \
+    MCP_SERVICE_AUTH_TOKEN
   create_app_if_missing "$API_APP" "$image" 8000 1.0 2Gi
   update_image "$API_APP" "$image"
 
@@ -411,7 +473,7 @@ deploy_api() {
 
   ENVIRONMENT="${ENVIRONMENT:-production}"
   API_PORT="${API_PORT:-8000}"
-  REQUIRE_REDIS="${REQUIRE_REDIS:-false}"
+  REQUIRE_REDIS="${REQUIRE_REDIS:-true}"
   DEFAULT_LLM_PROVIDER="${DEFAULT_LLM_PROVIDER:-azure_openai}"
   VECTOR_BACKEND="${VECTOR_BACKEND:-atlas}"
   VECTOR_INDEX_NAME="${VECTOR_INDEX_NAME:-vector_index}"
@@ -425,11 +487,13 @@ deploy_api() {
 
   ensure_secret_envs_available "$API_APP" \
     SECRET_KEY ADMIN_API_KEY SETTINGS_ENCRYPTION_KEY PII_ENCRYPTION_KEY \
-    MONGODB_URI REDIS_URL VOYAGE_API_KEY AZURE_OPENAI_API_KEY STRAPI_API_TOKEN
+    MONGODB_URI REDIS_URL VOYAGE_API_KEY AZURE_OPENAI_API_KEY STRAPI_API_TOKEN \
+    MCP_SERVICE_AUTH_TOKEN
 
   set_secret_envs "$API_APP" \
     SECRET_KEY ADMIN_API_KEY SETTINGS_ENCRYPTION_KEY PII_ENCRYPTION_KEY \
     MONGODB_URI REDIS_URL VOYAGE_API_KEY AZURE_OPENAI_API_KEY STRAPI_API_TOKEN \
+    MCP_SERVICE_AUTH_TOKEN QDRANT_API_KEY \
     OPENAI_API_KEY QWEN_API_KEY FIRECRAWL_API_KEY ATLAS_PRIVATE_KEY
 
   set_plain_envs "$API_APP" \
@@ -439,8 +503,9 @@ deploy_api() {
     AZURE_OPENAI_MODEL AZURE_OPENAI_DEPLOYMENT AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_VERSION \
     AZURE_OPENAI_ACCOUNT_NAME AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP \
     ENABLE_HUMAN_TAKEOVER \
+    MALWARE_SCAN_MODE MALWARE_SCAN_HOST MALWARE_SCAN_PORT MALWARE_SCAN_TIMEOUT_SECONDS \
     VOYAGE_BASE_URL VOYAGE_MODEL VOYAGE_RERANK_MODEL \
-    QDRANT_URL QDRANT_API_KEY QDRANT_COLLECTION_PREFIX \
+    QDRANT_URL QDRANT_COLLECTION_PREFIX \
     ATLAS_PROJECT_ID ATLAS_CLUSTER_NAME ATLAS_PUBLIC_KEY ATLAS_AUTO_CREATE_VECTOR_INDEXES
 
   wait_for_latest_revision_running "$API_APP"
@@ -448,7 +513,8 @@ deploy_api() {
 
 deploy_admin() {
   local image
-  image="$(build_image nova-admin apps/admin/Dockerfile apps/admin)"
+  build_image nova-admin apps/admin/Dockerfile apps/admin
+  image="$LAST_BUILT_IMAGE_REF"
   create_app_if_missing "$ADMIN_APP" "$image" 3000 0.5 1Gi
   update_image "$ADMIN_APP" "$image"
 
@@ -460,7 +526,8 @@ deploy_admin() {
 
 deploy_widget() {
   local image
-  image="$(build_image nova-widget apps/widget/Dockerfile apps/widget)"
+  build_image nova-widget apps/widget/Dockerfile apps/widget
+  image="$LAST_BUILT_IMAGE_REF"
   create_app_if_missing "$WIDGET_APP" "$image" 5174 0.5 1Gi
   update_image "$WIDGET_APP" "$image"
 
@@ -471,20 +538,22 @@ deploy_widget() {
 
 deploy_shopify() {
   local image
-  image="$(build_image nova-shopify-mcp apps/shopify-mcp/Dockerfile apps/shopify-mcp)"
-  ensure_local_secret_values_for_new_app "$SHOPIFY_APP" SESSION_SECRET REDIS_URL
+  build_image nova-shopify-mcp apps/shopify-mcp/Dockerfile apps/shopify-mcp
+  image="$LAST_BUILT_IMAGE_REF"
+  ensure_local_secret_values_for_new_app "$SHOPIFY_APP" SESSION_SECRET REDIS_URL MCP_SERVICE_AUTH_TOKEN
   create_app_if_missing "$SHOPIFY_APP" "$image" 3005 0.5 1Gi
   update_image "$SHOPIFY_APP" "$image"
 
   NODE_ENV="${NODE_ENV:-production}"
   PORT="${PORT:-3005}"
   API_URL="${API_URL:-$(url_for "$API_APP")}"
+  SHOPIFY_WEBHOOK_FORWARD_URL="${SHOPIFY_WEBHOOK_FORWARD_URL:-${API_URL:+$API_URL/api/v1/catalog/shopify/webhooks}}"
   local CORS_ALLOW_ORIGINS
   CORS_ALLOW_ORIGINS="${SHOPIFY_CORS_ALLOW_ORIGINS:-${CORS_ALLOW_ORIGINS:-$API_URL}}"
 
-  ensure_secret_envs_available "$SHOPIFY_APP" SESSION_SECRET REDIS_URL
-  set_secret_envs "$SHOPIFY_APP" SESSION_SECRET REDIS_URL
-  set_plain_envs "$SHOPIFY_APP" NODE_ENV PORT CORS_ALLOW_ORIGINS CONFIG_VERSION
+  ensure_secret_envs_available "$SHOPIFY_APP" SESSION_SECRET REDIS_URL MCP_SERVICE_AUTH_TOKEN
+  set_secret_envs "$SHOPIFY_APP" SESSION_SECRET REDIS_URL MCP_SERVICE_AUTH_TOKEN SHOPIFY_WEBHOOK_SECRET
+  set_plain_envs "$SHOPIFY_APP" NODE_ENV PORT CORS_ALLOW_ORIGINS CONFIG_VERSION SHOPIFY_WEBHOOKS_ENABLED SHOPIFY_WEBHOOK_FORWARD_URL
   wait_for_latest_revision_running "$SHOPIFY_APP"
 }
 
@@ -495,7 +564,8 @@ deploy_strapi() {
   fi
 
   local image
-  image="$(build_image nova-strapi "$STRAPI_ROOT/Dockerfile" "$STRAPI_ROOT")"
+  build_image nova-strapi "$STRAPI_ROOT/Dockerfile" "$STRAPI_ROOT"
+  image="$LAST_BUILT_IMAGE_REF"
   AGENTBUILDER_ADMIN_API_KEY="${AGENTBUILDER_ADMIN_API_KEY:-${ADMIN_API_KEY:-}}"
   ensure_local_secret_values_for_new_app "$STRAPI_APP" \
     DATABASE_PASSWORD STRAPI_API_TOKEN APP_KEYS API_TOKEN_SALT ADMIN_JWT_SECRET \
@@ -555,25 +625,45 @@ health_check() {
   shopify_url="$(url_for "$SHOPIFY_APP")"
   strapi_url="$(url_for "$STRAPI_APP")"
 
-  echo ""
-  echo "Quick checks:"
-  [[ -n "$api_url" ]] && curl -fsS "$api_url/health" >/dev/null && echo "  API health: ok" || true
-  [[ -n "$shopify_url" ]] && curl -fsS "$shopify_url/mcp" >/dev/null && echo "  Shopify MCP: ok" || true
-  [[ -n "$strapi_url" ]] && curl -fsSI "$strapi_url/admin" >/dev/null && echo "  Strapi admin: ok" || true
-  if [[ -n "$strapi_url" && -n "${STRAPI_API_TOKEN:-}" ]]; then
-    curl -fsS \
-      -H "Authorization: Bearer $STRAPI_API_TOKEN" \
-      "$strapi_url/api/session-sync/health" >/dev/null \
-      && echo "  Strapi sync auth: ok" || true
+  if [[ -z "$api_url" ]]; then
+    echo "API URL is unavailable; cannot prove deployment readiness." >&2
+    return 1
   fi
-  if [[ -n "$admin_url" && -n "$api_url" ]]; then
-    curl -fsS "$admin_url/runtime-config.js" | grep -q "$api_url" \
-      && echo "  Admin runtime API URL: ok" || true
+
+  local smoke_args=(--api-url "$api_url")
+  [[ -n "$admin_url" ]] && smoke_args+=(--admin-url "$admin_url")
+  [[ -n "$widget_url" ]] && smoke_args+=(--widget-url "$widget_url")
+  [[ -n "$shopify_url" ]] && smoke_args+=(--shopify-url "$shopify_url")
+  if [[ -n "$RELEASE_EVIDENCE_OUTPUT" ]]; then
+    RELEASE_SMOKE_REPORT="${RELEASE_EVIDENCE_OUTPUT%.json}.smoke.json"
+    smoke_args+=(--report "$RELEASE_SMOKE_REPORT")
   fi
-  if [[ -n "$widget_url" && -n "$api_url" ]]; then
-    curl -fsS "$widget_url/runtime-config.js" | grep -q "$api_url" \
-      && echo "  Widget runtime API URL: ok" || true
-  fi
+  python3 "$SCRIPT_DIR/smoke_production.py" "${smoke_args[@]}"
+}
+
+write_release_evidence() {
+  [[ -n "$RELEASE_EVIDENCE_OUTPUT" ]] || return 0
+  local commit
+  commit="$(git rev-parse HEAD)"
+  local evidence_args=(
+    --root "$ROOT_DIR" create
+    --output "$RELEASE_EVIDENCE_OUTPUT"
+    --sbom "$RELEASE_SBOM"
+    --smoke-report "$RELEASE_SMOKE_REPORT"
+    --commit "$commit"
+    --environment "${RELEASE_ENVIRONMENT:-production}"
+    --ci-run-url "$RELEASE_CI_RUN_URL"
+    --approved-by "$RELEASE_APPROVER"
+  )
+  local index
+  for index in "${!BUILT_IMAGE_NAMES[@]}"; do
+    evidence_args+=(--image "${BUILT_IMAGE_NAMES[$index]}=${BUILT_IMAGE_REFS[$index]}")
+  done
+  python3 "$SCRIPT_DIR/release_evidence.py" "${evidence_args[@]}"
+  python3 "$SCRIPT_DIR/release_evidence.py" --root "$ROOT_DIR" validate \
+    --evidence "$RELEASE_EVIDENCE_OUTPUT" \
+    --expected-commit "$commit" \
+    --require-smoke
 }
 
 case "$SERVICE" in
@@ -598,6 +688,7 @@ case "$SERVICE" in
 esac
 
 health_check
+write_release_evidence
 
 echo ""
 echo "Done. Image tag: $TAG"

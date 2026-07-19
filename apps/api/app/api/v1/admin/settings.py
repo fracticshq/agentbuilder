@@ -6,7 +6,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.auth.dependencies import require_dashboard_access
+from app.auth.dependencies import require_system_admin
 from app.dependencies import get_runtime_settings_service
 from app.services.runtime_settings_service import (
     RuntimeSettingsService,
@@ -77,7 +77,7 @@ class RuntimeSettingsTestResponse(BaseModel):
 @router.get(
     "/runtime",
     response_model=RuntimeSettingsResponse,
-    dependencies=[Depends(require_dashboard_access)],
+    dependencies=[Depends(require_system_admin)],
 )
 async def list_runtime_settings(
     runtime_settings_service: RuntimeSettingsService = Depends(get_runtime_settings_service),
@@ -95,7 +95,7 @@ async def list_runtime_settings(
 @router.put(
     "/runtime",
     response_model=RuntimeSettingsUpdateResponse,
-    dependencies=[Depends(require_dashboard_access)],
+    dependencies=[Depends(require_system_admin)],
 )
 async def update_runtime_settings(
     request: RuntimeSettingsUpdateRequest,
@@ -116,7 +116,7 @@ async def update_runtime_settings(
 @router.post(
     "/runtime/test",
     response_model=RuntimeSettingsTestResponse,
-    dependencies=[Depends(require_dashboard_access)],
+    dependencies=[Depends(require_system_admin)],
 )
 async def test_runtime_settings(
     request: RuntimeSettingsTestRequest,

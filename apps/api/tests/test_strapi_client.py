@@ -3,6 +3,12 @@ import pytest
 from app.services.strapi_client import StrapiClient
 
 
+def test_blank_token_disables_strapi_sync_client():
+    client = StrapiClient("http://strapi.local", "")
+
+    assert client._enabled is False
+
+
 @pytest.mark.asyncio
 async def test_sync_saves_turn_messages_sequentially(monkeypatch):
     client = StrapiClient("http://strapi.local", "token")

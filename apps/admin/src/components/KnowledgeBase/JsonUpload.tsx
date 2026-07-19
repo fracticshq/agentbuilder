@@ -144,7 +144,7 @@ export default function JsonUpload({ contentType, onUpload, onBack, brandId = ''
     const items = validationResult.fullData;
 
     if (items.length > 0) {
-      process.env.NODE_ENV !== 'production' && console.log(`[JsonUpload] Passing ${items.length} items to mapper`);
+      import.meta.env.DEV && console.log('[JsonUpload] Passing items to mapper', { count: items.length });
       onUpload(items);
     }
   };
@@ -175,7 +175,7 @@ export default function JsonUpload({ contentType, onUpload, onBack, brandId = ''
 
   // Render new catalog tabs directly — they handle their own "Next" button
   if (uploadMethod === 'shopify') {
-    return <ShopifyTab brandId={brandId} onUpload={onUpload} onBack={() => setUploadMethod('file')} />;
+    return <ShopifyTab brandId={brandId} onBack={() => setUploadMethod('file')} />;
   }
   if (uploadMethod === 'json_url') {
     return <JsonUrlTab brandId={brandId} onUpload={onUpload} onBack={() => setUploadMethod('file')} />;

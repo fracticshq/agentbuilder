@@ -1,3 +1,4 @@
+import { vi, type Mock } from 'vitest';
 import React from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -6,9 +7,9 @@ import { api } from '../../api/client';
 import AgentConfigForm from './AgentConfigForm';
 import type { AgentStudioData } from './types';
 
-jest.mock('../../api/client', () => ({
+vi.mock('../../api/client', () => ({
   api: {
-    getArtifactTypes: jest.fn(),
+    getArtifactTypes: vi.fn(),
   },
 }));
 
@@ -101,7 +102,7 @@ function makeData(
   };
 }
 
-function renderForm(data = makeData(), onChange = jest.fn()) {
+function renderForm(data = makeData(), onChange = vi.fn()) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -127,11 +128,11 @@ function renderForm(data = makeData(), onChange = jest.fn()) {
 }
 
 beforeEach(() => {
-  (api.getArtifactTypes as jest.Mock).mockReset();
+  (api.getArtifactTypes as Mock).mockReset();
 });
 
 test('loads Lal Kitab artifacts for a legacy alias and persists a toggle without dropping options', async () => {
-  (api.getArtifactTypes as jest.Mock).mockResolvedValue([artifactDefinition]);
+  (api.getArtifactTypes as Mock).mockResolvedValue([artifactDefinition]);
   const onChange = renderForm(makeData('lal_kitab', {
     kundali_chart: { enabled: true, options: { style: 'north_indian' } },
   }));
@@ -149,7 +150,7 @@ test('loads Lal Kitab artifacts for a legacy alias and persists a toggle without
 });
 
 test('shows artifact API errors and retries instead of rendering an empty section', async () => {
-  (api.getArtifactTypes as jest.Mock)
+  (api.getArtifactTypes as Mock)
     .mockRejectedValueOnce(new Error('Request failed with status 503'))
     .mockResolvedValueOnce([artifactDefinition]);
   renderForm();

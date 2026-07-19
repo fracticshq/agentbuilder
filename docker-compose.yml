@@ -3,8 +3,10 @@ services:
   # ── FastAPI Backend ──────────────────────────────────────────────────────────
   api:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      # Build from the repository root so the image installs the same canonical
+      # local packages that development and CI test.
+      context: .
+      dockerfile: apps/api/Dockerfile
     image: agentbuilder-api
     container_name: agentbuilder-api
     ports:
@@ -15,12 +17,13 @@ services:
       # Only Docker-internal service URLs that differ from .env.docker defaults
       SHOPIFY_MCP_URL: "http://shopify:3005/mcp"
       QDRANT_URL: "http://qdrant:6333"
-      ENVIRONMENT: "${ENVIRONMENT:-production}"
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
       DEBUG: "${DEBUG:-false}"
       REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
-      REQUIRE_REDIS: "${REQUIRE_REDIS:-false}"
+      REQUIRE_REDIS: "${REQUIRE_REDIS:-true}"
       ENABLE_HUMAN_TAKEOVER: "${ENABLE_HUMAN_TAKEOVER:-true}"
       ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+      MALWARE_SCAN_MODE: "${MALWARE_SCAN_MODE:-disabled}"
       STRAPI_URL: "${DOCKER_STRAPI_URL:-http://host.docker.internal:1337}"
     depends_on:
       mongodb:
@@ -34,12 +37,152 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  # Uses the exact API image and encrypted-source configuration, but executes
+  # only Mongo-claimed ingestion jobs. It is safe to run more than one replica:
+  # lease tokens fence stale workers and expired leases are reclaimed.
+  ingestion-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: agentbuilder-api
+    container_name: agentbuilder-ingestion-worker
+    env_file:
+      - .env.docker
+    environment:
+      INGESTION_WORKER: "true"
+      SHOPIFY_MCP_URL: "http://shopify:3005/mcp"
+      QDRANT_URL: "http://qdrant:6333"
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      DEBUG: "${DEBUG:-false}"
+      REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
+      REQUIRE_REDIS: "false"
+      ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+      MALWARE_SCAN_MODE: "${MALWARE_SCAN_MODE:-disabled}"
+      STRAPI_URL: "${DOCKER_STRAPI_URL:-http://host.docker.internal:1337}"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  # Enforces first-party privacy retention policies across all brand databases.
+  # Subject deletion remains an explicit verified operation and does not wait
+  # for this periodic cleanup cycle.
+  privacy-retention-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: agentbuilder-api
+    container_name: agentbuilder-privacy-retention-worker
+    env_file:
+      - .env.docker
+    environment:
+      PRIVACY_RETENTION_WORKER: "true"
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      DEBUG: "${DEBUG:-false}"
+      REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
+      REQUIRE_REDIS: "false"
+      ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+      STRAPI_URL: "${DOCKER_STRAPI_URL:-http://host.docker.internal:1337}"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  # Processes the explicitly enabled, signed Strapi privacy contract. The
+  # default contract_pending mode only retains durable requests; it creates no
+  # network client or outbound traffic until the remote contract is deployed.
+  strapi-privacy-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: agentbuilder-api
+    container_name: agentbuilder-strapi-privacy-worker
+    env_file:
+      - .env.docker
+    environment:
+      STRAPI_PRIVACY_WORKER: "true"
+      STRAPI_PRIVACY_MODE: "${STRAPI_PRIVACY_MODE:-contract_pending}"
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      DEBUG: "${DEBUG:-false}"
+      REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
+      REQUIRE_REDIS: "false"
+      ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  # Processes Mongo-leased Shopify catalog snapshots and signed webhook
+  # lifecycle actions. It deliberately shares the API image so catalog product
+  # normalization cannot drift from the deployed request path.
+  catalog-sync-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: agentbuilder-api
+    container_name: agentbuilder-catalog-sync-worker
+    command: ["python", "-m", "app.workers.catalog_sync_worker"]
+    env_file:
+      - .env.docker
+    environment:
+      CATALOG_SYNC_WORKER: "true"
+      SHOPIFY_MCP_URL: "http://shopify:3005/mcp"
+      QDRANT_URL: "http://qdrant:6333"
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      DEBUG: "${DEBUG:-false}"
+      REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
+      REQUIRE_REDIS: "false"
+      ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+      MALWARE_SCAN_MODE: "${MALWARE_SCAN_MODE:-disabled}"
+      STRAPI_URL: "${DOCKER_STRAPI_URL:-http://host.docker.internal:1337}"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
 
   # ── React Admin Dashboard ────────────────────────────────────────────────────
   admin:
@@ -56,6 +199,11 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/"]
       interval: 30s
@@ -77,6 +225,11 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:5174/"]
       interval: 30s
@@ -93,16 +246,26 @@ services:
     container_name: agentbuilder-shopify
     ports:
       - "3005:3005"
+    # Reuse the API's secret source so the internal MCP token is identical on
+    # both sides of the boundary. Do not use compose interpolation with a
+    # fallback here: env_file values are not available to interpolation and a
+    # blank token must make the service fail closed.
+    env_file:
+      - .env.docker
     environment:
       NODE_ENV: production
       PORT: "3005"
       REDIS_URL: "redis://redis:6379"
-      SESSION_SECRET: "${SHOPIFY_SESSION_SECRET:-local-shopify-session-secret-change-me}"
       CORS_ALLOW_ORIGINS: "${SHOPIFY_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://localhost:8000}"
     depends_on:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3005/health"]
       interval: 30s
@@ -112,13 +275,18 @@ services:
 
   # ── MongoDB ──────────────────────────────────────────────────────────────────
   mongodb:
-    image: mongo:7
+    image: mongo:7@sha256:d5b3ca8c3f3cdce78d44870dc0871b76d5235e9b2ad4ea6bea5d1fbff8027703
     container_name: agentbuilder-mongodb
     # Port not exposed to host in production. To connect with Compass locally,
     # temporarily add: ports: ["27017:27017"]
     volumes:
       - mongo_data:/data/db
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
@@ -128,13 +296,18 @@ services:
 
   # ── Redis ────────────────────────────────────────────────────────────────────
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     container_name: agentbuilder-redis
     # Port not exposed to host in production. To inspect locally,
     # temporarily add: ports: ["6379:6379"]
     volumes:
       - redis_data:/data
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -143,13 +316,20 @@ services:
 
   # ── Local Vector DB ─────────────────────────────────────────────────────────
   qdrant:
-    image: qdrant/qdrant:v1.12.5
+    image: qdrant/qdrant:v1.12.5@sha256:05fecce7dce45d1254e0468bc037e8210e187fd56fa847688b012293d5f08aae
     container_name: agentbuilder-qdrant
-    ports:
-      - "6333:6333"
+    environment:
+      # Qdrant stays on the compose-only network. The API key protects the
+      # service even if a future deployment attaches another network.
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY must be set in .env.docker}"
     volumes:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
 
 volumes:
   mongo_data:

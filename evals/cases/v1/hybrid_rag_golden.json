@@ -1,0 +1,178 @@
+{
+  "schema_version": "1.0",
+  "suite": "hybrid_rag_golden",
+  "metric_k": 3,
+  "metric_floors": {
+    "recall_at_k": 1.0,
+    "mrr": 1.0,
+    "ndcg_at_k": 1.0
+  },
+  "evidence_gate": {
+    "name": "deterministic_claim_support",
+    "kind": "deterministic_proxy",
+    "description": "Curated retrieval relevance is a deterministic proxy for claim support; this is not an LLM judge or a generative faithfulness measurement."
+  },
+  "cases": [
+    {
+      "id": "rrf-warranty-ranking",
+      "query": "What warranty coverage applies to a studio speaker?",
+      "config": {
+        "rrf_k": 60,
+        "max_chunks": 3,
+        "dedup_enabled": false
+      },
+      "backends": {
+        "vector": [
+          {
+            "chunk_id": "warranty-coverage",
+            "doc_id": "warranty-policy",
+            "content": "Studio speakers include three years of warranty coverage.",
+            "score": 0.98,
+            "content_type": "faq",
+            "metadata": {}
+          },
+          {
+            "chunk_id": "warranty-general-care",
+            "doc_id": "speaker-care-guide",
+            "content": "Keep speakers dry and clean them with a soft cloth.",
+            "score": 0.94,
+            "content_type": "guide",
+            "metadata": {}
+          },
+          {
+            "chunk_id": "warranty-registration",
+            "doc_id": "warranty-registration",
+            "content": "Register the product with its serial number to simplify service.",
+            "score": 0.91,
+            "content_type": "faq",
+            "metadata": {}
+          }
+        ],
+        "bm25": [
+          {
+            "chunk_id": "warranty-registration",
+            "doc_id": "warranty-registration",
+            "content": "Register the product with its serial number to simplify service.",
+            "score": 12.0,
+            "content_type": "faq",
+            "metadata": {}
+          },
+          {
+            "chunk_id": "warranty-coverage",
+            "doc_id": "warranty-policy",
+            "content": "Studio speakers include three years of warranty coverage.",
+            "score": 11.2,
+            "content_type": "faq",
+            "metadata": {}
+          }
+        ]
+      },
+      "expected_retrieval_status": "evidence",
+      "ranking": {
+        "exclude_from_denominators": false,
+        "qrels": {
+          "warranty-coverage": 3,
+          "warranty-registration": 2,
+          "warranty-general-care": 0
+        },
+        "expected_chunk_ids": [
+          "warranty-coverage",
+          "warranty-registration",
+          "warranty-general-care"
+        ]
+      }
+    },
+    {
+      "id": "structured-sku-product-dedup",
+      "query": "Show studio speaker products.",
+      "config": {
+        "rrf_k": 60,
+        "max_chunks": 3,
+        "dedup_enabled": true
+      },
+      "backends": {
+        "vector": [
+          {
+            "chunk_id": "product-speaker-main",
+            "doc_id": "catalog-vector-100",
+            "content": "Studio Speaker 100 with balanced sound.",
+            "score": 0.98,
+            "content_type": "product",
+            "metadata": {
+              "product_data": {
+                "sku": "SPK-100"
+              }
+            }
+          },
+          {
+            "chunk_id": "product-speaker-mini",
+            "doc_id": "catalog-vector-200",
+            "content": "Studio Speaker Mini for compact rooms.",
+            "score": 0.95,
+            "content_type": "product",
+            "metadata": {
+              "product_data": {
+                "sku": "SPK-200"
+              }
+            }
+          }
+        ],
+        "bm25": [
+          {
+            "chunk_id": "product-speaker-alias",
+            "doc_id": "catalog-bm25-100",
+            "content": "Studio Speaker 100, SKU SPK-100.",
+            "score": 15.0,
+            "content_type": "product",
+            "metadata": {
+              "sku": " spk-100 "
+            }
+          },
+          {
+            "chunk_id": "product-speaker-mini",
+            "doc_id": "catalog-bm25-200",
+            "content": "Studio Speaker Mini for compact rooms.",
+            "score": 14.2,
+            "content_type": "product",
+            "metadata": {
+              "product_data": {
+                "sku": "SPK-200"
+              }
+            }
+          }
+        ]
+      },
+      "expected_retrieval_status": "evidence",
+      "ranking": {
+        "exclude_from_denominators": false,
+        "qrels": {
+          "product-speaker-main": 2,
+          "product-speaker-mini": 3
+        },
+        "expected_chunk_ids": [
+          "product-speaker-mini",
+          "product-speaker-main"
+        ]
+      }
+    },
+    {
+      "id": "healthy-no-evidence",
+      "query": "What is the lunar warranty for an imaginary product?",
+      "config": {
+        "rrf_k": 60,
+        "max_chunks": 3,
+        "dedup_enabled": true
+      },
+      "backends": {
+        "vector": [],
+        "bm25": []
+      },
+      "expected_retrieval_status": "no_evidence",
+      "ranking": {
+        "exclude_from_denominators": true,
+        "qrels": {},
+        "expected_chunk_ids": []
+      }
+    }
+  ]
+}

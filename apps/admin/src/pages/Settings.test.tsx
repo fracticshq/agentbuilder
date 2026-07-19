@@ -1,3 +1,4 @@
+import { vi, type Mocked } from 'vitest';
 import React from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -5,28 +6,28 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import Settings from './Settings';
 import { runtimeSettingsApi } from '../api/client';
 
-jest.mock('axios', () => ({
+vi.mock('axios', () => ({
   __esModule: true,
   default: {
-    isAxiosError: jest.fn(() => false),
-    create: jest.fn(() => ({
+    isAxiosError: vi.fn(() => false),
+    create: vi.fn(() => ({
       interceptors: {
-        request: { use: jest.fn() },
-        response: { use: jest.fn() },
+        request: { use: vi.fn() },
+        response: { use: vi.fn() },
       },
     })),
   },
 }));
 
-jest.mock('../api/client', () => ({
+vi.mock('../api/client', () => ({
   runtimeSettingsApi: {
-    get: jest.fn(),
-    update: jest.fn(),
-    test: jest.fn(),
+    get: vi.fn(),
+    update: vi.fn(),
+    test: vi.fn(),
   },
 }));
 
-const mockRuntimeSettingsApi = runtimeSettingsApi as jest.Mocked<typeof runtimeSettingsApi>;
+const mockRuntimeSettingsApi = runtimeSettingsApi as Mocked<typeof runtimeSettingsApi>;
 
 function renderSettings() {
   const queryClient = new QueryClient({

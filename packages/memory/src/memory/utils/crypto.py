@@ -4,7 +4,7 @@ Cryptography Utilities - AES-256-GCM encryption for PII vaulting
 
 import base64
 import os
-from typing import Tuple
+from typing import Dict, Tuple
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -29,8 +29,12 @@ class CryptoUtils:
     KEY_SIZE = 32  # 256 bits
     IV_SIZE = 12   # 96 bits (recommended for GCM)
     SALT_SIZE = 16  # 128 bits
-    
-    def __init__(self, master_key: str):
+    ALGORITHM = "AES-256-GCM"
+    KDF = "PBKDF2-HMAC-SHA256"
+    KDF_ITERATIONS = 100000
+    ENCRYPTION_VERSION = 1
+
+    def __init__(self, master_key: str, key_id: str = "default", key_version: int = 1):
         """
         Initialize crypto utils with master key.
         
@@ -41,9 +45,15 @@ class CryptoUtils:
             CryptoError: If master key is invalid
         """
         try:
-            self.master_key = base64.b64decode(master_key)
+            self.master_key = base64.b64decode(master_key, validate=True)
             if len(self.master_key) != self.KEY_SIZE:
                 raise CryptoError(f"Master key must be {self.KEY_SIZE} bytes")
+            if not key_id:
+                raise CryptoError("Key ID must not be empty")
+            if key_version < 1:
+                raise CryptoError("Key version must be at least 1")
+            self.key_id = key_id
+            self.key_version = key_version
         except Exception as e:
             raise CryptoError(f"Invalid master key: {e}")
     
@@ -58,7 +68,7 @@ class CryptoUtils:
         key = os.urandom(CryptoUtils.KEY_SIZE)
         return base64.b64encode(key).decode('utf-8')
     
-    def _derive_key(self, salt: bytes) -> bytes:
+    def _derive_key(self, salt: bytes, iterations: int | None = None) -> bytes:
         """
         Derive an encryption key from master key using PBKDF2.
         
@@ -68,11 +78,15 @@ class CryptoUtils:
         Returns:
             Derived key (32 bytes)
         """
+        iterations = iterations if iterations is not None else self.KDF_ITERATIONS
+        if iterations < 1:
+            raise CryptoError("PBKDF2 iteration count must be at least 1")
+
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=self.KEY_SIZE,
             salt=salt,
-            iterations=100000,  # NIST recommendation
+            iterations=iterations,
             backend=default_backend()
         )
         return kdf.derive(self.master_key)
@@ -118,7 +132,14 @@ class CryptoUtils:
             logger.error("Encryption failed", error=str(e))
             raise CryptoError(f"Encryption failed: {e}")
     
-    def decrypt(self, ciphertext_b64: str, iv_b64: str, salt_b64: str) -> str:
+    def decrypt(
+        self,
+        ciphertext_b64: str,
+        iv_b64: str,
+        salt_b64: str,
+        *,
+        kdf_iterations: int | None = None,
+    ) -> str:
         """
         Decrypt ciphertext using AES-256-GCM.
         
@@ -140,7 +161,7 @@ class CryptoUtils:
             salt = base64.b64decode(salt_b64)
             
             # Derive decryption key (same process as encryption)
-            key = self._derive_key(salt)
+            key = self._derive_key(salt, kdf_iterations)
             
             # Decrypt with AES-GCM
             aesgcm = AESGCM(key)
@@ -206,11 +227,16 @@ class CryptoUtils:
         return decrypted
 
 
-# Singleton instance
-_crypto_instance = None
+# Cache by key identity so separate vaults never accidentally reuse an
+# unrelated master key or key version in the same process.
+_crypto_instances: Dict[tuple[str, str, int], CryptoUtils] = {}
 
 
-def get_crypto_utils(master_key: str = None) -> CryptoUtils:
+def get_crypto_utils(
+    master_key: str = None,
+    key_id: str = "default",
+    key_version: int = 1,
+) -> CryptoUtils:
     """
     Get or create CryptoUtils singleton.
     
@@ -220,11 +246,11 @@ def get_crypto_utils(master_key: str = None) -> CryptoUtils:
     Returns:
         CryptoUtils instance
     """
-    global _crypto_instance
-    
-    if _crypto_instance is None:
-        if master_key is None:
-            raise CryptoError("Master key required for first initialization")
-        _crypto_instance = CryptoUtils(master_key)
-    
-    return _crypto_instance
+    if master_key is None:
+        raise CryptoError("Master key is required")
+
+    cache_key = (master_key, key_id, key_version)
+    if cache_key not in _crypto_instances:
+        _crypto_instances[cache_key] = CryptoUtils(master_key, key_id, key_version)
+
+    return _crypto_instances[cache_key]

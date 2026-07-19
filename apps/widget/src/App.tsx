@@ -23,10 +23,22 @@ declare global {
 }
 
 const API_BASE = window.__APP_CONFIG__?.API_BASE_URL || import.meta.env.VITE_API_BASE_URL || window.location.origin;
-const WS_BASE = API_BASE.replace(/^http/, 'ws');
 const apiClient = new APIClient(API_BASE);
 const wsClient = new WebSocketClient(API_BASE);
 const isEmbedded = window.parent !== window || new URLSearchParams(window.location.search).get('embedded') === '1';
+
+function getEmbeddingParentOrigin(): string | null {
+  if (window.parent === window || !document.referrer) {
+    return null;
+  }
+
+  try {
+    const origin = new URL(document.referrer).origin;
+    return origin === 'null' ? null : origin;
+  } catch {
+    return null;
+  }
+}
 
 function createSecureClientId(prefix: string): string {
   if (window.crypto?.randomUUID) {
@@ -37,22 +49,6 @@ function createSecureClientId(prefix: string): string {
   window.crypto.getRandomValues(bytes);
   const value = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
   return `${prefix}_${value}`;
-}
-
-function getControlSecretStorageKey(conversationId: string): string {
-  return `agent_widget_control_secret_${conversationId}`;
-}
-
-function getOrCreateControlSecret(conversationId: string): string {
-  const storageKey = getControlSecretStorageKey(conversationId);
-  const existingSecret = sessionStorage.getItem(storageKey);
-  if (existingSecret) {
-    return existingSecret;
-  }
-
-  const secret = createSecureClientId('control');
-  sessionStorage.setItem(storageKey, secret);
-  return secret;
 }
 
 function getWidgetSessionStorageKey(agentId: string): string {
@@ -213,11 +209,14 @@ function App({ config }: AppProps) {
   React.useEffect(() => {
     if (!isEmbedded) return;
 
+    const parentOrigin = getEmbeddingParentOrigin();
+    if (!parentOrigin) return;
+
     window.parent.postMessage({
       type: 'agentbuilder-widget-state',
       isOpen,
       isExpanded,
-    }, '*');
+    }, parentOrigin);
   }, [isOpen, isExpanded]);
 
   // ── Widget control channel (human takeover) ───────────────────
@@ -232,20 +231,26 @@ function App({ config }: AppProps) {
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
     let destroyed = false;
     let reconnectDelay = 1_000;
-    const controlSecret = getOrCreateControlSecret(conversationId);
+    const sessionToken = apiClient.getSessionToken();
+    if (!sessionToken) {
+      setHumanInControl(false);
+      return;
+    }
+    const controlWsBase = configuredApiBase.replace(/^http/, 'ws');
 
     const connect = () => {
       if (destroyed) return;
-      const params = new URLSearchParams({
-        agent_id: agentId,
-        control_secret: controlSecret,
-      });
-      ws = new WebSocket(`${WS_BASE}/api/v1/messages/ws/widget/${conversationId}?${params.toString()}`);
+      // The token travels in a WebSocket subprotocol rather than the URL so it
+      // is not copied into browser, proxy, or application access logs.
+      ws = new WebSocket(
+        `${controlWsBase}/api/v1/messages/ws/widget/${encodeURIComponent(conversationId)}`,
+        ['widget-session', sessionToken],
+      );
       controlChannelRef.current = ws;
 
       ws.onopen = () => {
         reconnectDelay = 1_000;
-        ws!.send(JSON.stringify({ type: 'register', agent_id: agentId }));
+        ws!.send(JSON.stringify({ type: 'register' }));
         heartbeat = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'ping' }));
@@ -303,7 +308,7 @@ function App({ config }: AppProps) {
       controlChannelRef.current = null;
       setHumanInControl(false);
     };
-  }, [conversationId, agentId, humanTakeoverEnabled, setHumanInControl]);
+  }, [conversationId, agentId, configuredApiBase, humanTakeoverEnabled, setHumanInControl, addMessage]);
 
   // ── Establish/resume a server-issued, signed session ─────────
   // The signed token is retained only in tab-scoped sessionStorage. The API
@@ -356,6 +361,7 @@ function App({ config }: AppProps) {
       actor_id: userId,
       agent_id: agentId,
       conversation_id: conversationId,
+      sessionToken: apiClient.getSessionToken(),
       page_context: extractPageContext(),
     });
     setConvStartEvent(null);
@@ -422,6 +428,7 @@ function App({ config }: AppProps) {
         actor_id: currentUserId,
         agent_id: agentId,
         conversation_id: currentConvId,
+        sessionToken: apiClient.getSessionToken(),
         page_context: extractPageContext(),
       });
 
@@ -477,6 +484,7 @@ function App({ config }: AppProps) {
         actor_id: agentId,
         agent_id: agentId,
         conversation_id: currentConvId,
+        sessionToken: apiClient.getSessionToken(),
       });
     } catch (err) {
       console.error('[Widget] Chat error:', err);

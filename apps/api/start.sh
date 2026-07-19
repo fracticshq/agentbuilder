@@ -53,15 +53,16 @@ else
     echo -e "${GREEN}✓ Environment configuration found${NC}"
 fi
 
-# Set PYTHONPATH for monorepo local packages. requirements.txt only installs
-# third-party dependencies; commons/llm/memory/retrieval/tools/agent_runtime
-# are local packages under the repo.
+# Set PYTHONPATH for the canonical monorepo packages. requirements.txt only
+# installs third-party dependencies; shared application code lives exclusively
+# under the repository-root packages/ tree.
 PACKAGE_PATHS=""
 for package in commons llm memory retrieval tools agent_runtime; do
     if [ -d "${REPO_DIR}/packages/${package}/src" ]; then
         PACKAGE_PATHS="${PACKAGE_PATHS}:${REPO_DIR}/packages/${package}/src"
-    elif [ -d "${API_DIR}/packages/${package}/src" ]; then
-        PACKAGE_PATHS="${PACKAGE_PATHS}:${API_DIR}/packages/${package}/src"
+    else
+        echo -e "${RED}✗ Canonical package missing: ${REPO_DIR}/packages/${package}${NC}"
+        exit 1
     fi
 done
 export PYTHONPATH="${API_DIR}${PACKAGE_PATHS}:${PYTHONPATH:-}"

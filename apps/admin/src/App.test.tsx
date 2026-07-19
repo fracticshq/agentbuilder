@@ -1,13 +1,14 @@
-jest.mock('axios', () => ({
+import { vi } from 'vitest';
+vi.mock('axios', () => ({
   __esModule: true,
   default: {
-    create: jest.fn(() => ({
+    create: vi.fn(() => ({
       interceptors: {
-        request: { use: jest.fn() },
-        response: { use: jest.fn() },
+        request: { use: vi.fn() },
+        response: { use: vi.fn() },
       },
-      post: jest.fn(),
-      get: jest.fn(),
+      post: vi.fn(),
+      get: vi.fn(),
     })),
   },
 }));
@@ -70,7 +71,7 @@ test('clears the stored auth session', () => {
 });
 
 test('emits a session changed event when auth session updates', () => {
-  const listener = jest.fn();
+  const listener = vi.fn();
   window.addEventListener(AUTH_SESSION_CHANGED_EVENT, listener);
 
   setStoredAuthSession(createAuthSession(tokenResponse, null));

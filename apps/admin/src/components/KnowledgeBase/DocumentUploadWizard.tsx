@@ -6,7 +6,7 @@ import DocumentFileUpload from './DocumentFileUpload';
 import { knowledgeApi } from '../../api/knowledge';
 import type { ContentType, KnowledgeFolderSelection, UploadDocumentResponse } from '../../types/knowledge';
 
-const isDev = process.env.NODE_ENV !== 'production';
+const isDev = import.meta.env.DEV;
 type StructuredContentType = Exclude<ContentType, 'document'>;
 
 interface WizardStep {
@@ -148,6 +148,7 @@ export default function DocumentUploadWizard({
         content_type: contentType as 'product' | 'dealer',
         items: itemsWithDefaults,
         brand_id: brandId,
+        agent_id: agentId,
         folder_id: selectedFolder?.id || undefined,
         folder_path: selectedFolder?.path || '/',
       });

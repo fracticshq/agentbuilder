@@ -7,6 +7,8 @@ conversation by supplying its id.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.auth.widget_session import (
@@ -15,6 +17,7 @@ from app.auth.widget_session import (
     encode_widget_session,
     issue_widget_session,
 )
+from commons.types.requests import MessageRequest
 
 
 def test_issue_and_decode_round_trip():
@@ -96,8 +99,15 @@ def client(monkeypatch):
     monkeypatch.setattr(
         messages_module.connection_manager,
         "get_system_db",
-        lambda: _FakeSystemDb([{"id": "agent-1", "status": "active"}]),
+        lambda: _FakeSystemDb([
+            {"id": "agent-1", "status": "active", "brand_id": "brand-1", "brand_slug": "brand-one"}
+        ]),
     )
+
+    async def bind_scope(**_kwargs):
+        return None
+
+    monkeypatch.setattr(messages_module.conversation_scope_store, "bind", bind_scope)
 
     app = FastAPI()
     app.include_router(messages_module.router, prefix="/api/v1/messages")
@@ -126,3 +136,130 @@ def test_session_endpoint_issues_token_for_active_agent(client):
 def test_session_endpoint_rejects_unknown_agent(client):
     resp = client.post("/api/v1/messages/session", json={"agent_id": "ghost"})
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_widget_control_requires_a_signed_session_bound_to_its_scope(monkeypatch):
+    from app.api.v1.endpoints import messages as messages_module
+    from app.services.conversation_scope_store import ConversationScope
+
+    token, session = issue_widget_session("agent-1")
+    websocket = SimpleNamespace(
+        headers={"sec-websocket-protocol": f"widget-session, {token}"},
+        closed=None,
+    )
+
+    async def close(*, code, reason):
+        websocket.closed = {"code": code, "reason": reason}
+
+    websocket.close = close
+
+    async def get_scope(*, conversation_id, user_id, agent_id):
+        assert conversation_id == session.conversation_id
+        assert user_id == session.user_id
+        assert agent_id == session.agent_id
+        return ConversationScope(
+            conversation_id=session.conversation_id,
+            user_id=session.user_id,
+            agent_id="agent-1",
+            brand_id="brand-1",
+            brand_slug="brand-one",
+        )
+
+    monkeypatch.setattr(messages_module.conversation_scope_store, "require_active_widget_scope", get_scope)
+
+    result = await messages_module._require_widget_control_scope(websocket, session.conversation_id)
+
+    assert result is not None
+    assert result[0] == session
+    assert websocket.closed is None
+
+
+@pytest.mark.asyncio
+async def test_widget_control_rejects_a_valid_token_for_another_conversation():
+    from app.api.v1.endpoints import messages as messages_module
+
+    token, _ = issue_widget_session("agent-1")
+    websocket = SimpleNamespace(
+        headers={"sec-websocket-protocol": f"widget-session, {token}"},
+        closed=None,
+    )
+
+    async def close(*, code, reason):
+        websocket.closed = {"code": code, "reason": reason}
+
+    websocket.close = close
+
+    result = await messages_module._require_widget_control_scope(websocket, "conv_other")
+
+    assert result is None
+    assert websocket.closed["code"] == 1008
+
+
+@pytest.mark.asyncio
+async def test_normal_widget_message_rejects_session_when_immutable_scope_is_invalid(monkeypatch):
+    from fastapi import HTTPException
+    from app.api.v1.endpoints import messages as messages_module
+    from app.services.conversation_scope_store import ConversationScopeAuthorizationError
+
+    token, _ = issue_widget_session("agent-1")
+
+    async def reject_scope(**_kwargs):
+        raise ConversationScopeAuthorizationError("agent moved brands")
+
+    monkeypatch.setattr(messages_module.conversation_scope_store, "require_active_widget_scope", reject_scope)
+    request = MessageRequest(message="hello", user_id="untrusted-user", agent_id="agent-1")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await messages_module._require_widget_session(request, token)
+
+    assert exc_info.value.status_code == 401
+    assert request.conversation_id is None
+
+
+@pytest.mark.asyncio
+async def test_admin_takeover_requires_operator_brand_scope(monkeypatch):
+    from app.api.v1.endpoints import messages as messages_module
+    from app.auth.models import UserRole
+    from app.services.conversation_scope_store import ConversationScope
+
+    websocket = SimpleNamespace(
+        headers={"sec-websocket-protocol": "bearer, dashboard-token"},
+        closed=None,
+    )
+
+    async def close(*, code, reason):
+        websocket.closed = {"code": code, "reason": reason}
+
+    websocket.close = close
+
+    operator = SimpleNamespace(
+        role=UserRole.OPERATOR,
+        has_permission=lambda permission: permission.value == "message:write",
+        has_brand_access=lambda brand_id: brand_id == "brand-1",
+    )
+
+    async def current_user(*_args, **_kwargs):
+        return operator
+
+    async def active_user(user):
+        return user
+
+    async def get_scope(_conversation_id):
+        return ConversationScope(
+            conversation_id="conv_1",
+            user_id="user_1",
+            agent_id="agent-1",
+            brand_id="brand-2",
+            brand_slug="brand-two",
+        )
+
+    monkeypatch.setattr(messages_module, "get_current_user", current_user)
+    monkeypatch.setattr(messages_module, "get_current_active_user", active_user)
+    monkeypatch.setattr(messages_module.conversation_scope_store, "get", get_scope)
+    monkeypatch.setattr(messages_module.connection_manager, "get_system_db", lambda: object())
+
+    result = await messages_module._require_admin_takeover_scope(websocket, "conv_1")
+
+    assert result is None
+    assert websocket.closed["reason"] == "Conversation is outside your scope"

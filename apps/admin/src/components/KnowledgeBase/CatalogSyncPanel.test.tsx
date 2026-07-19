@@ -1,23 +1,24 @@
+import { vi, type Mock } from 'vitest';
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import CatalogSyncPanel from './CatalogSyncPanel';
 import { catalogApi } from '../../api/catalog';
 
-jest.mock('../../api/catalog', () => ({
+vi.mock('../../api/catalog', () => ({
   catalogApi: {
-    getSyncConfig: jest.fn(),
-    updateSyncConfig: jest.fn(),
-    startSync: jest.fn(),
-    getJob: jest.fn(),
+    getSyncConfig: vi.fn(),
+    updateSyncConfig: vi.fn(),
+    startSync: vi.fn(),
+    getJob: vi.fn(),
   },
 }));
 
-const mockGetSyncConfig = catalogApi.getSyncConfig as jest.Mock;
-const mockUpdateSyncConfig = catalogApi.updateSyncConfig as jest.Mock;
+const mockGetSyncConfig = catalogApi.getSyncConfig as Mock;
+const mockUpdateSyncConfig = catalogApi.updateSyncConfig as Mock;
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  vi.clearAllMocks();
   mockGetSyncConfig.mockResolvedValue({
     source_type: 'shopify',
     source_url: 'https://celavilifestyle.com',

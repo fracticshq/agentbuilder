@@ -1,8 +1,9 @@
 import os
 import logging
+import re
 from typing import List, Optional, Union
 from pydantic import field_validator, model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,11 @@ def fetch_akv_secrets(vault_name: str) -> dict:
             "ADMIN-API-KEY",
             "QWEN-API-KEY",
             "STRAPI-API-TOKEN",
+            "STRAPI-PRIVACY-SUBJECT-HMAC-KEY",
+            "STRAPI-PRIVACY-REQUEST-SIGNING-KEY",
+            "STRAPI-PRIVACY-RECEIPT-PUBLIC-KEY",
             "FIRECRAWL-API-KEY",
+            "MCP-SERVICE-AUTH-TOKEN",
             "GOOGLE-CLIENT-ID",
             "ATLAS-PUBLIC-KEY",
             "ATLAS-PRIVATE-KEY",
@@ -103,6 +108,13 @@ _preload_akv_secrets()
 
 class Settings(BaseSettings):
     """Application settings."""
+
+    model_config = SettingsConfigDict(
+        # Load from root .env (2 levels up from app/config.py).
+        env_file="../../.env",
+        case_sensitive=True,
+        extra="ignore",
+    )
     
     # API Configuration
     API_HOST: str = "0.0.0.0"
@@ -198,7 +210,9 @@ class Settings(BaseSettings):
     # Rate Limiting
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60
     RATE_LIMIT_BURST: int = 10
-    RATE_LIMIT_FAIL_CLOSED: bool = False
+    # Public and operator request limits are an abuse boundary. A Redis outage
+    # must therefore reject traffic instead of silently disabling throttling.
+    RATE_LIMIT_FAIL_CLOSED: bool = True
     RATE_LIMIT_POLICY_WIDGET_CHAT: int = 60
     RATE_LIMIT_POLICY_WIDGET_STREAM: int = 40
     RATE_LIMIT_POLICY_WIDGET_WS_CONNECT: int = 30
@@ -209,8 +223,43 @@ class Settings(BaseSettings):
     
     # File Upload Configuration
     MAX_FILE_SIZE_MB: int = 10
+    MAX_UPLOAD_FILES: int = 20
+    MAX_UPLOAD_TOTAL_SIZE_MB: int = 50
+    MAX_ARCHIVE_FILES: int = 5000
+    MAX_ARCHIVE_UNCOMPRESSED_SIZE_MB: int = 100
+    MAX_ARCHIVE_COMPRESSION_RATIO: int = 100
     ALLOWED_FILE_TYPES: str = "pdf,txt,md,docx,html"
     UPLOAD_DIR: str = "./uploads"
+    # Production durable uploads must be scanned before source bytes enter the
+    # encrypted payload store. ClamAV is deliberately reached over a private
+    # service endpoint; no source bytes are sent to a public malware API.
+    MALWARE_SCAN_MODE: str = "disabled"  # disabled | clamav
+    MALWARE_SCAN_HOST: str = "clamav"
+    MALWARE_SCAN_PORT: int = 3310
+    MALWARE_SCAN_TIMEOUT_SECONDS: float = 15.0
+    # Durable ingestion is processed by a separate Mongo-backed worker. Source
+    # bytes are encrypted and TTL-bound in Mongo, never held in a job/cache row.
+    INGESTION_JOB_TTL_SECONDS: int = 86400
+    INGESTION_PAYLOAD_TTL_SECONDS: int = 86400
+    INGESTION_LEASE_SECONDS: int = 120
+    INGESTION_MAX_ATTEMPTS: int = 3
+    INGESTION_RETRY_DELAY_SECONDS: int = 10
+    INGESTION_WORKER_POLL_SECONDS: float = 1.0
+
+    # Shopify catalog lifecycle. Catalog snapshots are processed by a separate
+    # Mongo-leased worker so request processes may restart without silently
+    # abandoning a sync.  Webhooks are opt-in because the endpoint requires the
+    # per-Shopify-app signing secret to be present.
+    SHOPIFY_ADMIN_API_VERSION: str = "2026-04"
+    SHOPIFY_WEBHOOKS_ENABLED: bool = False
+    SHOPIFY_WEBHOOK_SECRET: str = ""
+    SHOPIFY_WEBHOOK_MAX_BODY_BYTES: int = 1048576
+    CATALOG_SYNC_JOB_TTL_SECONDS: int = 604800
+    CATALOG_SYNC_LEASE_SECONDS: int = 180
+    CATALOG_SYNC_MAX_ATTEMPTS: int = 5
+    CATALOG_SYNC_RETRY_DELAY_SECONDS: int = 30
+    CATALOG_SYNC_WORKER_POLL_SECONDS: float = 2.0
+    CATALOG_SYNC_SCHEDULER_POLL_SECONDS: float = 60.0
     
     # Security Configuration
     SECRET_KEY: str  # Required — set via SECRET_KEY env var or Azure Key Vault
@@ -243,6 +292,38 @@ class Settings(BaseSettings):
     SUMMARY_MODEL: str = "gpt-4o-mini"
     SUMMARY_MAX_TOKENS: int = 150
     SUMMARY_TEMPERATURE: float = 0.3
+
+    # Privacy lifecycle.  Long-term memory is disabled until the signed widget
+    # session has explicitly granted consent; this policy governs first-party
+    # operational-event cleanup and subject export limits.
+    PRIVACY_DEFAULT_RETENTION_DAYS: int = 90
+    PRIVACY_RETENTION_POLL_SECONDS: float = 3600.0
+    PRIVACY_EXPORT_MAX_RECORDS: int = 10000
+
+    # Staging-quality evidence is intentionally dark by default.  Enabling it
+    # is an explicit deployment decision and never inferred from ENVIRONMENT.
+    # The target allowlist must contain only opaque, protected staging profile
+    # names (for example ``synthetic-external-staging``), never URLs.
+    EVAL_STAGING_ENABLED: bool = False
+    EVAL_STAGING_TARGET_ALLOWLIST: str = ""
+    EVAL_STAGING_MAX_CASES: int = 25
+    EVAL_RESULT_TTL_SECONDS: int = 604800
+
+    # External Strapi privacy processing is independent from the legacy
+    # dashboard conversation mirror.  It is explicitly contract-pending by
+    # default; STRAPI_URL and STRAPI_API_TOKEN must never enable it implicitly.
+    STRAPI_PRIVACY_MODE: str = "contract_pending"  # contract_pending | active | disabled
+    STRAPI_PRIVACY_SUBJECT_HMAC_KEY: str = ""
+    STRAPI_PRIVACY_URL: str = ""
+    STRAPI_PRIVACY_REQUEST_SIGNING_KEY: str = ""
+    STRAPI_PRIVACY_REQUEST_KEY_ID: str = ""
+    STRAPI_PRIVACY_RECEIPT_PUBLIC_KEY: str = ""
+    STRAPI_PRIVACY_TIMEOUT_SECONDS: float = 10.0
+    STRAPI_PRIVACY_LEASE_SECONDS: int = 120
+    STRAPI_PRIVACY_MAX_ATTEMPTS: int = 8
+    STRAPI_PRIVACY_RETRY_DELAY_SECONDS: int = 60
+    STRAPI_PRIVACY_WORKER_POLL_SECONDS: float = 2.0
+    STRAPI_PRIVACY_WORKER: bool = False
     
     # Strapi Dashboard Integration
     STRAPI_URL: str = "http://localhost:1337"
@@ -251,6 +332,9 @@ class Settings(BaseSettings):
     # Shopify MCP service URL. Store identity and store tokens are per-agent
     # configuration values managed from the dashboard, not global env vars.
     SHOPIFY_MCP_URL: str = "http://localhost:3005/mcp"
+    # Shared service credential for the internal Shopify MCP boundary. This is
+    # not a Shopify credential and must never be returned to clients.
+    MCP_SERVICE_AUTH_TOKEN: str = ""
 
     # Firecrawl (product catalog scraping)
     FIRECRAWL_API_KEY: str = ""
@@ -275,7 +359,7 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
     
-    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_HUMAN_TAKEOVER", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", "ALLOW_PUBLIC_SIGNUP", "RATE_LIMIT_FAIL_CLOSED", "ATLAS_AUTO_CREATE_VECTOR_INDEXES", mode="before")
+    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_HUMAN_TAKEOVER", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", "ALLOW_PUBLIC_SIGNUP", "RATE_LIMIT_FAIL_CLOSED", "ATLAS_AUTO_CREATE_VECTOR_INDEXES", "SHOPIFY_WEBHOOKS_ENABLED", "STRAPI_PRIVACY_WORKER", "EVAL_STAGING_ENABLED", mode="before")
     @classmethod
     def parse_bool_fields(cls, v):
         """Parse boolean fields from string."""
@@ -283,12 +367,19 @@ class Settings(BaseSettings):
             return v.lower() in ("true", "1", "yes", "on")
         return v
     
-    @field_validator("API_WORKERS", "RATE_LIMIT_REQUESTS_PER_MINUTE", "RATE_LIMIT_BURST", "RATE_LIMIT_POLICY_WIDGET_CHAT", "RATE_LIMIT_POLICY_WIDGET_STREAM", "RATE_LIMIT_POLICY_WIDGET_WS_CONNECT", "RATE_LIMIT_POLICY_WIDGET_WS_MESSAGE", "RATE_LIMIT_POLICY_ADMIN_API", "RATE_LIMIT_POLICY_UPLOAD", "RATE_LIMIT_POLICY_STRAPI_SYNC", "MAX_FILE_SIZE_MB", "ACCESS_TOKEN_EXPIRE_MINUTES", "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "SHORT_TERM_TTL", "EPISODIC_TTL", "SUMMARY_CACHE_TTL", "AUTO_SUMMARY_TURNS", "MAX_MESSAGES_PER_CONVERSATION", "MAX_FACTS_PER_USER", "MAX_SUMMARIES_PER_CONVERSATION", "REDIS_CONNECTION_TIMEOUT", "SUMMARY_MAX_TOKENS", "VECTOR_DIMENSIONS", mode="before")
+    @field_validator("API_WORKERS", "RATE_LIMIT_REQUESTS_PER_MINUTE", "RATE_LIMIT_BURST", "RATE_LIMIT_POLICY_WIDGET_CHAT", "RATE_LIMIT_POLICY_WIDGET_STREAM", "RATE_LIMIT_POLICY_WIDGET_WS_CONNECT", "RATE_LIMIT_POLICY_WIDGET_WS_MESSAGE", "RATE_LIMIT_POLICY_ADMIN_API", "RATE_LIMIT_POLICY_UPLOAD", "RATE_LIMIT_POLICY_STRAPI_SYNC", "MAX_FILE_SIZE_MB", "MAX_UPLOAD_FILES", "MAX_UPLOAD_TOTAL_SIZE_MB", "MAX_ARCHIVE_FILES", "MAX_ARCHIVE_UNCOMPRESSED_SIZE_MB", "MAX_ARCHIVE_COMPRESSION_RATIO", "INGESTION_JOB_TTL_SECONDS", "INGESTION_PAYLOAD_TTL_SECONDS", "INGESTION_LEASE_SECONDS", "INGESTION_MAX_ATTEMPTS", "INGESTION_RETRY_DELAY_SECONDS", "SHOPIFY_WEBHOOK_MAX_BODY_BYTES", "CATALOG_SYNC_JOB_TTL_SECONDS", "CATALOG_SYNC_LEASE_SECONDS", "CATALOG_SYNC_MAX_ATTEMPTS", "CATALOG_SYNC_RETRY_DELAY_SECONDS", "ACCESS_TOKEN_EXPIRE_MINUTES", "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "SHORT_TERM_TTL", "EPISODIC_TTL", "SUMMARY_CACHE_TTL", "AUTO_SUMMARY_TURNS", "MAX_MESSAGES_PER_CONVERSATION", "MAX_FACTS_PER_USER", "MAX_SUMMARIES_PER_CONVERSATION", "REDIS_CONNECTION_TIMEOUT", "SUMMARY_MAX_TOKENS", "VECTOR_DIMENSIONS", "PRIVACY_DEFAULT_RETENTION_DAYS", "PRIVACY_EXPORT_MAX_RECORDS", "STRAPI_PRIVACY_LEASE_SECONDS", "STRAPI_PRIVACY_MAX_ATTEMPTS", "STRAPI_PRIVACY_RETRY_DELAY_SECONDS", "EVAL_STAGING_MAX_CASES", "EVAL_RESULT_TTL_SECONDS", mode="before")
     @classmethod
     def parse_int_fields(cls, v):
         """Parse integer fields from string."""
         if isinstance(v, str):
             return int(v)
+        return v
+
+    @field_validator("INGESTION_WORKER_POLL_SECONDS", "CATALOG_SYNC_WORKER_POLL_SECONDS", "CATALOG_SYNC_SCHEDULER_POLL_SECONDS", "MALWARE_SCAN_TIMEOUT_SECONDS", "PRIVACY_RETENTION_POLL_SECONDS", "STRAPI_PRIVACY_TIMEOUT_SECONDS", "STRAPI_PRIVACY_WORKER_POLL_SECONDS", mode="before")
+    @classmethod
+    def parse_ingestion_worker_poll_seconds(cls, v):
+        if isinstance(v, str):
+            return float(v)
         return v
     
     @field_validator("CONFIDENCE_THRESHOLD", "SUMMARY_TEMPERATURE", mode="before")
@@ -321,14 +412,102 @@ class Settings(BaseSettings):
             return v.lower()
         return v
 
+    @field_validator("MALWARE_SCAN_MODE", mode="before")
+    @classmethod
+    def parse_malware_scan_mode(cls, value):
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"disabled", "clamav"}:
+            raise ValueError("MALWARE_SCAN_MODE must be disabled or clamav")
+        return normalized
+
+    @field_validator("SHOPIFY_ADMIN_API_VERSION")
+    @classmethod
+    def validate_shopify_admin_api_version(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not re.fullmatch(r"20\d{2}-(?:01|04|07|10)", normalized):
+            raise ValueError("SHOPIFY_ADMIN_API_VERSION must use a Shopify YYYY-MM release label")
+        return normalized
+
+    @field_validator("PRIVACY_DEFAULT_RETENTION_DAYS")
+    @classmethod
+    def validate_privacy_retention_days(cls, value: int) -> int:
+        if not 1 <= value <= 3650:
+            raise ValueError("PRIVACY_DEFAULT_RETENTION_DAYS must be between 1 and 3650")
+        return value
+
+    @field_validator("PRIVACY_RETENTION_POLL_SECONDS")
+    @classmethod
+    def validate_privacy_retention_poll(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("PRIVACY_RETENTION_POLL_SECONDS must be greater than zero")
+        return value
+
+    @field_validator("EVAL_STAGING_TARGET_ALLOWLIST", mode="before")
+    @classmethod
+    def validate_evaluation_target_allowlist(cls, value: str) -> str:
+        normalized = ",".join(
+            item.strip().lower() for item in str(value or "").split(",") if item.strip()
+        )
+        if not normalized:
+            return ""
+        profile_pattern = re.compile(r"^[a-z][a-z0-9._:-]{1,127}$")
+        profiles = normalized.split(",")
+        if len(profiles) != len(set(profiles)) or any(not profile_pattern.fullmatch(profile) for profile in profiles):
+            raise ValueError("EVAL_STAGING_TARGET_ALLOWLIST must be a comma-separated list of safe staging profiles")
+        return normalized
+
+    @field_validator("EVAL_STAGING_MAX_CASES")
+    @classmethod
+    def validate_evaluation_max_cases(cls, value: int) -> int:
+        if not 1 <= value <= 100:
+            raise ValueError("EVAL_STAGING_MAX_CASES must be between 1 and 100")
+        return value
+
+    @field_validator("EVAL_RESULT_TTL_SECONDS")
+    @classmethod
+    def validate_evaluation_result_ttl(cls, value: int) -> int:
+        if not 300 <= value <= 31_536_000:
+            raise ValueError("EVAL_RESULT_TTL_SECONDS must be between 300 and 31536000")
+        return value
+
+    @field_validator("STRAPI_PRIVACY_MODE", mode="before")
+    @classmethod
+    def validate_strapi_privacy_mode(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"contract_pending", "active", "disabled"}:
+            raise ValueError("STRAPI_PRIVACY_MODE must be contract_pending, active, or disabled")
+        return normalized
+
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT == "production"
 
+    @property
+    def evaluation_target_allowlist(self) -> set[str]:
+        """Configured protected target profiles; empty means evaluation is dark."""
+        return {item for item in self.EVAL_STAGING_TARGET_ALLOWLIST.split(",") if item}
+
     @model_validator(mode="after")
     def validate_production_settings(self):
+        # Active privacy deletion has its own endpoint, HMAC signing key and
+        # Ed25519 receipt pin. It intentionally never falls back to the legacy
+        # STRAPI_URL/STRAPI_API_TOKEN dashboard-sync configuration.
+        if self.STRAPI_PRIVACY_MODE == "active":
+            from app.services.strapi_privacy_client import validate_active_privacy_configuration
+
+            try:
+                validate_active_privacy_configuration(self)
+            except RuntimeError as exc:
+                raise ValueError(str(exc)) from exc
+
+        if self.EVAL_STAGING_ENABLED and not self.evaluation_target_allowlist:
+            raise ValueError("EVAL_STAGING_TARGET_ALLOWLIST is required when EVAL_STAGING_ENABLED is true")
+
         if not self.is_production:
             return self
+
+        if self.SHOPIFY_WEBHOOKS_ENABLED and not self.SHOPIFY_WEBHOOK_SECRET.strip():
+            raise ValueError("SHOPIFY_WEBHOOK_SECRET is required when Shopify webhooks are enabled in production")
 
         missing = [
             name
@@ -338,17 +517,46 @@ class Settings(BaseSettings):
                 "PII_ENCRYPTION_KEY",
                 "MONGODB_URI",
                 "REDIS_URL",
+                "MCP_SERVICE_AUTH_TOKEN",
+                "STRAPI_PRIVACY_SUBJECT_HMAC_KEY",
             ]
             if not str(getattr(self, name, "") or "").strip()
         ]
 
-        if str(self.STRAPI_URL or "").strip() and not str(self.STRAPI_API_TOKEN or "").strip():
-            missing.append("STRAPI_API_TOKEN")
+        # The dedicated privacy worker never receives or uses the legacy
+        # dashboard sync bearer token. Other production processes retain the
+        # existing dashboard-sync configuration requirements.
+        if not self.STRAPI_PRIVACY_WORKER:
+            if str(self.STRAPI_URL or "").strip() and not str(self.STRAPI_API_TOKEN or "").strip():
+                missing.append("STRAPI_API_TOKEN")
 
-        if str(self.STRAPI_API_TOKEN or "").strip():
-            strapi_url = str(self.STRAPI_URL or "").strip()
-            if "localhost" in strapi_url or "127.0.0.1" in strapi_url:
-                missing.append("STRAPI_URL (must not point at localhost in production)")
+            if str(self.STRAPI_API_TOKEN or "").strip():
+                strapi_url = str(self.STRAPI_URL or "").strip()
+                if "localhost" in strapi_url or "127.0.0.1" in strapi_url:
+                    missing.append("STRAPI_URL (must not point at localhost in production)")
+
+        if not self.RATE_LIMIT_FAIL_CLOSED:
+            missing.append("RATE_LIMIT_FAIL_CLOSED (must be true in production)")
+
+        if self.MALWARE_SCAN_MODE != "clamav":
+            missing.append("MALWARE_SCAN_MODE (must be clamav in production)")
+
+        scanner_host = self.MALWARE_SCAN_HOST.strip().lower()
+        if (
+            not scanner_host
+            or scanner_host in {"localhost", "127.0.0.1", "::1"}
+            or self.MALWARE_SCAN_PORT <= 0
+            or self.MALWARE_SCAN_PORT > 65535
+            or self.MALWARE_SCAN_TIMEOUT_SECONDS <= 0
+        ):
+            missing.append("MALWARE_SCAN_HOST, MALWARE_SCAN_PORT, and MALWARE_SCAN_TIMEOUT_SECONDS")
+
+        if self.VECTOR_BACKEND == "qdrant":
+            if not str(self.QDRANT_API_KEY or "").strip():
+                missing.append("QDRANT_API_KEY")
+            qdrant_url = str(self.QDRANT_URL or "").strip().lower()
+            if "localhost" in qdrant_url or "127.0.0.1" in qdrant_url:
+                missing.append("QDRANT_URL (must not point at localhost in production)")
 
         if missing:
             raise ValueError(
@@ -356,9 +564,3 @@ class Settings(BaseSettings):
             )
 
         return self
-
-    class Config:
-        # Load from root .env (2 levels up from app/config.py)
-        env_file = "../../.env"
-        case_sensitive = True
-        extra = "ignore"
