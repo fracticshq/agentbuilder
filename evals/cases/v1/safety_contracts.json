@@ -1,0 +1,54 @@
+[
+  {
+    "id": "tenant-session-agent-transfer",
+    "suite": "tenant_isolation",
+    "given": "A signed session was created for brand A and its agent is moved to brand B.",
+    "expect": "The session is rejected and never reads/writes brand B.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_conversation_scope_store.py",
+        "nodeid": "test_widget_scope_rejects_a_session_after_the_agent_moves_tenants"
+      }
+    ]
+  },
+  {
+    "id": "provider-diagnostic-redaction",
+    "suite": "provider_outage",
+    "given": "A tool/provider throws a message containing an authorization token.",
+    "expect": "Public SSE/WebSocket/tool context receives only a stable retryable error.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_stream_message_llm_error.py",
+        "nodeid": "test_stream_error_chunk_has_conversation_id_and_redacts_exception_details"
+      },
+      {
+        "path": "apps/api/tests/test_shopify_orchestrator_references.py",
+        "nodeid": "test_tool_exception_does_not_return_diagnostic_to_the_orchestrator"
+      }
+    ]
+  },
+  {
+    "id": "commerce-invalid-quantity",
+    "suite": "shopify",
+    "given": "A cart action contains a non-integer, zero, or negative quantity.",
+    "expect": "No mutation executes and quantity is never defaulted.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_shopify_orchestrator_references.py",
+        "nodeid": "test_invalid_cart_quantity_never_defaults_to_a_mutation"
+      }
+    ]
+  },
+  {
+    "id": "lalkitab-missing-chart",
+    "suite": "lalkitab",
+    "given": "The chart context has no verifiable placements.",
+    "expect": "No chart/prediction is produced; runtime abstains.",
+    "regression_tests": [
+      {
+        "path": "apps/api/tests/test_lalkitab_safety.py",
+        "nodeid": "test_missing_validated_chart_returns_deterministic_abstention_without_llm"
+      }
+    ]
+  }
+]

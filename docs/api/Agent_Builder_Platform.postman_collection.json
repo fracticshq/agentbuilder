@@ -1,6 +1,6 @@
 {
   "info": {
-    "_postman_id": "0492190c-865f-ce02-8727-0a9dbd3d311f",
+    "_postman_id": "e66f8a43-302b-1fcd-8818-954569586fab",
     "description": "Generated from docs/api/openapi.json. Do not edit manually.",
     "name": "Agent Builder Platform API (generated)",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
@@ -1005,6 +1005,144 @@
             ],
             "method": "DELETE",
             "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id"
+          },
+          "response": []
+        },
+        {
+          "name": "get_retention_policy_api_v1_admin_brands__brand_id__privacy_retention_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Retention Policy",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/privacy/retention"
+          },
+          "response": []
+        },
+        {
+          "name": "set_retention_policy_api_v1_admin_brands__brand_id__privacy_retention_put",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"retention_days\": 0\n}"
+            },
+            "description": "Set Retention Policy",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/privacy/retention"
+          },
+          "response": []
+        },
+        {
+          "name": "run_retention_cleanup_api_v1_admin_brands__brand_id__privacy_retention_run_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Run Retention Cleanup",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/privacy/retention/run"
+          },
+          "response": []
+        },
+        {
+          "name": "delete_subject_data_api_v1_admin_brands__brand_id__privacy_subjects__subject_id__delete",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Delete Subject Data",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/privacy/subjects/:subject_id"
+          },
+          "response": []
+        },
+        {
+          "name": "export_subject_data_api_v1_admin_brands__brand_id__privacy_subjects__subject_id__export_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Export Subject Data",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/privacy/subjects/:subject_id/export"
           },
           "response": []
         },
@@ -3169,6 +3307,64 @@
           "response": []
         },
         {
+          "name": "delete_widget_privacy_data_api_v1_messages_privacy_delete",
+          "request": {
+            "description": "Erase first-party data for the signed widget subject and verify stores.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/v1/messages/privacy"
+          },
+          "response": []
+        },
+        {
+          "name": "set_widget_privacy_consent_api_v1_messages_privacy_consent_put",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"long_term_memory_consent\": false,\n  \"policy_version\": \"value\"\n}"
+            },
+            "description": "Set signed-session consent for episodic (long-term) memory.\n\nConsent is intentionally narrower than use of the widget: declining it\nleaves the short-lived conversation available while removing remembered\nfacts and disabling future fact retrieval/extraction.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": "{{baseUrl}}/api/v1/messages/privacy/consent"
+          },
+          "response": []
+        },
+        {
+          "name": "export_widget_privacy_data_api_v1_messages_privacy_export_get",
+          "request": {
+            "description": "Return a no-store portable export for the signed widget subject.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/messages/privacy/export"
+          },
+          "response": []
+        },
+        {
           "name": "start_session_api_v1_messages_session_post",
           "request": {
             "body": {
@@ -3178,7 +3374,7 @@
                   "language": "json"
                 }
               },
-              "raw": "{\n  \"agent_id\": \"value\",\n  \"session_token\": \"value\"\n}"
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"long_term_memory_consent\": \"value\",\n  \"session_token\": \"value\"\n}"
             },
             "description": "Start or resume a widget chat session.\n\nReturns a signed token bound to a server-generated conversation_id and\nuser_id. Presenting a still-valid token resumes the same conversation\n(preserving short-term and episodic memory); otherwise a fresh identity is\nminted. The agent must exist and be active.",
             "header": [

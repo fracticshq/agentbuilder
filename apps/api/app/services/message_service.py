@@ -7,7 +7,6 @@ Phase 4: Response validation to prevent hallucinations.
 import asyncio
 import inspect
 import json
-import math
 import re
 import uuid
 from types import SimpleNamespace
@@ -65,6 +64,8 @@ from .conversation_policy import (
 )
 from .agent_turn_planner import AgentTurnPlan, AgentTurnPlanner
 from .tool_registry import ToolRegistryService
+from .conversation_scope_store import ConversationScopeStoreError, conversation_scope_store
+from . import response_metadata as _response_metadata
 
 logger = structlog.get_logger(__name__)
 
@@ -509,272 +510,40 @@ def _prepare_commerce_products_for_response(products: list[dict], agent_config: 
     return _group_commerce_products_for_cards(normalized)
 
 
-_MAX_PUBLIC_CITATIONS = 5
-_PUBLIC_RETRIEVAL_STATUSES = {"evidence", "no_evidence", "degraded", "error"}
-_PUBLIC_RETRIEVAL_REASONS = {
-    "partial_backend_failure",
-    "no_search_backend_succeeded",
-    "pipeline_error",
-    "retrieval_error",
-}
-_PUBLIC_RETRIEVAL_BACKEND_STATUSES = {"success", "unavailable", "error", "disabled"}
-_PUBLIC_RETRIEVAL_BACKEND_REASONS = {
-    "authentication_failed",
-    "backend_unavailable",
-    "collection_unavailable",
-    "backend_error",
-}
-# Retrieval backends are implementation categories, not provider names.  Keep
-# this deliberately closed so a provider hostname or arbitrary tool key cannot
-# be reflected through public response metadata.
-_PUBLIC_RETRIEVAL_BACKENDS = {"vector", "bm25", "catalog"}
-
-
 def _safe_citation_text(value: Any, *, limit: int) -> Optional[str]:
-    """Return one bounded citation field, never an arbitrary tool payload."""
-    if not isinstance(value, str):
-        return None
-    normalized = " ".join(value.split())
-    if not normalized or any(pattern.search(normalized) for pattern in SENSITIVE_DATA_PATTERNS):
-        return None
-    return normalized[:limit] or None
+    return _response_metadata._safe_citation_text(value, limit=limit)
 
 
 def _safe_citation_url(value: Any) -> Optional[str]:
-    """Allow only ordinary web document URLs without credentials or query secrets."""
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = urlsplit(value.strip())
-        if (
-            parsed.scheme.lower() not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-        ):
-            return None
-        # Query strings and fragments frequently contain signed URLs or tokens;
-        # citations need the stable document location only.
-        normalized = urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path, "", ""))
-    except (TypeError, ValueError):
-        return None
-    if len(normalized) > 2_048 or any(pattern.search(normalized) for pattern in SENSITIVE_DATA_PATTERNS):
-        return None
-    return normalized
+    return _response_metadata._safe_citation_url(value)
 
 
 def _normalized_citation_confidence(value: Any, *, default: float) -> float:
-    """Clamp citation confidence so malformed tool values cannot break responses."""
-    try:
-        confidence = float(value)
-    except (TypeError, ValueError):
-        confidence = default
-    if not math.isfinite(confidence):
-        confidence = default
-    return min(1.0, max(0.0, confidence))
+    return _response_metadata._normalized_citation_confidence(value, default=default)
 
 
 def _citation_from_metadata(value: Any, *, default_confidence: float) -> Optional[dict]:
-    """Normalize one explicit citation candidate or legacy source value."""
-    if isinstance(value, str):
-        raw_doc_id = value
-        raw_title = value
-        raw_url = None
-        raw_snippet = None
-        raw_confidence = default_confidence
-    elif isinstance(value, dict):
-        raw_doc_id = value.get("doc_id") or value.get("source_id") or value.get("id") or value.get("title")
-        raw_title = value.get("title") or value.get("document_title") or value.get("name") or raw_doc_id
-        raw_url = value.get("url") or value.get("source_url") or value.get("document_url")
-        # Do not promote raw chunk bodies (`content`, `text`, `data`) to public
-        # citations.  The retrieval tool is responsible for emitting a bounded
-        # `snippet` when it is safe to do so.
-        raw_snippet = value.get("snippet") or value.get("excerpt") or value.get("summary")
-        raw_confidence = value.get("confidence", default_confidence)
-    else:
-        return None
-
-    doc_id = _safe_citation_text(raw_doc_id, limit=128)
-    if not doc_id:
-        return None
-    return {
-        "doc_id": doc_id,
-        "title": _safe_citation_text(raw_title, limit=256) or doc_id,
-        "url": _safe_citation_url(raw_url),
-        "snippet": _safe_citation_text(raw_snippet, limit=300),
-        "confidence": _normalized_citation_confidence(raw_confidence, default=default_confidence),
-    }
+    return _response_metadata._citation_from_metadata(value, default_confidence=default_confidence)
 
 
 def _merge_citation(existing: dict, candidate: dict) -> dict:
-    """Prefer detailed candidate fields while keeping the highest confidence."""
-    merged = dict(existing)
-    if (not merged.get("title") or merged.get("title") == merged.get("doc_id")) and candidate.get("title"):
-        merged["title"] = candidate["title"]
-    for key in ("url", "snippet"):
-        if not merged.get(key) and candidate.get(key):
-            merged[key] = candidate[key]
-    merged["confidence"] = max(
-        _normalized_citation_confidence(merged.get("confidence"), default=0.0),
-        _normalized_citation_confidence(candidate.get("confidence"), default=0.0),
-    )
-    return merged
+    return _response_metadata._merge_citation(existing, candidate)
 
 
 def _safe_retrieval_health(value: Any) -> Optional[dict]:
-    """Read the retrieval tool's stable, public-safe health contract only."""
-    if not isinstance(value, dict):
-        return None
-
-    status = value.get("status")
-    if status not in _PUBLIC_RETRIEVAL_STATUSES:
-        return None
-
-    reason = value.get("reason")
-    if reason not in _PUBLIC_RETRIEVAL_REASONS:
-        reason = "retrieval_error" if status == "error" else (
-            "partial_backend_failure" if status == "degraded" else None
-        )
-
-    backend_status: dict[str, dict[str, str]] = {}
-    raw_backend_status = value.get("backend_status")
-    if isinstance(raw_backend_status, dict):
-        for backend, details in raw_backend_status.items():
-            if backend not in _PUBLIC_RETRIEVAL_BACKENDS or not isinstance(details, dict):
-                continue
-            backend_state = details.get("status")
-            if backend_state not in _PUBLIC_RETRIEVAL_BACKEND_STATUSES:
-                continue
-            safe_details = {"status": backend_state}
-            backend_reason = details.get("reason")
-            if backend_reason in _PUBLIC_RETRIEVAL_BACKEND_REASONS:
-                safe_details["reason"] = backend_reason
-            backend_status[backend] = safe_details
-
-    return {
-        "status": status,
-        "reason": reason,
-        "backend_status": backend_status,
-        "successful_backends": [
-            backend for backend, details in backend_status.items() if details["status"] == "success"
-        ],
-        "failed_backends": [
-            backend
-            for backend, details in backend_status.items()
-            if details["status"] in {"error", "unavailable"}
-        ],
-    }
+    return _response_metadata._safe_retrieval_health(value)
 
 
 def _retrieval_health_from_tool_results(tool_results: Any) -> Optional[dict]:
-    """Aggregate safe retrieval health when one or more retrieval tools ran."""
-    if not isinstance(tool_results, dict):
-        return None
-
-    health_records = []
-    for tool_result in tool_results.values():
-        metadata = getattr(tool_result, "metadata", None)
-        if not isinstance(metadata, dict):
-            continue
-        health = _safe_retrieval_health(metadata.get("retrieval"))
-        if health:
-            health_records.append(health)
-    if not health_records:
-        return None
-    if len(health_records) == 1:
-        return health_records[0]
-
-    statuses = [record["status"] for record in health_records]
-    if "error" in statuses and any(status != "error" for status in statuses):
-        status, reason = "degraded", "partial_backend_failure"
-    elif "error" in statuses:
-        status = "error"
-        reason = next(record["reason"] for record in health_records if record["status"] == "error")
-    elif "degraded" in statuses:
-        status, reason = "degraded", "partial_backend_failure"
-    elif "evidence" in statuses:
-        status, reason = "evidence", None
-    else:
-        status, reason = "no_evidence", None
-
-    severity = {"success": 0, "disabled": 1, "unavailable": 2, "error": 3}
-    backend_status: dict[str, dict[str, str]] = {}
-    for record in health_records:
-        for backend, details in record["backend_status"].items():
-            previous = backend_status.get(backend)
-            if previous and severity[previous["status"]] >= severity[details["status"]]:
-                continue
-            backend_status[backend] = dict(details)
-
-    return {
-        "status": status,
-        "reason": reason,
-        "backend_status": backend_status,
-        "successful_backends": [
-            backend for backend, details in backend_status.items() if details["status"] == "success"
-        ],
-        "failed_backends": [
-            backend
-            for backend, details in backend_status.items()
-            if details["status"] in {"error", "unavailable"}
-        ],
-    }
+    return _response_metadata._retrieval_health_from_tool_results(tool_results)
 
 
 def _response_retrieval_health(tool_results: Any, agent_metadata: Any = None) -> Optional[dict]:
-    """Prefer the tool result health, with an orchestrator fallback for retries."""
-    health = _retrieval_health_from_tool_results(tool_results)
-    if health:
-        return health
-    if isinstance(agent_metadata, dict):
-        return _safe_retrieval_health(agent_metadata.get("retrieval"))
-    return None
+    return _response_metadata._response_retrieval_health(tool_results, agent_metadata)
 
 
 def _extract_tool_result_metadata(tool_results: dict) -> tuple[list[dict], list[dict], list[dict]]:
-    """Normalize citations, products, and dealers from orchestrator tool metadata."""
-    citations_by_doc_id: dict[str, dict] = {}
-    products: list[dict] = []
-    dealers: list[dict] = []
-
-    for step_id, tool_result in (tool_results.items() if isinstance(tool_results, dict) else []):
-        result_metadata = getattr(tool_result, "metadata", None)
-        if not isinstance(result_metadata, dict) or not result_metadata:
-            continue
-
-        if isinstance(result_metadata.get("products"), list):
-            products.extend(product for product in result_metadata["products"] if isinstance(product, dict))
-        if isinstance(result_metadata.get("dealers"), list):
-            dealers.extend(dealer for dealer in result_metadata["dealers"] if isinstance(dealer, dict))
-
-        confidence = _normalized_citation_confidence(result_metadata.get("confidence"), default=1.0)
-        candidates = result_metadata.get("citation_candidates")
-        sources = result_metadata.get("sources")
-        for source in [
-            *(candidates[:20] if isinstance(candidates, list) else []),
-            *(sources[:20] if isinstance(sources, list) else []),
-        ]:
-            citation = _citation_from_metadata(source, default_confidence=confidence)
-            if not citation:
-                continue
-            identity = citation["doc_id"].casefold()
-            citations_by_doc_id[identity] = (
-                _merge_citation(citations_by_doc_id[identity], citation)
-                if identity in citations_by_doc_id else citation
-            )
-
-        logger.info(
-            "tool_result_metadata",
-            step_id=step_id,
-            products_count=len(result_metadata.get("products", [])) if isinstance(result_metadata.get("products"), list) else 0,
-            dealers_count=len(result_metadata.get("dealers", [])) if isinstance(result_metadata.get("dealers"), list) else 0,
-            sources_count=len(sources) if isinstance(sources, list) else 0,
-        )
-
-    citations = list(citations_by_doc_id.values())[:_MAX_PUBLIC_CITATIONS]
-    safe_products = [_sanitize_for_json(product) for product in products]
-    safe_dealers = [_sanitize_for_json(dealer) for dealer in dealers]
-    return citations, safe_products, safe_dealers
+    return _response_metadata._extract_tool_result_metadata(tool_results)
 
 
 def _entity_identity(entity: dict, *keys: str) -> Optional[str]:
@@ -904,6 +673,30 @@ class MessageService:
         long_term = memory.get("long_term") or {}
         return bool(long_term.get("enabled", False))
 
+    async def _long_term_memory_consent_granted(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        agent_id: str,
+    ) -> bool:
+        """Fail closed unless this signed widget session explicitly opted in."""
+        if not self._long_term_memory_enabled():
+            return False
+        try:
+            return await conversation_scope_store.has_long_term_memory_consent(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
+        except ConversationScopeStoreError:
+            logger.warning(
+                "long_term_memory_consent_unavailable",
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+            )
+            return False
+
     def _agent_rag_config(self) -> dict:
         config = self.agent_config or {}
         rag = config.get("rag")
@@ -969,7 +762,11 @@ class MessageService:
             },
             "long_term": {
                 "enabled": self._long_term_memory_enabled(),
-                "status": "enabled" if self._long_term_memory_enabled() else "needs_privacy_setup",
+                "status": (
+                    "requires_explicit_session_consent"
+                    if self._long_term_memory_enabled()
+                    else "needs_privacy_setup"
+                ),
             },
         }
 
@@ -2370,7 +2167,7 @@ Rules:
                 # Initialize remote MCP tools only when live Shopify actions are enabled.
                 # Catalog-backed ecommerce answers can run without MCP/customer auth.
                 if config.get("data_source") == "shopify":
-                    from tools.mcp_client import McpClient
+                    from tools.mcp_client import McpClient, McpDiscoveryError
                     from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
 
                     # For local development we assume port 3005 for the Shopify MCP Service
@@ -2409,7 +2206,7 @@ Rules:
                             )
                         elif self.settings.is_production:
                             logger.error("shopify_mcp_service_token_missing", agent_id=agent_id)
-                            raise RuntimeError("Shopify MCP service authentication is not configured")
+                            raise McpDiscoveryError("Shopify MCP service authentication is not configured")
                         if shopify_client_id:
                             mcp_headers["x-shopify-client-id"] = str(shopify_client_id)
                         if shopify_client_secret:
@@ -2430,6 +2227,8 @@ Rules:
 
                         # Connect and discover remote tools using a stable agent session.
                         remote_tools = await mcp_client.discover_tools(session_id=f"agent:{agent_id}")
+                        if not remote_tools:
+                            raise McpDiscoveryError("Shopify MCP did not expose any enabled tools")
                         local_catalog_tool_names = {"search_catalog", "search_shop_catalog"}
                         prefer_local_catalog = shopify_conf.get("integration_mode") == "hybrid_catalog_rag_mcp"
                         for tool in remote_tools:
@@ -2465,8 +2264,12 @@ Rules:
                     brand_slug=self.brand_id,
                 )
 
+        except McpDiscoveryError:
+            # Live commerce was explicitly enabled.  Do not silently replace a
+            # failed/misconfigured MCP boundary with a generic agent runtime.
+            raise
         except Exception as e:
-            logger.error("agent_config_load_error", error=str(e))
+            logger.error("agent_config_load_error", error_type=type(e).__name__)
             self.agent_record = {}
             self.agent_config = {}
             self.system_prompt = ""
@@ -2537,6 +2340,11 @@ Rules:
             # Generate conversation ID if not provided
             conversation_id = request.conversation_id or str(uuid.uuid4())
             user_id = request.user_id or "anonymous"
+            long_term_enabled = await self._long_term_memory_consent_granted(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
             self._bind_request_page_context_to_retrieval(request)
 
             logger.info(
@@ -2658,6 +2466,7 @@ Rules:
                 user_id=user_id,
                 query=runtime_message,
                 escalations=escalations,
+                long_term_enabled=long_term_enabled,
             )
 
             # Retrieve recent history + rolling memory (auto-compaction).
@@ -3097,6 +2906,11 @@ Rules:
 
             # Set user_id
             user_id = request.user_id or "anonymous"
+            long_term_enabled = await self._long_term_memory_consent_granted(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
             self._bind_request_page_context_to_retrieval(request)
 
             escalations = []
@@ -4093,39 +3907,36 @@ Rules:
         """
         if not messages:
             return
-        try:
-            await self._load_agent_config(agent_id)
-            await self._ensure_memory_initialized()
-            if not self._short_term_memory_enabled():
-                logger.info("takeover_history_injection_skipped_memory_disabled", agent_id=agent_id)
-                return
+        await self._load_agent_config(agent_id)
+        await self._ensure_memory_initialized()
+        if not self._short_term_memory_enabled():
+            logger.info("takeover_history_injection_skipped_memory_disabled", agent_id=agent_id)
+            return
 
-            # Synthetic notice so the LLM is aware of the gap
+        # Synthetic notice so the LLM is aware of the gap
+        await self.short_term.add_message(
+            conversation_id=conversation_id,
+            role=MessageRole.ASSISTANT,
+            content="[System: The following messages were exchanged while a human support agent had control of this conversation.]",
+            metadata={"injected": True, "source": "human_takeover"},
+        )
+
+        for msg in messages:
+            role_str = msg.get("role", "user")
+            content = msg.get("content", "")
+            memory_role = MessageRole.USER if role_str == "user" else MessageRole.ASSISTANT
             await self.short_term.add_message(
                 conversation_id=conversation_id,
-                role=MessageRole.ASSISTANT,
-                content="[System: The following messages were exchanged while a human support agent had control of this conversation.]",
+                role=memory_role,
+                content=content,
                 metadata={"injected": True, "source": "human_takeover"},
             )
 
-            for msg in messages:
-                role_str = msg.get("role", "user")
-                content = msg.get("content", "")
-                memory_role = MessageRole.USER if role_str == "user" else MessageRole.ASSISTANT
-                await self.short_term.add_message(
-                    conversation_id=conversation_id,
-                    role=memory_role,
-                    content=content,
-                    metadata={"injected": True, "source": "human_takeover"},
-                )
-
-            logger.info(
-                "takeover_history_injected",
-                conversation_id=conversation_id,
-                messages_count=len(messages),
-            )
-        except Exception as e:
-            logger.warning("inject_history_failed", error=str(e), conversation_id=conversation_id)
+        logger.info(
+            "takeover_history_injected",
+            conversation_id=conversation_id,
+            messages_count=len(messages),
+        )
 
     async def _retrieve_context(self, request: MessageRequest) -> RetrievalContext:
         """Retrieve relevant context for the message."""
@@ -4151,8 +3962,8 @@ Rules:
             )
             return context
 
-        except Exception as e:
-            logger.error("Error retrieving context", error=str(e), exc_info=True)
+        except Exception as exc:
+            logger.error("retrieval_context_failed", error_type=type(exc).__name__, exc_info=True)
             # Return empty context on error
             from retrieval.types import RetrievalContext
             return RetrievalContext(
@@ -4160,7 +3971,11 @@ Rules:
                 confidence=0.0,
                 sources=[],
                 query=request.message,
-                retrieval_metadata={"error": str(e)}
+                retrieval_metadata={
+                    "status": "error",
+                    "reason": "retrieval_unavailable",
+                    "backend_status": "unavailable",
+                },
             )
 
     async def _build_memory_context(
@@ -4169,6 +3984,7 @@ Rules:
         user_id: str,
         query: str,
         escalations: list,
+        long_term_enabled: bool | None = None,
     ) -> dict:
         """
         Build unified memory context from all layers.
@@ -4181,7 +3997,8 @@ Rules:
         - summaries: Conversation summaries
         """
         short_term_enabled = self._short_term_memory_enabled()
-        long_term_enabled = self._long_term_memory_enabled()
+        if long_term_enabled is None:
+            long_term_enabled = False
 
         # Get short-term messages
         recent_messages = []

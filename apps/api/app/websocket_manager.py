@@ -140,8 +140,12 @@ class ConnectionManager:
             try:
                 await pubsub.unsubscribe(channel)
                 await pubsub.aclose()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "redis_unsubscribe_failed",
+                    channel=channel,
+                    error_type=type(exc).__name__,
+                )
             logger.debug("redis_unsubscribed", channel=channel)
 
     def _start_sub(self, conversation_id: str, target: str):
@@ -299,17 +303,72 @@ class ConnectionManager:
         buf = self._local_buffers.setdefault(conversation_id, [])
         buf.append({"role": role, "content": content})
 
-    async def pop_takeover_buffer(self, conversation_id: str) -> list:
+    async def get_takeover_buffer(self, conversation_id: str) -> list:
+        """Read buffered human-takeover turns without acknowledging them.
+
+        Release control is a two-step operation: durable memory injection must
+        finish before the buffer is deleted.  Returning a copy here lets a
+        caller retry safely after a transient store failure instead of losing
+        the intervening conversation.
+        """
         r = self._redis()
         if r:
             try:
-                key = _buffer_key(conversation_id)
-                raw = await r.lrange(key, 0, -1)
-                await r.delete(key)
+                raw = await r.lrange(_buffer_key(conversation_id), 0, -1)
                 return [json.loads(m) for m in raw]
             except Exception as e:
-                logger.warning("redis_pop_buffer_failed", error=str(e))
-        messages = self._local_buffers.pop(conversation_id, [])
+                logger.warning("redis_get_buffer_failed", error=str(e))
+        return list(self._local_buffers.get(conversation_id, []))
+
+    async def clear_takeover_buffer(self, conversation_id: str) -> None:
+        """Acknowledge a buffer only after its turns are durably persisted."""
+        r = self._redis()
+        if r:
+            try:
+                await r.delete(_buffer_key(conversation_id))
+                return
+            except Exception as e:
+                logger.warning("redis_clear_buffer_failed", error=str(e))
+                raise RuntimeError("Takeover history acknowledgement is unavailable") from e
+        self._local_buffers.pop(conversation_id, None)
+
+    async def purge_conversation_state(self, conversation_id: str) -> None:
+        """Invalidate local and shared takeover state for a deleted subject."""
+        for websocket in list(self.widget_connections.get(conversation_id, set())):
+            try:
+                await websocket.close(code=1008, reason="Conversation data deleted")
+            except (RuntimeError, asyncio.CancelledError):
+                pass
+        for websocket in list(self.admin_connections.get(conversation_id, set())):
+            try:
+                await websocket.close(code=1008, reason="Conversation data deleted")
+            except (RuntimeError, asyncio.CancelledError):
+                pass
+        self.widget_connections.pop(conversation_id, None)
+        self.admin_connections.pop(conversation_id, None)
+        self._stop_sub(conversation_id, "widget")
+        self._stop_sub(conversation_id, "admin")
+        self._local_control.pop(conversation_id, None)
+        self._local_agent_ids.pop(conversation_id, None)
+        self._local_buffers.pop(conversation_id, None)
+
+        r = self._redis()
+        if r:
+            try:
+                await r.delete(_state_key(conversation_id), _buffer_key(conversation_id))
+            except Exception as exc:
+                # Mongo-side erasure is still authoritative.  A residual Redis
+                # key cannot be reused because the session scope is revoked.
+                logger.warning(
+                    "redis_privacy_purge_failed",
+                    conversation_id=conversation_id,
+                    error_type=type(exc).__name__,
+                )
+
+    async def pop_takeover_buffer(self, conversation_id: str) -> list:
+        """Compatibility helper for callers that explicitly need destructive read."""
+        messages = await self.get_takeover_buffer(conversation_id)
+        await self.clear_takeover_buffer(conversation_id)
         return messages
 
 

@@ -49,6 +49,14 @@ Production Shopify sync requirements:
   delete-webhook matching across the REST-to-GraphQL migration. Product and
   variant cursors are fully exhausted before a snapshot is published; throttled
   requests use bounded retry and a partial snapshot is never published.
+- A live MCP catalogue is an availability boundary, not an empty successful
+  capability set. Discovery transport/JSON-RPC failures and zero enabled tools
+  leave the live Shopify orchestrator uninstalled; public callers receive the
+  standard retryable generation failure rather than an invented cart result.
+  MCP diagnostic text is never placed in model context or returned to clients.
+- Cart mutation quantities must be positive whole numbers. Invalid values are
+  rejected and never default to `1`, so a malformed model/tool payload cannot
+  create an unintended cart line.
 
 ### Job polling
 

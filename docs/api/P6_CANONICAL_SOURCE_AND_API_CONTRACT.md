@@ -35,6 +35,17 @@ The HTTP schema does not represent WebSocket upgrades. Keep those contracts in
 `API_DOCUMENTATION.md` and P4, including the required authentication
 subprotocols and the prohibition on query-string credentials.
 
+## Companion production contracts
+
+- [RBAC and brand scope](RBAC_BRAND_SCOPE_MATRIX.md)
+- [Realtime SSE/WebSocket events](REALTIME_EVENT_CONTRACT.md)
+- [Privacy lifecycle](PRIVACY_LIFECYCLE.md)
+- [Canonical evidence and commerce schemas](CANONICAL_SCHEMAS.md)
+- [Shopify OAuth contract and current GA gaps](SHOPIFY_OAUTH_CONTRACT.md)
+- [Lal Kitab connector versioning](LALKITAB_CONNECTOR_CONTRACT.md)
+- [MCP lifecycle/security](MCP_SECURITY_LIFECYCLE.md)
+- [Shared HTTP semantics](HTTP_STANDARDS.md)
+
 ## Release review
 
 Before promotion, confirm:

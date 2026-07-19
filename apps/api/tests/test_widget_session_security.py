@@ -17,6 +17,7 @@ from app.auth.widget_session import (
     encode_widget_session,
     issue_widget_session,
 )
+from commons.types.requests import MessageRequest
 
 
 def test_issue_and_decode_round_trip():
@@ -153,8 +154,10 @@ async def test_widget_control_requires_a_signed_session_bound_to_its_scope(monke
 
     websocket.close = close
 
-    async def get_scope(conversation_id):
+    async def get_scope(*, conversation_id, user_id, agent_id):
         assert conversation_id == session.conversation_id
+        assert user_id == session.user_id
+        assert agent_id == session.agent_id
         return ConversationScope(
             conversation_id=session.conversation_id,
             user_id=session.user_id,
@@ -163,7 +166,7 @@ async def test_widget_control_requires_a_signed_session_bound_to_its_scope(monke
             brand_slug="brand-one",
         )
 
-    monkeypatch.setattr(messages_module.conversation_scope_store, "get", get_scope)
+    monkeypatch.setattr(messages_module.conversation_scope_store, "require_active_widget_scope", get_scope)
 
     result = await messages_module._require_widget_control_scope(websocket, session.conversation_id)
 
@@ -191,6 +194,27 @@ async def test_widget_control_rejects_a_valid_token_for_another_conversation():
 
     assert result is None
     assert websocket.closed["code"] == 1008
+
+
+@pytest.mark.asyncio
+async def test_normal_widget_message_rejects_session_when_immutable_scope_is_invalid(monkeypatch):
+    from fastapi import HTTPException
+    from app.api.v1.endpoints import messages as messages_module
+    from app.services.conversation_scope_store import ConversationScopeAuthorizationError
+
+    token, _ = issue_widget_session("agent-1")
+
+    async def reject_scope(**_kwargs):
+        raise ConversationScopeAuthorizationError("agent moved brands")
+
+    monkeypatch.setattr(messages_module.conversation_scope_store, "require_active_widget_scope", reject_scope)
+    request = MessageRequest(message="hello", user_id="untrusted-user", agent_id="agent-1")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await messages_module._require_widget_session(request, token)
+
+    assert exc_info.value.status_code == 401
+    assert request.conversation_id is None
 
 
 @pytest.mark.asyncio

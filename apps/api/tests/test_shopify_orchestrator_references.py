@@ -212,3 +212,38 @@ def test_active_focus_prompt_displays_minor_unit_prices_with_product_currency():
 
     assert "price: INR 1,499" in prompt
     assert "price: 149900" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quantity", ["two", 0, -1])
+async def test_invalid_cart_quantity_never_defaults_to_a_mutation(quantity):
+    update_cart = FakeUpdateCartTool()
+    orchestrator = ShopifyOrchestrator(FakeLLM(), FakeTools(update_cart=update_cart))
+
+    result = await orchestrator._execute_tool_action(
+        "update_cart",
+        {
+            "add_items": [{
+                "product_variant_id": "gid://shopify/ProductVariant/1",
+                "quantity": quantity,
+            }],
+        },
+    )
+
+    assert result.success is False
+    assert update_cart.calls == []
+    assert "commerce service" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_tool_exception_does_not_return_diagnostic_to_the_orchestrator():
+    class ExplodingTool:
+        async def run(self, **_kwargs):
+            raise RuntimeError("Authorization: Bearer secret-shopify-token")
+
+    orchestrator = ShopifyOrchestrator(FakeLLM(), FakeTools(search_catalog=ExplodingTool()))
+    result = await orchestrator._execute_tool_action("search_catalog", {"query": "earrings"})
+
+    assert result.success is False
+    assert "secret-shopify-token" not in (result.error or "")
+    assert "commerce service" in (result.error or "").lower()

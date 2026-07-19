@@ -52,6 +52,17 @@ agent identifiers are not accepted for this channel. The server selects only
 the non-secret `widget-session` or `bearer` protocol during the upgrade, so a
 JWT is never echoed back.
 
+### Release handoff guarantee
+
+During `release_control`, the server reads the buffered human-turn messages,
+persists them into short-term memory, then clears the buffer. It does not
+announce AI control until both persistence and buffer acknowledgement succeed.
+If either store is unavailable, the buffer remains intact, human control stays
+enabled, and the operator receives a retry notice. This is deliberately
+at-least-once rather than lossy: a failure after persistence but before buffer
+acknowledgement can replay the handoff, so future storage changes must retain
+an idempotency key before attempting exactly-once semantics.
+
 ## Durable knowledge uploads
 
 `POST /api/v1/knowledge/upload` and

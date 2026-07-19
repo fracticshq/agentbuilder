@@ -9,6 +9,13 @@ from .types import BaseTool, ToolResult
 logger = structlog.get_logger(__name__)
 
 
+class McpDiscoveryError(RuntimeError):
+    """The MCP tool catalogue could not be established safely."""
+
+
+_SAFE_MCP_TOOL_ERROR = "The connected service could not complete that action. Please try again."
+
+
 def _connection_items(value: Any) -> List[Dict[str, Any]]:
     """Normalize Shopify connection/list shapes without losing node identity."""
     if isinstance(value, list):
@@ -401,16 +408,22 @@ class McpTool(BaseTool):
                         
                 return ToolResult(
                     success=not is_error,
-                    data=text_output or json.dumps(data_source, default=str),
-                    error=(text_output or json.dumps(data_source, default=str)) if is_error else None,
-                    metadata=metadata
+                    data=None if is_error else (text_output or json.dumps(data_source, default=str)),
+                    # MCP error blocks are remote input.  Never promote their
+                    # diagnostics into model context or a customer response.
+                    error=_SAFE_MCP_TOOL_ERROR if is_error else None,
+                    metadata=metadata,
                 )
-        except Exception as e:
-            logger.error("mcp_tool_execution_failed", tool=self.name, error=str(e))
+        except Exception as exc:
+            logger.error(
+                "mcp_tool_execution_failed",
+                tool=self.name,
+                error_type=type(exc).__name__,
+            )
             return ToolResult(
                 success=False,
                 data=None,
-                error=f"Failed to execute MCP tool: {str(e)}"
+                error=_SAFE_MCP_TOOL_ERROR,
             )
 
     def _normalize_arguments(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -460,10 +473,12 @@ class McpClient:
                 data = response.json()
                 
                 if "error" in data:
-                    logger.error("mcp_tool_discovery_failed", error=data["error"])
-                    return []
+                    logger.error("mcp_tool_discovery_failed", error_type="jsonrpc_error")
+                    raise McpDiscoveryError("MCP tool discovery failed")
                     
                 tools_data = data.get("result", {}).get("tools", [])
+                if not isinstance(tools_data, list):
+                    raise McpDiscoveryError("MCP tool discovery returned an invalid catalogue")
                 dynamic_tools = []
                 
                 for td in tools_data:
@@ -479,6 +494,12 @@ class McpClient:
                     
                 return dynamic_tools
                 
-        except Exception as e:
-            logger.warning("mcp_server_unreachable", endpoint=self.endpoint, error=str(e))
-            return []
+        except McpDiscoveryError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "mcp_server_unreachable",
+                endpoint=self.endpoint,
+                error_type=type(exc).__name__,
+            )
+            raise McpDiscoveryError("MCP tool discovery is unavailable") from exc

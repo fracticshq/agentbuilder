@@ -2596,6 +2596,9 @@
           "document:delete",
           "message:read",
           "message:write",
+          "privacy:read",
+          "privacy:write",
+          "privacy:delete",
           "api_key:read",
           "api_key:write",
           "api_key:delete",
@@ -2606,6 +2609,31 @@
         ],
         "title": "Permission",
         "type": "string"
+      },
+      "PrivacyConsentRequest": {
+        "properties": {
+          "long_term_memory_consent": {
+            "title": "Long Term Memory Consent",
+            "type": "boolean"
+          },
+          "policy_version": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Version"
+          }
+        },
+        "required": [
+          "long_term_memory_consent"
+        ],
+        "title": "PrivacyConsentRequest",
+        "type": "object"
       },
       "ProductsBySkusRequest": {
         "description": "Request for fetching products by SKUs.",
@@ -2901,6 +2929,21 @@
           "new_password"
         ],
         "title": "ResetPasswordConfirmRequest",
+        "type": "object"
+      },
+      "RetentionPolicyRequest": {
+        "properties": {
+          "retention_days": {
+            "maximum": 3650.0,
+            "minimum": 1.0,
+            "title": "Retention Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "retention_days"
+        ],
+        "title": "RetentionPolicyRequest",
         "type": "object"
       },
       "RuntimeSettingFieldResponse": {
@@ -3211,6 +3254,17 @@
             "minLength": 1,
             "title": "Agent Id",
             "type": "string"
+          },
+          "long_term_memory_consent": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Term Memory Consent"
           },
           "session_token": {
             "anyOf": [
@@ -5931,6 +5985,342 @@
         "tags": [
           "admin",
           "brands"
+        ]
+      }
+    },
+    "/api/v1/admin/brands/{brand_id}/privacy/retention": {
+      "get": {
+        "operationId": "get_retention_policy_api_v1_admin_brands__brand_id__privacy_retention_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "brand_id",
+            "required": true,
+            "schema": {
+              "title": "Brand Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-admin-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Retention Policy",
+        "tags": [
+          "admin",
+          "privacy"
+        ]
+      },
+      "put": {
+        "operationId": "set_retention_policy_api_v1_admin_brands__brand_id__privacy_retention_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "brand_id",
+            "required": true,
+            "schema": {
+              "title": "Brand Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-admin-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetentionPolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Set Retention Policy",
+        "tags": [
+          "admin",
+          "privacy"
+        ]
+      }
+    },
+    "/api/v1/admin/brands/{brand_id}/privacy/retention/run": {
+      "post": {
+        "operationId": "run_retention_cleanup_api_v1_admin_brands__brand_id__privacy_retention_run_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "brand_id",
+            "required": true,
+            "schema": {
+              "title": "Brand Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-admin-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Run Retention Cleanup",
+        "tags": [
+          "admin",
+          "privacy"
+        ]
+      }
+    },
+    "/api/v1/admin/brands/{brand_id}/privacy/subjects/{subject_id}": {
+      "delete": {
+        "operationId": "delete_subject_data_api_v1_admin_brands__brand_id__privacy_subjects__subject_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "brand_id",
+            "required": true,
+            "schema": {
+              "title": "Brand Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-admin-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Subject Data",
+        "tags": [
+          "admin",
+          "privacy"
+        ]
+      }
+    },
+    "/api/v1/admin/brands/{brand_id}/privacy/subjects/{subject_id}/export": {
+      "get": {
+        "operationId": "export_subject_data_api_v1_admin_brands__brand_id__privacy_subjects__subject_id__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "brand_id",
+            "required": true,
+            "schema": {
+              "title": "Brand Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-admin-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Export Subject Data",
+        "tags": [
+          "admin",
+          "privacy"
         ]
       }
     },
@@ -10445,6 +10835,160 @@
           }
         },
         "summary": "Get Widget History",
+        "tags": [
+          "messages"
+        ]
+      }
+    },
+    "/api/v1/messages/privacy": {
+      "delete": {
+        "description": "Erase first-party data for the signed widget subject and verify stores.",
+        "operationId": "delete_widget_privacy_data_api_v1_messages_privacy_delete",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-widget-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Widget-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Widget Privacy Data",
+        "tags": [
+          "messages"
+        ]
+      }
+    },
+    "/api/v1/messages/privacy/consent": {
+      "put": {
+        "description": "Set signed-session consent for episodic (long-term) memory.\n\nConsent is intentionally narrower than use of the widget: declining it\nleaves the short-lived conversation available while removing remembered\nfacts and disabling future fact retrieval/extraction.",
+        "operationId": "set_widget_privacy_consent_api_v1_messages_privacy_consent_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-widget-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Widget-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivacyConsentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Widget Privacy Consent",
+        "tags": [
+          "messages"
+        ]
+      }
+    },
+    "/api/v1/messages/privacy/export": {
+      "get": {
+        "description": "Return a no-store portable export for the signed widget subject.",
+        "operationId": "export_widget_privacy_data_api_v1_messages_privacy_export_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-widget-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Widget-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Widget Privacy Data",
         "tags": [
           "messages"
         ]

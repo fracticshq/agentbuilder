@@ -4,13 +4,14 @@ Messages API Endpoints
 
 from typing import AsyncGenerator, Optional, Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Header, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, Field
 import json
 import asyncio
 import structlog
 from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.encoders import jsonable_encoder
 
 from commons.types.requests import MessageRequest
 from commons.types.responses import MessageResponse, StreamingMessageResponse
@@ -27,11 +28,13 @@ from ....dependencies import get_message_service, get_settings
 from ....security.rate_limiter import check_named_rate_limit
 from ....services.conversation_scope_store import (
     ConversationScope,
+    ConversationScopeAuthorizationError,
     ConversationScopeStoreError,
     conversation_scope_store,
 )
 from ....services.message_service import MessageService
 from ....services.observability_service import ObservabilityService
+from ....services.privacy_lifecycle_service import PrivacyLifecycleError, PrivacyLifecycleService
 from ....websocket_manager import ws_manager
 from memory.managers.short_term import ShortTermMemory
 
@@ -44,6 +47,7 @@ class SessionRequest(BaseModel):
     """Request to start or resume a widget chat session."""
     agent_id: str = Field(..., min_length=1)
     session_token: Optional[str] = None
+    long_term_memory_consent: Optional[bool] = None
 
 
 class SessionResponse(BaseModel):
@@ -57,6 +61,11 @@ class HistoryResponse(BaseModel):
     conversation_id: str
     messages: list[dict[str, Any]] = Field(default_factory=list)
     has_more: bool = False
+
+
+class PrivacyConsentRequest(BaseModel):
+    long_term_memory_consent: bool
+    policy_version: Optional[str] = Field(default=None, max_length=128)
 
 
 def _bind_request_to_session(request: MessageRequest, session: WidgetSession) -> None:
@@ -219,12 +228,16 @@ async def _require_widget_control_scope(
         await _close_websocket(websocket, "Invalid widget session")
         return None
     try:
-        scope = await conversation_scope_store.get(conversation_id)
+        scope = await conversation_scope_store.require_active_widget_scope(
+            conversation_id=conversation_id,
+            user_id=session.user_id,
+            agent_id=session.agent_id,
+        )
+    except ConversationScopeAuthorizationError:
+        await _close_websocket(websocket, "Widget session does not own this conversation")
+        return None
     except ConversationScopeStoreError:
         await _close_websocket(websocket, "Conversation authorization unavailable")
-        return None
-    if scope is None or scope.agent_id != session.agent_id or scope.user_id != session.user_id:
-        await _close_websocket(websocket, "Widget session does not own this conversation")
         return None
     return session, scope
 
@@ -293,8 +306,32 @@ async def _require_widget_session(
             status_code=401,
             detail="A valid widget session token is required. Start a session at POST /messages/session.",
         )
+    try:
+        await conversation_scope_store.require_active_widget_scope(
+            conversation_id=session.conversation_id,
+            user_id=session.user_id,
+            agent_id=session.agent_id,
+        )
+    except ConversationScopeAuthorizationError as exc:
+        raise HTTPException(status_code=401, detail="Widget session is no longer valid") from exc
+    except ConversationScopeStoreError as exc:
+        raise HTTPException(status_code=503, detail="Widget sessions are temporarily unavailable") from exc
     _bind_request_to_session(request, session)
     return session
+
+
+async def _require_active_widget_scope(session: WidgetSession) -> ConversationScope:
+    """Validate the JWT against its immutable, current tenant binding."""
+    try:
+        return await conversation_scope_store.require_active_widget_scope(
+            conversation_id=session.conversation_id,
+            user_id=session.user_id,
+            agent_id=session.agent_id,
+        )
+    except ConversationScopeAuthorizationError as exc:
+        raise HTTPException(status_code=401, detail="Widget session is no longer valid") from exc
+    except ConversationScopeStoreError as exc:
+        raise HTTPException(status_code=503, detail="Widget sessions are temporarily unavailable") from exc
 
 
 @router.post("/session", response_model=SessionResponse)
@@ -340,10 +377,108 @@ async def start_session(request: SessionRequest):
         # authorize by tenant. The caller can retry safely with the same token.
         raise HTTPException(status_code=503, detail="Widget sessions are temporarily unavailable")
 
+    if request.long_term_memory_consent is not None:
+        try:
+            await conversation_scope_store.set_long_term_memory_consent(
+                conversation_id=session.conversation_id,
+                user_id=session.user_id,
+                agent_id=session.agent_id,
+                granted=request.long_term_memory_consent,
+            )
+        except ConversationScopeAuthorizationError as exc:
+            raise HTTPException(status_code=401, detail="Widget session is no longer valid") from exc
+        except ConversationScopeStoreError as exc:
+            raise HTTPException(status_code=503, detail="Widget sessions are temporarily unavailable") from exc
+
     return SessionResponse(
         conversation_id=session.conversation_id,
         user_id=session.user_id,
         session_token=token,
+    )
+
+
+@router.put("/privacy/consent")
+async def set_widget_privacy_consent(
+    request: PrivacyConsentRequest,
+    x_widget_session: Optional[str] = Header(None),
+):
+    """Set signed-session consent for episodic (long-term) memory.
+
+    Consent is intentionally narrower than use of the widget: declining it
+    leaves the short-lived conversation available while removing remembered
+    facts and disabling future fact retrieval/extraction.
+    """
+    session = decode_widget_session(x_widget_session)
+    if session is None:
+        raise HTTPException(status_code=401, detail="A valid widget session token is required")
+    scope = await _require_active_widget_scope(session)
+    try:
+        await conversation_scope_store.set_long_term_memory_consent(
+            conversation_id=session.conversation_id,
+            user_id=session.user_id,
+            agent_id=session.agent_id,
+            granted=request.long_term_memory_consent,
+            policy_version=request.policy_version,
+        )
+        withdrawal = None
+        if not request.long_term_memory_consent:
+            withdrawal = await PrivacyLifecycleService(get_settings()).delete_long_term_memory(
+                brand_slug=scope.brand_slug,
+                subject_id=session.user_id,
+            )
+            if not withdrawal["verified"]:
+                raise PrivacyLifecycleError("Long-term memory deletion could not be verified")
+    except PrivacyLifecycleError as exc:
+        raise HTTPException(status_code=503, detail="Privacy preference could not be completed") from exc
+    except ConversationScopeAuthorizationError as exc:
+        raise HTTPException(status_code=401, detail="Widget session is no longer valid") from exc
+    except ConversationScopeStoreError as exc:
+        raise HTTPException(status_code=503, detail="Widget sessions are temporarily unavailable") from exc
+    return {
+        "schema_version": "v1",
+        "long_term_memory_consent": "granted" if request.long_term_memory_consent else "withdrawn",
+        "withdrawal": withdrawal,
+    }
+
+
+@router.get("/privacy/export")
+async def export_widget_privacy_data(x_widget_session: Optional[str] = Header(None)):
+    """Return a no-store portable export for the signed widget subject."""
+    session = decode_widget_session(x_widget_session)
+    if session is None:
+        raise HTTPException(status_code=401, detail="A valid widget session token is required")
+    scope = await _require_active_widget_scope(session)
+    try:
+        payload = await PrivacyLifecycleService(get_settings()).export_subject(
+            brand_id=scope.brand_id,
+            brand_slug=scope.brand_slug,
+            subject_id=session.user_id,
+        )
+    except PrivacyLifecycleError as exc:
+        raise HTTPException(status_code=503, detail="Privacy export is temporarily unavailable") from exc
+    return JSONResponse(jsonable_encoder(payload), headers={"Cache-Control": "no-store"})
+
+
+@router.delete("/privacy")
+async def delete_widget_privacy_data(x_widget_session: Optional[str] = Header(None)):
+    """Erase first-party data for the signed widget subject and verify stores."""
+    session = decode_widget_session(x_widget_session)
+    if session is None:
+        raise HTTPException(status_code=401, detail="A valid widget session token is required")
+    scope = await _require_active_widget_scope(session)
+    try:
+        receipt = await PrivacyLifecycleService(get_settings()).delete_subject(
+            brand_id=scope.brand_id,
+            brand_slug=scope.brand_slug,
+            subject_id=session.user_id,
+            requested_by="widget_subject",
+        )
+    except PrivacyLifecycleError as exc:
+        raise HTTPException(status_code=503, detail="Privacy deletion is temporarily unavailable") from exc
+    return JSONResponse(
+        jsonable_encoder(receipt),
+        status_code=202 if receipt["status"] == "pending" else 200,
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -370,6 +505,7 @@ async def get_widget_history(
     session = decode_widget_session(x_widget_session)
     if session is None:
         raise HTTPException(status_code=401, detail="A valid widget session token is required")
+    await _require_active_widget_scope(session)
 
     try:
         brand_db = await connection_manager.get_brand_db_by_agent_id(session.agent_id)
@@ -436,7 +572,7 @@ async def stream_message(
                 await asyncio.sleep(0.01)
         except Exception as e:
             logger.error("Error streaming message", error=str(e))
-            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'content': 'Unable to complete this response. Please try again.', 'metadata': {'code': 'generation_failed', 'retryable': True}})}\n\n"
     
     return StreamingResponse(
         generate_stream(),
@@ -498,6 +634,16 @@ async def websocket_endpoint(
                     return
                 continue
             _bind_request_to_session(request, session)
+            try:
+                await _require_active_widget_scope(session)
+            except HTTPException:
+                if not await _safe_send_text(websocket, json.dumps({
+                    "type": "error",
+                    "content": "Widget session is no longer valid. Start a new session.",
+                    "conversation_id": session.conversation_id,
+                })):
+                    return
+                continue
             
             # Process message and stream response
             try:
@@ -508,7 +654,8 @@ async def websocket_endpoint(
                 logger.error("Error processing WebSocket message", error=str(e))
                 if not await _safe_send_text(websocket, json.dumps({
                     "type": "error",
-                    "content": f"Error: {str(e)}",
+                    "content": "Unable to complete this response. Please try again.",
+                    "metadata": {"code": "generation_failed", "retryable": True},
                     "conversation_id": request.conversation_id or "",
                 })):
                     return
@@ -609,17 +756,29 @@ async def admin_websocket_endpoint(
                 })
 
             elif msg_type == "release_control":
-                # Collect buffered takeover messages before clearing state
-                takeover_messages = await ws_manager.pop_takeover_buffer(conversation_id)
-
-                # Inject history BEFORE notifying widget that AI is back in control.
-                # This ensures the AI has full context before the user can send the next message.
-                agent_id = await _conversation_agent_id(conversation_id)
-                if agent_id and takeover_messages:
+                # Read, inject, then acknowledge the buffer.  Clearing it before
+                # durable memory writes succeed drops the human conversation on
+                # a transient database failure.
+                takeover_messages = await ws_manager.get_takeover_buffer(conversation_id)
+                if takeover_messages:
                     try:
-                        await message_service.inject_history(conversation_id, agent_id, takeover_messages)
-                    except Exception as e:
-                        logger.error("inject_history_failed", error=str(e), conversation_id=conversation_id)
+                        await message_service.inject_history(
+                            conversation_id,
+                            scope.agent_id,
+                            takeover_messages,
+                        )
+                        await ws_manager.clear_takeover_buffer(conversation_id)
+                    except Exception as exc:
+                        logger.error(
+                            "takeover_history_release_failed",
+                            conversation_id=conversation_id,
+                            error_type=type(exc).__name__,
+                        )
+                        await ws_manager.send_to_admin(conversation_id, {
+                            "type": "system_notice",
+                            "content": "Conversation history could not be saved. AI control remains with the operator; retry release.",
+                        })
+                        continue
 
                 await ws_manager.set_human_control(conversation_id, False)
 

@@ -273,7 +273,7 @@ async def test_auto_sync_scheduler_queues_due_brand_through_the_same_store(monke
 
     assert await schedule_due_shopify_syncs(store, Settings(SECRET_KEY="test-secret")) == 1
     assert store.enqueue_sync.await_args.kwargs["trigger"] == "scheduled_sync"
-    assert catalog_service.create_job.await_args.args[2] == "brand-a"
+    assert catalog_service.create_job.await_args.kwargs["brand_id"] == "brand-a"
 
 
 @pytest.mark.asyncio

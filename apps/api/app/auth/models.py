@@ -40,6 +40,11 @@ class Permission(str, Enum):
     # Message permissions
     MESSAGE_READ = "message:read"
     MESSAGE_WRITE = "message:write"
+
+    # Privacy lifecycle permissions
+    PRIVACY_READ = "privacy:read"
+    PRIVACY_WRITE = "privacy:write"
+    PRIVACY_DELETE = "privacy:delete"
     
     # API Key permissions
     API_KEY_READ = "api_key:read"
@@ -61,6 +66,7 @@ ADMIN_PERMISSIONS = [
     Permission.AGENT_READ, Permission.AGENT_WRITE, Permission.AGENT_DELETE,
     Permission.DOCUMENT_READ, Permission.DOCUMENT_WRITE, Permission.DOCUMENT_DELETE,
     Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
+    Permission.PRIVACY_READ, Permission.PRIVACY_WRITE, Permission.PRIVACY_DELETE,
     Permission.API_KEY_READ, Permission.API_KEY_WRITE, Permission.API_KEY_DELETE,
     Permission.USER_READ, Permission.USER_WRITE, Permission.USER_DELETE,
     Permission.SYSTEM_ADMIN,
@@ -71,6 +77,7 @@ BRAND_ADMIN_PERMISSIONS = [
     Permission.AGENT_READ, Permission.AGENT_WRITE, Permission.AGENT_DELETE,
     Permission.DOCUMENT_READ, Permission.DOCUMENT_WRITE, Permission.DOCUMENT_DELETE,
     Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
+    Permission.PRIVACY_READ, Permission.PRIVACY_WRITE, Permission.PRIVACY_DELETE,
     Permission.API_KEY_READ, Permission.API_KEY_WRITE, Permission.API_KEY_DELETE,
 ]
 

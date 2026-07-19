@@ -87,6 +87,37 @@ services:
           cpus: "1.0"
           memory: 1G
 
+  # Enforces first-party privacy retention policies across all brand databases.
+  # Subject deletion remains an explicit verified operation and does not wait
+  # for this periodic cleanup cycle.
+  privacy-retention-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: agentbuilder-api
+    container_name: agentbuilder-privacy-retention-worker
+    env_file:
+      - .env.docker
+    environment:
+      PRIVACY_RETENTION_WORKER: "true"
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      DEBUG: "${DEBUG:-false}"
+      REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
+      REQUIRE_REDIS: "false"
+      ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+      STRAPI_URL: "${DOCKER_STRAPI_URL:-http://host.docker.internal:1337}"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
   # Processes Mongo-leased Shopify catalog snapshots and signed webhook
   # lifecycle actions. It deliberately shares the API image so catalog product
   # normalization cannot drift from the deployed request path.

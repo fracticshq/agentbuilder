@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.v1.endpoints.activity import router
 from app.auth.widget_session import issue_widget_session
 from app.dependencies import get_activity_service
+
+
+@pytest.fixture(autouse=True)
+def _allow_active_widget_scope(monkeypatch):
+    from app.api.v1.endpoints import activity as activity_module
+
+    async def allow_scope(**_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        activity_module.conversation_scope_store,
+        "require_active_widget_scope",
+        allow_scope,
+    )
 
 
 class _ActivityService:

@@ -49,6 +49,20 @@ role.
 
 The server derives the agent, conversation, user, and actor IDs from that
 signed token. Client-supplied values for those fields are not authoritative.
+It also checks the immutable creation-time brand scope against the agent's
+current brand on every message, history, activity, and control request. Moving
+an agent between brands invalidates old widget sessions rather than allowing
+them to follow the agent into the new tenant.
+
+### Privacy lifecycle
+
+Widget subjects can set long-term-memory consent, obtain a no-store export, or
+request first-party deletion through `/api/v1/messages/privacy/*`. Dashboard
+operators use the corresponding `/api/v1/admin/brands/{brand_id}/privacy/*`
+routes and dedicated `privacy:*` permissions. See the versioned
+[privacy lifecycle contract](./PRIVACY_LIFECYCLE.md) for consent, receipt,
+retention, and external-processor semantics; `202` is pending, not verified
+full deletion.
 
 Human-takeover control uses two separate WebSockets and never puts either
 credential in a URL query string:

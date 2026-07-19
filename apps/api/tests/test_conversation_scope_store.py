@@ -3,7 +3,10 @@ from copy import deepcopy
 import pytest
 
 from app.connections import connection_manager
-from app.services.conversation_scope_store import ConversationScopeStore
+from app.services.conversation_scope_store import (
+    ConversationScopeAuthorizationError,
+    ConversationScopeStore,
+)
 
 
 class _Result:
@@ -42,6 +45,22 @@ class _SystemDb:
         return self.collections.setdefault(name, _Collection())
 
 
+class _Agents:
+    def __init__(self, document):
+        self.document = document
+
+    async def find_one(self, query, projection=None):
+        if query.get("id") != self.document.get("id"):
+            return None
+        return deepcopy(self.document)
+
+
+class _SystemDbWithAgents(_SystemDb):
+    def __init__(self, agent):
+        super().__init__()
+        self.agents = _Agents(agent)
+
+
 @pytest.mark.asyncio
 async def test_conversation_scope_is_durably_bound_to_the_signed_session_identity(monkeypatch):
     system_db = _SystemDb()
@@ -61,3 +80,38 @@ async def test_conversation_scope_is_durably_bound_to_the_signed_session_identit
     assert stored["agent_id"] == "agent_1"
     assert stored["brand_id"] == "brand_1"
     assert stored["expires_at"] > stored["created_at"]
+
+
+@pytest.mark.asyncio
+async def test_widget_scope_rejects_a_session_after_the_agent_moves_tenants(monkeypatch):
+    system_db = _SystemDbWithAgents({
+        "id": "agent_1",
+        "status": "active",
+        "brand_id": "brand_1",
+        "brand_slug": "brand-one",
+    })
+    monkeypatch.setattr(connection_manager, "get_system_db", lambda: system_db)
+    store = ConversationScopeStore()
+    await store.bind(
+        conversation_id="conv_1",
+        user_id="user_1",
+        agent_id="agent_1",
+        brand_id="brand_1",
+        brand_slug="brand-one",
+    )
+
+    active = await store.require_active_widget_scope(
+        conversation_id="conv_1",
+        user_id="user_1",
+        agent_id="agent_1",
+    )
+    assert active.brand_id == "brand_1"
+
+    system_db.agents.document["brand_id"] = "brand_2"
+    system_db.agents.document["brand_slug"] = "brand-two"
+    with pytest.raises(ConversationScopeAuthorizationError):
+        await store.require_active_widget_scope(
+            conversation_id="conv_1",
+            user_id="user_1",
+            agent_id="agent_1",
+        )

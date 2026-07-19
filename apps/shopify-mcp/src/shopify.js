@@ -9,6 +9,13 @@ import {
 // Cache for discovered MCP endpoints to avoid redundant network calls
 const discoveryCache = new Map();
 
+export class ShopifyMcpDiscoveryError extends Error {
+  constructor(message = 'Shopify MCP tool discovery is unavailable') {
+    super(message);
+    this.name = 'ShopifyMcpDiscoveryError';
+  }
+}
+
 /**
  * Discovers the Shopify MCP endpoints from the shop's storefront domain.
  * Uses the /.well-known/customer-account-api discovery endpoint.
@@ -93,14 +100,21 @@ export async function fetchTools(url, headers = {}, expectedShopDomain) {
     if (response.status >= 300 && response.status < 400) {
       throw new Error('Shopify MCP redirect rejected');
     }
-    if (!response.ok) return [];
+    if (!response.ok) {
+      throw new ShopifyMcpDiscoveryError('Shopify MCP tool discovery returned a non-success status');
+    }
     const body = await response.json();
-    return body.result?.tools || [];
+    const tools = body?.result?.tools;
+    if (!Array.isArray(tools)) {
+      throw new ShopifyMcpDiscoveryError('Shopify MCP tool discovery returned an invalid catalogue');
+    }
+    return tools;
   } catch (err) {
     console.error('Shopify MCP tool discovery failed', {
       errorType: err instanceof Error ? err.name : 'unknown',
     });
-    return [];
+    if (err instanceof ShopifyMcpDiscoveryError) throw err;
+    throw new ShopifyMcpDiscoveryError();
   }
 }
 

@@ -39,4 +39,8 @@ if [ "${INGESTION_WORKER:-false}" = "true" ]; then
   exec python -m app.workers.ingestion_worker
 fi
 
+if [ "${PRIVACY_RETENTION_WORKER:-false}" = "true" ]; then
+  exec python -m app.workers.privacy_retention_worker
+fi
+
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000

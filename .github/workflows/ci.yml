@@ -45,6 +45,7 @@ jobs:
           ../../packages/agent_runtime
       - run: python -m pip check
       - run: python -m pytest -q
+      - run: python ../../evals/run_safety_contracts.py
       - run: python ../../scripts/generate_openapi.py --check
       - run: python ../../scripts/generate_postman_collection.py --check
 
@@ -66,7 +67,7 @@ jobs:
       - run: npm run build
 
   admin:
-    name: Admin build
+    name: Admin tests and build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -79,6 +80,7 @@ jobs:
           cache: npm
           cache-dependency-path: apps/admin/package-lock.json
       - run: npm ci
+      - run: npm test
       - run: npm run build
 
   shopify-mcp:

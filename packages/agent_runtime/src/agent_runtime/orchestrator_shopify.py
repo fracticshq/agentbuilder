@@ -14,6 +14,15 @@ from tools.types import ToolResult
 
 logger = structlog.get_logger(__name__)
 
+_SAFE_TOOL_FAILURE_MESSAGE = (
+    "The commerce service could not complete that action. Do not retry the action "
+    "automatically; ask the customer to try again."
+)
+_SAFE_LOOP_FAILURE_MESSAGE = (
+    "The commerce service is temporarily unavailable. Do not make or claim any "
+    "cart changes; ask the customer to try again."
+)
+
 
 def _safe_checkout_url(value: Any) -> Optional[str]:
     """Only retain absolute HTTPS checkout links; MCP validates the host."""
@@ -231,16 +240,28 @@ class ShopifyOrchestrator(Orchestrator):
                 self.conversation.append({"role": "assistant", "content": message})
                 
                 # Use error message if success is false
-                content = tool_result.error if not tool_result.success else self._format_tool_output(tool_result.data)
+                content = (
+                    _SAFE_TOOL_FAILURE_MESSAGE
+                    if not tool_result.success
+                    else self._format_tool_output(tool_result.data)
+                )
                 self.conversation.append({
                     "role": "tool",
                     "name": tool_name,
                     "content": content
                 })
             except Exception as loop_err:
-                logger.error("shopify_agent_loop_error", iteration=iteration, error=str(loop_err))
+                logger.error(
+                    "shopify_agent_loop_error",
+                    iteration=iteration,
+                    error_type=type(loop_err).__name__,
+                )
                 # Feed error back to LLM to allow one last chance to recover
-                self.conversation.append({"role": "tool", "name": "system", "content": f"System Error: {str(loop_err)}"})
+                self.conversation.append({
+                    "role": "tool",
+                    "name": "system",
+                    "content": _SAFE_LOOP_FAILURE_MESSAGE,
+                })
                 if iteration >= max_iterations:
                     break
 
@@ -559,9 +580,13 @@ class ShopifyOrchestrator(Orchestrator):
             if result.success:
                 self._capture_result_state(tool_name, result)
             return result
-        except Exception as e:
-            logger.error("shopify_tool_execution_failed", tool=tool_name, error=str(e))
-            return ToolResult(success=False, data=None, error=str(e))
+        except Exception as exc:
+            logger.error(
+                "shopify_tool_execution_failed",
+                tool=tool_name,
+                error_type=type(exc).__name__,
+            )
+            return ToolResult(success=False, data=None, error=_SAFE_TOOL_FAILURE_MESSAGE)
 
     def _preprocess_input(self, tool_name: str, tool_input: Dict[str, Any]):
         """Inject state and resolve natural language references to GIDs."""
@@ -668,8 +693,13 @@ class ShopifyOrchestrator(Orchestrator):
 
                     # Ensure quantity is integer
                     if "quantity" in item:
-                        try: item["quantity"] = int(item["quantity"])
-                        except: item["quantity"] = 1
+                        try:
+                            quantity = int(item["quantity"])
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError("Cart quantity must be a positive whole number") from exc
+                        if quantity < 1:
+                            raise ValueError("Cart quantity must be a positive whole number")
+                        item["quantity"] = quantity
                 
                 # Final validation pass
                 for item in tool_input["add_items"]:
@@ -1095,7 +1125,8 @@ Thought: "I've removed one pair of white socks. You now have 1 pair remaining."
             parsed = json.loads(clean_msg)
             if isinstance(parsed, dict) and "tool_name" in parsed: 
                 return parsed
-        except: pass
+        except json.JSONDecodeError:
+            pass
 
         # 2. Markdown Block
         match = re.search(r"```json\s*({.*?})\s*```", message, re.DOTALL)
@@ -1104,7 +1135,8 @@ Thought: "I've removed one pair of white socks. You now have 1 pair remaining."
                 parsed = json.loads(match.group(1))
                 if isinstance(parsed, dict) and "tool_name" in parsed: 
                     return parsed
-            except: pass
+            except json.JSONDecodeError:
+                pass
             
         # 3. Embedded JSON
         start_idx = message.find('{')
@@ -1116,6 +1148,7 @@ Thought: "I've removed one pair of white socks. You now have 1 pair remaining."
                     parsed = json.loads(candidate)
                     if isinstance(parsed, dict) and "tool_name" in parsed:
                         return parsed
-                except: pass
+                except json.JSONDecodeError:
+                    pass
         
         return None

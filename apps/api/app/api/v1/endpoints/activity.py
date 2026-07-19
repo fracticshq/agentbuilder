@@ -14,6 +14,11 @@ from ....auth.dependencies import ensure_brand_access, ensure_permission, requir
 from ....auth.models import Permission, User
 from ....auth.widget_session import WidgetSession, decode_widget_session
 from ....connections import connection_manager
+from ....services.conversation_scope_store import (
+    ConversationScopeAuthorizationError,
+    ConversationScopeStoreError,
+    conversation_scope_store,
+)
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -37,13 +42,23 @@ class BatchTrackResponse(BaseModel):
     ids: list[str]
 
 
-def _require_widget_session(
+async def _require_widget_session(
     x_widget_session: Optional[str],
     expected_agent_id: str,
 ) -> WidgetSession:
     session = decode_widget_session(x_widget_session, expected_agent_id=expected_agent_id)
     if not session:
         raise HTTPException(status_code=401, detail="A valid widget session is required")
+    try:
+        await conversation_scope_store.require_active_widget_scope(
+            conversation_id=session.conversation_id,
+            user_id=session.user_id,
+            agent_id=session.agent_id,
+        )
+    except ConversationScopeAuthorizationError as exc:
+        raise HTTPException(status_code=401, detail="Widget session is no longer valid") from exc
+    except ConversationScopeStoreError as exc:
+        raise HTTPException(status_code=503, detail="Widget sessions are temporarily unavailable") from exc
     return session
 
 
@@ -80,7 +95,7 @@ async def track_event(
     x_widget_session: Optional[str] = Header(None),
 ):
     """Track a single activity event."""
-    session = _require_widget_session(x_widget_session, request.agent_id)
+    session = await _require_widget_session(x_widget_session, request.agent_id)
     event = await svc.track(_bind_widget_event(request, session))
     return TrackEventResponse(id=event.id, timestamp=event.timestamp)
 
@@ -97,7 +112,7 @@ async def track_events_batch(
     expected_agent_id = body.events[0].agent_id
     if any(event.agent_id != expected_agent_id for event in body.events):
         raise HTTPException(status_code=422, detail="Widget event batches must target one agent")
-    session = _require_widget_session(x_widget_session, expected_agent_id)
+    session = await _require_widget_session(x_widget_session, expected_agent_id)
     events = await svc.track_batch([_bind_widget_event(event, session) for event in body.events])
     return BatchTrackResponse(created=len(events), ids=[e.id for e in events])
 

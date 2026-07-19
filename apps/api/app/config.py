@@ -282,6 +282,13 @@ class Settings(BaseSettings):
     SUMMARY_MODEL: str = "gpt-4o-mini"
     SUMMARY_MAX_TOKENS: int = 150
     SUMMARY_TEMPERATURE: float = 0.3
+
+    # Privacy lifecycle.  Long-term memory is disabled until the signed widget
+    # session has explicitly granted consent; this policy governs first-party
+    # operational-event cleanup and subject export limits.
+    PRIVACY_DEFAULT_RETENTION_DAYS: int = 90
+    PRIVACY_RETENTION_POLL_SECONDS: float = 3600.0
+    PRIVACY_EXPORT_MAX_RECORDS: int = 10000
     
     # Strapi Dashboard Integration
     STRAPI_URL: str = "http://localhost:1337"
@@ -325,7 +332,7 @@ class Settings(BaseSettings):
             return v.lower() in ("true", "1", "yes", "on")
         return v
     
-    @field_validator("API_WORKERS", "RATE_LIMIT_REQUESTS_PER_MINUTE", "RATE_LIMIT_BURST", "RATE_LIMIT_POLICY_WIDGET_CHAT", "RATE_LIMIT_POLICY_WIDGET_STREAM", "RATE_LIMIT_POLICY_WIDGET_WS_CONNECT", "RATE_LIMIT_POLICY_WIDGET_WS_MESSAGE", "RATE_LIMIT_POLICY_ADMIN_API", "RATE_LIMIT_POLICY_UPLOAD", "RATE_LIMIT_POLICY_STRAPI_SYNC", "MAX_FILE_SIZE_MB", "MAX_UPLOAD_FILES", "MAX_UPLOAD_TOTAL_SIZE_MB", "MAX_ARCHIVE_FILES", "MAX_ARCHIVE_UNCOMPRESSED_SIZE_MB", "MAX_ARCHIVE_COMPRESSION_RATIO", "INGESTION_JOB_TTL_SECONDS", "INGESTION_PAYLOAD_TTL_SECONDS", "INGESTION_LEASE_SECONDS", "INGESTION_MAX_ATTEMPTS", "INGESTION_RETRY_DELAY_SECONDS", "SHOPIFY_WEBHOOK_MAX_BODY_BYTES", "CATALOG_SYNC_JOB_TTL_SECONDS", "CATALOG_SYNC_LEASE_SECONDS", "CATALOG_SYNC_MAX_ATTEMPTS", "CATALOG_SYNC_RETRY_DELAY_SECONDS", "ACCESS_TOKEN_EXPIRE_MINUTES", "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "SHORT_TERM_TTL", "EPISODIC_TTL", "SUMMARY_CACHE_TTL", "AUTO_SUMMARY_TURNS", "MAX_MESSAGES_PER_CONVERSATION", "MAX_FACTS_PER_USER", "MAX_SUMMARIES_PER_CONVERSATION", "REDIS_CONNECTION_TIMEOUT", "SUMMARY_MAX_TOKENS", "VECTOR_DIMENSIONS", mode="before")
+    @field_validator("API_WORKERS", "RATE_LIMIT_REQUESTS_PER_MINUTE", "RATE_LIMIT_BURST", "RATE_LIMIT_POLICY_WIDGET_CHAT", "RATE_LIMIT_POLICY_WIDGET_STREAM", "RATE_LIMIT_POLICY_WIDGET_WS_CONNECT", "RATE_LIMIT_POLICY_WIDGET_WS_MESSAGE", "RATE_LIMIT_POLICY_ADMIN_API", "RATE_LIMIT_POLICY_UPLOAD", "RATE_LIMIT_POLICY_STRAPI_SYNC", "MAX_FILE_SIZE_MB", "MAX_UPLOAD_FILES", "MAX_UPLOAD_TOTAL_SIZE_MB", "MAX_ARCHIVE_FILES", "MAX_ARCHIVE_UNCOMPRESSED_SIZE_MB", "MAX_ARCHIVE_COMPRESSION_RATIO", "INGESTION_JOB_TTL_SECONDS", "INGESTION_PAYLOAD_TTL_SECONDS", "INGESTION_LEASE_SECONDS", "INGESTION_MAX_ATTEMPTS", "INGESTION_RETRY_DELAY_SECONDS", "SHOPIFY_WEBHOOK_MAX_BODY_BYTES", "CATALOG_SYNC_JOB_TTL_SECONDS", "CATALOG_SYNC_LEASE_SECONDS", "CATALOG_SYNC_MAX_ATTEMPTS", "CATALOG_SYNC_RETRY_DELAY_SECONDS", "ACCESS_TOKEN_EXPIRE_MINUTES", "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "SHORT_TERM_TTL", "EPISODIC_TTL", "SUMMARY_CACHE_TTL", "AUTO_SUMMARY_TURNS", "MAX_MESSAGES_PER_CONVERSATION", "MAX_FACTS_PER_USER", "MAX_SUMMARIES_PER_CONVERSATION", "REDIS_CONNECTION_TIMEOUT", "SUMMARY_MAX_TOKENS", "VECTOR_DIMENSIONS", "PRIVACY_DEFAULT_RETENTION_DAYS", "PRIVACY_EXPORT_MAX_RECORDS", mode="before")
     @classmethod
     def parse_int_fields(cls, v):
         """Parse integer fields from string."""
@@ -333,7 +340,7 @@ class Settings(BaseSettings):
             return int(v)
         return v
 
-    @field_validator("INGESTION_WORKER_POLL_SECONDS", "CATALOG_SYNC_WORKER_POLL_SECONDS", "CATALOG_SYNC_SCHEDULER_POLL_SECONDS", "MALWARE_SCAN_TIMEOUT_SECONDS", mode="before")
+    @field_validator("INGESTION_WORKER_POLL_SECONDS", "CATALOG_SYNC_WORKER_POLL_SECONDS", "CATALOG_SYNC_SCHEDULER_POLL_SECONDS", "MALWARE_SCAN_TIMEOUT_SECONDS", "PRIVACY_RETENTION_POLL_SECONDS", mode="before")
     @classmethod
     def parse_ingestion_worker_poll_seconds(cls, v):
         if isinstance(v, str):
@@ -386,6 +393,20 @@ class Settings(BaseSettings):
             raise ValueError("SHOPIFY_ADMIN_API_VERSION must use a Shopify YYYY-MM release label")
         return normalized
 
+    @field_validator("PRIVACY_DEFAULT_RETENTION_DAYS")
+    @classmethod
+    def validate_privacy_retention_days(cls, value: int) -> int:
+        if not 1 <= value <= 3650:
+            raise ValueError("PRIVACY_DEFAULT_RETENTION_DAYS must be between 1 and 3650")
+        return value
+
+    @field_validator("PRIVACY_RETENTION_POLL_SECONDS")
+    @classmethod
+    def validate_privacy_retention_poll(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("PRIVACY_RETENTION_POLL_SECONDS must be greater than zero")
+        return value
+
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT == "production"
@@ -424,6 +445,7 @@ class Settings(BaseSettings):
 
         if self.MALWARE_SCAN_MODE != "clamav":
             missing.append("MALWARE_SCAN_MODE (must be clamav in production)")
+
         scanner_host = self.MALWARE_SCAN_HOST.strip().lower()
         if (
             not scanner_host

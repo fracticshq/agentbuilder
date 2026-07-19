@@ -30,6 +30,10 @@ class ConversationScopeMismatchError(ConversationScopeStoreError):
     """A valid token conflicts with an existing immutable conversation scope."""
 
 
+class ConversationScopeAuthorizationError(ConversationScopeStoreError):
+    """A signed widget session can no longer access its original tenant scope."""
+
+
 @dataclass(frozen=True)
 class ConversationScope:
     conversation_id: str
@@ -119,6 +123,11 @@ class ConversationScopeStore:
             **values,
             "created_at": now,
             "expires_at": expires_at,
+            "privacy": {
+                "status": "active",
+                "long_term_memory_consent": "unknown",
+                "updated_at": now,
+            },
         }
         try:
             await collection.insert_one(document)
@@ -152,7 +161,111 @@ class ConversationScopeStore:
         except Exception as exc:
             logger.warning("conversation_scope_read_failed", error_type=type(exc).__name__)
             raise ConversationScopeStoreError("Conversation scope storage is unavailable") from exc
+        if isinstance(document, dict) and (document.get("privacy") or {}).get("status") == "erased":
+            return None
         return self._from_document(document)
+
+    async def set_long_term_memory_consent(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        agent_id: str,
+        granted: bool,
+        policy_version: str | None = None,
+    ) -> None:
+        """Persist explicit, session-bound consent for episodic memory only."""
+        collection = self._collection()
+        now = self._utc_now()
+        try:
+            result = await collection.update_one(
+                {
+                    "_id": conversation_id,
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "privacy.status": {"$ne": "erased"},
+                },
+                {
+                    "$set": {
+                        "privacy.long_term_memory_consent": "granted" if granted else "withdrawn",
+                        "privacy.updated_at": now,
+                        "privacy.policy_version": policy_version,
+                    },
+                },
+            )
+        except Exception as exc:
+            logger.warning("conversation_scope_consent_write_failed", error_type=type(exc).__name__)
+            raise ConversationScopeStoreError("Conversation scope storage is unavailable") from exc
+        if not getattr(result, "matched_count", 0):
+            raise ConversationScopeAuthorizationError("Widget session is not authorized for this conversation")
+
+    async def has_long_term_memory_consent(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        agent_id: str,
+    ) -> bool:
+        """Whether this signed session explicitly opted into episodic memory."""
+        collection = self._collection()
+        try:
+            document = await collection.find_one(
+                {
+                    "_id": conversation_id,
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "privacy.status": {"$ne": "erased"},
+                    "privacy.long_term_memory_consent": "granted",
+                },
+                {"_id": 1},
+            )
+        except Exception as exc:
+            logger.warning("conversation_scope_consent_read_failed", error_type=type(exc).__name__)
+            raise ConversationScopeStoreError("Conversation scope storage is unavailable") from exc
+        return bool(document)
+
+    async def require_active_widget_scope(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        agent_id: str,
+    ) -> ConversationScope:
+        """Return the immutable scope only while the agent still belongs to it.
+
+        A widget JWT binds a visitor to an agent, but an agent can later be
+        moved between brands by an operator.  Looking up messages through the
+        agent's current brand database without this check would make an old
+        token cross the tenant boundary.  Keep the original scope authoritative
+        and reject the session rather than routing it to the new tenant.
+        """
+        scope = await self.get(conversation_id)
+        if (
+            scope is None
+            or scope.user_id != user_id
+            or scope.agent_id != agent_id
+        ):
+            raise ConversationScopeAuthorizationError("Widget session is not authorized for this conversation")
+
+        try:
+            agent = await connection_manager.get_system_db().agents.find_one(
+                {"id": agent_id},
+                {"brand_id": 1, "brand_slug": 1, "status": 1},
+            )
+        except (RuntimeError, AttributeError, KeyError, TypeError) as exc:
+            raise ConversationScopeStoreError("Conversation scope storage is unavailable") from exc
+        except Exception as exc:
+            logger.warning("conversation_scope_agent_lookup_failed", error_type=type(exc).__name__)
+            raise ConversationScopeStoreError("Conversation scope storage is unavailable") from exc
+
+        if (
+            not isinstance(agent, dict)
+            or agent.get("status") != "active"
+            or agent.get("brand_id") != scope.brand_id
+            or agent.get("brand_slug") != scope.brand_slug
+        ):
+            raise ConversationScopeAuthorizationError("Widget session is no longer active for this tenant")
+        return scope
 
 
 conversation_scope_store = ConversationScopeStore()

@@ -8,17 +8,14 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-import ipaddress
 import os
 import re
-import socket
 import uuid
 from datetime import datetime
 from functools import partial
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 import structlog
@@ -26,6 +23,7 @@ import structlog
 from app.config import Settings
 from app.connections import connection_manager
 from app.services.knowledge_service import KnowledgeService
+from . import catalog_network_safety
 from .job_store import JobStore
 
 logger = structlog.get_logger()
@@ -182,158 +180,32 @@ def _normalize_currency(value: Any) -> Optional[str]:
 
 
 def normalize_shopify_store_url(value: Any) -> str:
-    """Return a normalized Shopify store root URL or raise an actionable error."""
-    raw = str(value or "").strip()
-    if not raw:
-        raise ValueError("Shopify store URL is required, for example celavilifestyle.com.")
-
-    candidate = raw if "://" in raw else f"https://{raw}"
-    try:
-        parsed = urlsplit(candidate)
-        hostname = parsed.hostname
-        if parsed.scheme not in {"http", "https"} or not hostname:
-            raise ValueError
-        if parsed.username or parsed.password:
-            raise ValueError
-        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-            raise ValueError
-        host = hostname.rstrip(".").lower()
-        _validate_shopify_hostname(host)
-        port = f":{parsed.port}" if parsed.port else ""
-    except (ValueError, TypeError):
-        raise ValueError(
-            "Enter a Shopify store root URL such as https://celavilifestyle.com or https://store.myshopify.com."
-        ) from None
-
-    return urlunsplit((parsed.scheme, f"{host}{port}", "", "", ""))
-
-
-def _validate_shopify_hostname(hostname: str) -> None:
-    """Reject obvious local, private, and cloud-metadata destinations."""
-    host = hostname.rstrip(".").lower()
-    blocked_names = {
-        "localhost",
-        "localhost.localdomain",
-        "metadata",
-        "metadata.google.internal",
-        "host.docker.internal",
-        "kubernetes.default.svc",
-    }
-    if host in blocked_names or host.endswith((".localhost", ".local", ".internal", ".test", ".invalid")):
-        raise ValueError
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return
-    if (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-        or address.is_unspecified
-    ):
-        raise ValueError
-
-
-def _is_myshopify_hostname(hostname: str) -> bool:
-    host = hostname.rstrip(".").lower()
-    store_name = host.removesuffix(".myshopify.com")
-    return (
-        host.endswith(".myshopify.com")
-        and bool(store_name)
-        and bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", store_name))
-    )
+    """Compatibility wrapper for the catalog network-safety boundary."""
+    return catalog_network_safety.normalize_shopify_store_url(value)
 
 
 def normalize_authenticated_shopify_store_url(value: Any) -> str:
-    """Require the canonical HTTPS Shopify host before sending an Admin token."""
-    base_url = normalize_shopify_store_url(value)
-    parsed = urlsplit(base_url)
-    hostname = (parsed.hostname or "").rstrip(".").lower()
-    if parsed.scheme != "https" or parsed.port is not None or not _is_myshopify_hostname(hostname):
-        raise ValueError(
-            "Authenticated Shopify sync requires the canonical HTTPS store hostname, for example https://store.myshopify.com."
-        )
-    return f"https://{hostname}"
+    """Compatibility wrapper for the catalog network-safety boundary."""
+    return catalog_network_safety.normalize_authenticated_shopify_store_url(value)
 
 
-def _is_public_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Return whether an address is safe to use as an external HTTP destination."""
-    return address.is_global
-
-
-def _validate_public_hostname(hostname: str) -> None:
-    """Reject local, reserved, and metadata hostnames before a DNS lookup."""
-    host = hostname.rstrip(".").lower()
-    blocked_names = {
-        "localhost",
-        "localhost.localdomain",
-        "metadata",
-        "metadata.google.internal",
-        "host.docker.internal",
-        "kubernetes.default.svc",
-    }
-    if host in blocked_names or host.endswith((".localhost", ".local", ".internal", ".test", ".invalid")):
-        raise ValueError("URL must target a public host.")
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return
-    if not _is_public_ip(address):
-        raise ValueError("URL must target a public host.")
+def _is_myshopify_hostname(hostname: str) -> bool:
+    """Compatibility seam for callers that patch Shopify host detection."""
+    return catalog_network_safety._is_myshopify_hostname(hostname)
 
 
 async def _resolve_public_hostname(hostname: str) -> None:
-    """Resolve a hostname and reject DNS answers that point into private networks."""
-    try:
-        records = await asyncio.to_thread(
-            socket.getaddrinfo,
-            hostname,
-            None,
-            type=socket.SOCK_STREAM,
-        )
-    except socket.gaierror as exc:
-        raise ValueError("URL hostname could not be resolved.") from exc
-
-    addresses = {record[4][0] for record in records if record[4]}
-    if not addresses:
-        raise ValueError("URL hostname could not be resolved.")
-
-    for raw_address in addresses:
-        try:
-            address = ipaddress.ip_address(raw_address)
-        except ValueError as exc:
-            raise ValueError("URL hostname resolved to an invalid address.") from exc
-        if not _is_public_ip(address):
-            raise ValueError("URL hostname must resolve only to public addresses.")
+    """Compatibility seam for callers that inject catalog DNS resolution."""
+    await catalog_network_safety._resolve_public_hostname(hostname)
 
 
 async def validate_json_feed_url(value: Any) -> str:
-    """Validate a JSON feed URL, including its currently-resolved IP addresses."""
-    raw = str(value or "").strip()
-    try:
-        parsed = urlsplit(raw)
-        hostname = parsed.hostname
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not hostname
-            or parsed.username
-            or parsed.password
-            or parsed.fragment
-        ):
-            raise ValueError
-        # Accessing .port intentionally validates malformed ports such as :abc.
-        _ = parsed.port
-    except (TypeError, ValueError):
-        raise ValueError("JSON feed URL must be a public http or https URL.") from None
-
-    host = hostname.rstrip(".").lower()
-    _validate_public_hostname(host)
-    if _is_myshopify_hostname(host) and parsed.path.rstrip("/") == "/products.json":
-        raise ValueError("Shopify catalog sync must use the authenticated Admin GraphQL integration, not products.json.")
-    await _resolve_public_hostname(host)
-    return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path or "/", parsed.query, ""))
+    """Validate a JSON feed URL through the isolated network-safety boundary."""
+    return await catalog_network_safety.validate_json_feed_url(
+        value,
+        resolve_public_hostname=_resolve_public_hostname,
+        is_myshopify_hostname=_is_myshopify_hostname,
+    )
 
 
 def normalize_currency_code(value: Any, *, allow_empty: bool = True) -> Optional[str]:
@@ -1165,30 +1037,11 @@ async def _upsert_shopify_catalog_into_knowledge(
 
 async def fetch_json_feed(url: str, fallback_currency: Optional[str] = None) -> dict:
     """Fetch a JSON URL, auto-detect format, return normalised items + detected format."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; AgentBuilder/1.0)",
-        "Accept": "application/json",
-    }
-    request_url = await validate_json_feed_url(url)
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
-        for redirect_count in range(4):
-            resp = await client.get(request_url, headers=headers)
-            is_redirect = bool(getattr(resp, "is_redirect", False)) or resp.status_code in {301, 302, 303, 307, 308}
-            if not is_redirect:
-                break
-
-            if redirect_count == 3:
-                raise ValueError("Too many redirects when fetching JSON feed.")
-            location = resp.headers.get("Location")
-            if not location:
-                raise ValueError("JSON feed returned a redirect without a Location header.")
-            request_url = await validate_json_feed_url(urljoin(request_url, location))
-        else:  # pragma: no cover - the loop always breaks or raises
-            raise ValueError("Too many redirects when fetching JSON feed.")
-
-        if not resp.is_success:
-            raise ValueError(f"HTTP {resp.status_code} when fetching JSON feed")
-        data = resp.json()
+    data = await catalog_network_safety.fetch_json_feed_data(
+        url,
+        validate_url=validate_json_feed_url,
+        client_factory=httpx.AsyncClient,
+    )
 
     fmt = _detect_format(data)
     if fmt == "shopify":

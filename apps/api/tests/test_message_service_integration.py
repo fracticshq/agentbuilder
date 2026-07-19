@@ -132,6 +132,11 @@ def service_bundle():
         service.episodic.extract_and_store_facts = AsyncMock(return_value=[])
         service.episodic.get_user_facts = AsyncMock(return_value=[])
 
+        async def granted_when_configured(**_kwargs):
+            return service._long_term_memory_enabled()
+
+        service._long_term_memory_consent_granted = granted_when_configured
+
         service.graph = AsyncMock()
         service.graph.check_escalation = AsyncMock(return_value=[])
         service.graph.match_rules = AsyncMock(return_value=[])
@@ -704,6 +709,7 @@ async def test_build_memory_context_aggregates_current_memory_layers(service_bun
         user_id="user123",
         query="warranty",
         escalations=["escalation"],
+        long_term_enabled=True,
     )
 
     assert context["recent_messages"] == ["recent-message"]
@@ -719,3 +725,22 @@ async def test_build_memory_context_aggregates_current_memory_layers(service_bun
         query="warranty",
         context={},
     )
+
+
+@pytest.mark.asyncio
+async def test_process_message_does_not_extract_long_term_facts_without_consent(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+    service.agent_config = {"memory": {"long_term": {"enabled": True}}}
+    service._long_term_memory_consent_granted = AsyncMock(return_value=False)
+    service._build_memory_context = AsyncMock(return_value=_empty_memory_context())
+    orchestrator.run.return_value = AgentResult(answer="A safe response", metadata={"tool_results": {}})
+
+    await service.process_message(MessageRequest(
+        message="remember that I prefer email",
+        user_id="user123",
+        agent_id="agent-123",
+        conversation_id="conv123",
+    ))
+
+    service.episodic.extract_and_store_facts.assert_not_awaited()

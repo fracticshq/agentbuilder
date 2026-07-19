@@ -54,6 +54,11 @@ single terminal `error` event with `metadata.code = "generation_failed"` and
 `done` event afterward. The content is a generic retry message, never a raw
 LLM/provider exception.
 
+This rule also applies to the HTTP streaming wrapper and the widget WebSocket
+wrapper: no provider, MCP, database, authorization, or exception text may be
+serialized to an unauthenticated widget client. WebSocket errors use the same
+`generation_failed` metadata and a generic retry message.
+
 ## Admin operational contract
 
 - Azure deployment discovery requires valid ARM configuration. Missing ARM

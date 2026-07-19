@@ -240,3 +240,45 @@ async def test_pii_encryption_failure_never_stores_plaintext(monkeypatch):
 
     assert await episodic_memory.store_fact(fact) is None
     assert collection.inserted == []
+
+
+@pytest.mark.asyncio
+async def test_pii_fact_context_is_not_persisted_outside_the_encrypted_envelope():
+    vault = PIIVault(master_key=CryptoUtils.generate_key())
+
+    class FactCollection:
+        def __init__(self):
+            self.inserted = []
+
+        async def count_documents(self, query):
+            return 0
+
+        async def insert_one(self, document):
+            self.inserted.append(document)
+
+    collection = FactCollection()
+
+    class FactDatabase:
+        def __getitem__(self, name):
+            assert name == "episodic_memory"
+            return collection
+
+    episodic_memory = EpisodicMemory(FactDatabase())
+    episodic_memory.pii_vault = vault
+    fact = EpisodicFact(
+        id="fact-2",
+        user_id="user-1",
+        conversation_id="conversation-1",
+        fact_type="profile",
+        fact="email: alice@example.com",
+        confidence=0.9,
+        pii_encrypted=True,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=90),
+        metadata={"context": "My email is alice@example.com", "source": "entity_extractor"},
+    )
+
+    assert await episodic_memory.store_fact(fact) == fact
+    persisted = collection.inserted[0]
+    assert persisted["metadata"]["context_redacted"] is True
+    assert "context" not in persisted["metadata"]
+    assert "alice@example.com" not in str(persisted["fact"])

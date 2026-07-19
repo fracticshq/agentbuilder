@@ -284,8 +284,11 @@ def test_shopify_graphql_adapter_preserves_numeric_identity_money_images_and_inv
     assert item["image_url"] == "https://cdn.example.com/linen-m.jpg"
     assert item["variant_options"] == {"Size": "M"}
 
-    legacy["variants"]["nodes"][0]["inventoryPolicy"] = "DENY"
-    denied_item = _normalize_shopify({"products": [_shopify_graphql_product_to_legacy(legacy)]})[0]
+    # The GraphQL adapter returns the canonical legacy list shape. Reuse that
+    # result to verify its inventory-policy projection rather than treating it
+    # as a raw GraphQL connection a second time.
+    legacy["variants"][0]["inventory_policy"] = "deny"
+    denied_item = _normalize_shopify({"products": [legacy]})[0]
     assert denied_item["in_stock"] is False
 
 
