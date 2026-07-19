@@ -109,6 +109,26 @@ During `_load_agent_config()` it:
 
 The retrieval pipeline is brand-isolated. For Atlas and BM25, the brand slug becomes the MongoDB database name after replacing `.` with `_` and trimming to MongoDB's database-name limit.
 
+### Vertical intent profiles
+
+Hybrid RAG does not inherit plumbing, bathware, or any other vertical's
+keywords globally. Commerce-neutral signals such as product, price, and SKU
+remain available to all agents. A vertical-specific intent profile must be
+explicitly configured in the agent runtime contract:
+
+```json
+{
+  "domain": {
+    "verticals": ["bathware"]
+  }
+}
+```
+
+The `bathware` profile enables terms such as faucet, commode, and basin for
+both scope filtering and product-intent classification. Do not infer a profile
+from a brand name, slug, or prompt text; that would contaminate generic, Lal
+Kitab, and other agent use cases.
+
 Example:
 
 ```text
@@ -441,7 +461,7 @@ Expected flow:
 
 ## Why Hybrid Search Is Used
 
-Vector search is good at semantic matching:
+For an agent configured with the `bathware` profile, vector search is good at semantic matching:
 
 - "tap for wash basin" can match "basin mixer" or "pillar cock"
 - "budget bathroom faucet" can match relevant product categories

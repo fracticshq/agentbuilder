@@ -117,9 +117,13 @@ Catalog import, sync configuration, and sync routes require a JWT or API key
 whose owner has access to the target `brand_id`. The API rejects private,
 loopback, link-local, and otherwise non-public JSON-feed destinations, including
 unsafe redirects. Production Shopify sync requires a canonical HTTPS
-`<shop>.myshopify.com` host and Admin API token; credentialed redirects are
-refused. Each brand can have one active Mongo-leased full snapshot, so an
-overlapping trigger returns the existing job with `deduplicated: true`.
+`<shop>.myshopify.com` host and Admin API token with `read_products` and
+`read_inventory`; credentialed redirects are refused. The worker uses the
+versioned Admin GraphQL API, not REST product endpoints. Each brand can have
+one active Mongo-leased full snapshot, so an overlapping trigger returns the
+existing job with `deduplicated: true`.
+The generic JSON-feed route rejects canonical Shopify `products.json` URLs so
+it cannot bypass the authenticated GraphQL catalog lifecycle.
 
 `POST /api/v1/catalog/shopify/webhooks` is Shopify-signed, not dashboard or
 API-key authenticated. It validates the raw-body HMAC, resolves the canonical

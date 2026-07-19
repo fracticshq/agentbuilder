@@ -1017,6 +1017,9 @@ export default function AgentWizard() {
     setIsDeploying(true);
     try {
       const existingConfiguration = existingAgent?.configuration || {};
+      const existingDomain = existingConfiguration.domain && typeof existingConfiguration.domain === 'object'
+        ? existingConfiguration.domain
+        : {};
       const isCommerceAgent = agentData.agent_template === 'ecommerce'
         || agentData.agent_template === 'ecommerce_sales'
         || agentData.data_source === 'shopify';
@@ -1088,6 +1091,9 @@ export default function AgentWizard() {
               ? 'ecommerce'
               : (agentData.agent_template === 'astrology_lalkitab' ? 'astrology' : 'generic'),
             template: agentData.agent_template || 'generic',
+            // Vertical profiles are explicit runtime policy. Preserve them on
+            // wizard edits rather than inferring vocabulary from brand prose.
+            verticals: Array.isArray(existingDomain.verticals) ? existingDomain.verticals : [],
           },
           rag: (agentData.data_source === 'rag' || (agentData.data_source === 'shopify' && agentData.shopify_integration_mode !== 'storefront_ucp_mcp')) ? {
             enabled: true,

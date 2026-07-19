@@ -16,6 +16,22 @@ from tools.types import BaseTool, ToolResult
 
 settings = Settings()
 
+# These provider schemas remain internally addressable only so previously saved
+# encrypted credentials can still be masked/exported safely. They have no
+# provider executor and must never be advertised, configured, or registered by
+# the runtime until a versioned implementation is added.
+RETIRED_PROVIDER_TOOL_IDS = frozenset({
+    "hubspot",
+    "salesforce",
+    "zendesk",
+    "slack",
+    "google_sheets",
+    "airtable",
+    "notion",
+    "zapier_webhook",
+    "n8n_webhook",
+})
+
 TOOL_REGISTRY: list[dict[str, Any]] = [
     {
         "id": "shopify",
@@ -50,6 +66,7 @@ TOOL_REGISTRY: list[dict[str, Any]] = [
         "auth_type": "private_app_token",
         "secret_fields": ["access_token"],
         "config_schema": {"access_token": {"type": "string", "secret": True}},
+        "publicly_available": False,
     },
     {
         "id": "salesforce",
@@ -64,6 +81,7 @@ TOOL_REGISTRY: list[dict[str, Any]] = [
             "refresh_token": {"type": "string", "secret": True},
             "access_token": {"type": "string", "secret": True},
         },
+        "publicly_available": False,
     },
     {
         "id": "zendesk",
@@ -76,6 +94,7 @@ TOOL_REGISTRY: list[dict[str, Any]] = [
             "email": {"type": "string"},
             "api_token": {"type": "string", "secret": True},
         },
+        "publicly_available": False,
     },
     {
         "id": "slack",
@@ -88,6 +107,7 @@ TOOL_REGISTRY: list[dict[str, Any]] = [
             "signing_secret": {"type": "string", "secret": True},
             "default_channel": {"type": "string"},
         },
+        "publicly_available": False,
     },
     {
         "id": "google_sheets",
@@ -99,6 +119,7 @@ TOOL_REGISTRY: list[dict[str, Any]] = [
             "spreadsheet_id": {"type": "string", "required": True},
             "service_account_json": {"type": "string", "secret": True},
         },
+        "publicly_available": False,
     },
     {
         "id": "airtable",
@@ -110,6 +131,7 @@ TOOL_REGISTRY: list[dict[str, Any]] = [
             "base_id": {"type": "string", "required": True},
             "personal_access_token": {"type": "string", "secret": True},
         },
+        "publicly_available": False,
     },
     {
         "id": "notion",
@@ -121,6 +143,7 @@ TOOL_REGISTRY: list[dict[str, Any]] = [
             "database_id": {"type": "string"},
             "integration_token": {"type": "string", "secret": True},
         },
+        "publicly_available": False,
     },
     {
         "id": "zapier_webhook",
@@ -132,6 +155,7 @@ TOOL_REGISTRY: list[dict[str, Any]] = [
             "webhook_url": {"type": "string", "required": True, "secret": True},
             "secret": {"type": "string", "secret": True},
         },
+        "publicly_available": False,
     },
     {
         "id": "n8n_webhook",
@@ -143,6 +167,7 @@ TOOL_REGISTRY: list[dict[str, Any]] = [
             "webhook_url": {"type": "string", "required": True, "secret": True},
             "secret": {"type": "string", "secret": True},
         },
+        "publicly_available": False,
     },
 ]
 
@@ -152,7 +177,11 @@ class ToolRegistryService:
         self._tools_by_id = {tool["id"]: tool for tool in TOOL_REGISTRY}
 
     def list_tools(self) -> list[dict[str, Any]]:
-        return deepcopy(TOOL_REGISTRY)
+        return [
+            deepcopy(tool)
+            for tool in TOOL_REGISTRY
+            if tool["id"] not in RETIRED_PROVIDER_TOOL_IDS and tool.get("publicly_available", True)
+        ]
 
     def get_tool(self, tool_id: str) -> dict[str, Any] | None:
         tool = self._tools_by_id.get(tool_id)
@@ -175,6 +204,7 @@ class ToolRegistryService:
                     },
                 }
                 for tool in TOOL_REGISTRY
+                if tool["id"] not in RETIRED_PROVIDER_TOOL_IDS and tool.get("publicly_available", True)
             }
         }
 
@@ -205,7 +235,11 @@ class ToolRegistryService:
                 continue
             seen_tool_ids.add(tool_id)
             definition = self.get_tool(tool_id)
-            if definition:
+            if (
+                definition
+                and tool_id not in RETIRED_PROVIDER_TOOL_IDS
+                and definition.get("publicly_available", True)
+            ):
                 runtime_tools.append(ConfiguredExternalTool(definition, entry))
         return runtime_tools
 

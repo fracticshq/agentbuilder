@@ -44,7 +44,7 @@ from .response_validator import ResponseValidator, validate_claim_evidence  # Ph
 from .strapi_client import StrapiClient
 from .runtime_settings_service import RuntimeSettingsService
 from .tool_config_secrets import decrypt_full_agent_configuration_for_runtime
-from .capability_firewall import CapabilityDecision, CapabilityFirewall
+from .capability_firewall import CapabilityDecision, CapabilityFirewall, configured_verticals
 from .commerce_config import is_commerce_agent_config, normalize_commerce_configuration
 from .observability_service import ObservabilityService
 from .prompt_assembler import PromptAssembler
@@ -2180,6 +2180,7 @@ Rules:
                 rerank_api_key=voyage_config["api_key"] or None,
                 rerank_model=voyage_config["rerank_model"],
                 rerank_base_url=voyage_config["base_url"],
+                verticals=sorted(configured_verticals(self.agent_config or {})),
             )
             logger.info("retrieval_pipeline_initialized", brand_id=brand_slug)
         except Exception as e:

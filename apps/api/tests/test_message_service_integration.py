@@ -333,6 +333,7 @@ async def test_process_message_blocks_unrelated_nutrition_request_before_orchest
 async def test_process_message_filters_mixed_scope_request_before_orchestrator(service_bundle):
     service = service_bundle["service"]
     orchestrator = service_bundle["orchestrator"]
+    service.agent_config = {"domain": {"verticals": ["bathware"]}}
 
     service._build_memory_context = AsyncMock(return_value=_empty_memory_context())
     orchestrator.run.return_value = AgentResult(

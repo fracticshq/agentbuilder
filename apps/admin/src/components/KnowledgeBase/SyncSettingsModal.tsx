@@ -216,7 +216,7 @@ export default function SyncSettingsModal({
           {!hasToken && (
             <div className="flex gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm leading-5 text-amber-900">
               <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 flex-none" />
-              <span>Without a token this uses the public storefront endpoint. Private products and authoritative store currency may be unavailable.</span>
+              <span>An Admin API token is required before a production catalog sync can run. Save a token with read_products and read_inventory access.</span>
             </div>
           )}
 

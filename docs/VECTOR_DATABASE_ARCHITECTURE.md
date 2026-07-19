@@ -180,6 +180,11 @@ await db.knowledge_base.insertOne({
 
 ## 🔍 Vector Search (Retrieval)
 
+The bathroom-fittings query below is a bathware-profile example. Generic
+agents do not inherit bathware product-intent keywords; configure
+`domain.verticals=["bathware"]` when that vocabulary is part of the agent's
+explicit contract.
+
 ### Query Flow
 
 1. **User Query:**

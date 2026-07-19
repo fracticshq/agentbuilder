@@ -179,6 +179,7 @@ async def test_catalog_worker_decrypts_only_the_encrypted_job_snapshot(monkeypat
         claim_next=AsyncMock(return_value=job),
         complete=AsyncMock(return_value=True),
         fail=AsyncMock(return_value=True),
+        renew_lease=AsyncMock(return_value=True),
     )
     fetch = AsyncMock()
     monkeypatch.setattr(catalog_service, "fetch_shopify_products", fetch)
@@ -192,6 +193,25 @@ async def test_catalog_worker_decrypts_only_the_encrypted_job_snapshot(monkeypat
     assert fetch.await_args.args[1] == "shpat_snapshot_only"
     assert store.complete.await_args.args[1]["counts"]["products_upserted"] == 2
     store.fail.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_catalog_store_renews_only_its_current_lease_token(monkeypatch):
+    class _Collection:
+        def __init__(self):
+            self.calls = []
+
+        async def update_one(self, query, update):
+            self.calls.append((query, update))
+            return SimpleNamespace(matched_count=1)
+
+    collection = _Collection()
+    store = CatalogSyncStore(Settings(SECRET_KEY="test-secret"))
+    monkeypatch.setattr(store, "_collection", lambda: collection)
+
+    assert await store.renew_lease({"job_id": "catalog-job-1", "lease_token": "lease-a"}) is True
+    assert collection.calls[0][0]["lease_token"] == "lease-a"
+    assert collection.calls[0][0]["status"] == "running"
 
 
 @pytest.mark.asyncio

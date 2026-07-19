@@ -87,7 +87,17 @@ def build_pipeline(**config_overrides):
     pipeline.reranker = None
     pipeline.brand_boost = None
     pipeline.page_boost = None
+    pipeline.verticals = set()
     return pipeline
+
+
+def test_product_intent_uses_vertical_terms_only_when_explicitly_enabled():
+    generic = build_pipeline()
+    bathware = build_pipeline()
+    bathware.verticals = {"bathware"}
+
+    assert generic._detect_query_intent("show a faucet") == "general"
+    assert bathware._detect_query_intent("show a faucet") == "product_search"
 
 
 @pytest.mark.asyncio

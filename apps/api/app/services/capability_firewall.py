@@ -3,8 +3,8 @@ Capability firewall for agent scope control.
 
 This is intentionally deterministic: it keeps unrelated work out of the
 orchestrator prompt path without adding another LLM call in front of every
-message. The contract is derived from the agent/brand configuration, with
-reasonable commerce-support defaults.
+message. The contract is derived from explicit agent/brand configuration;
+vertical vocabulary is opt-in rather than inherited by every agent.
 """
 
 from __future__ import annotations
@@ -19,49 +19,54 @@ DEFAULT_ALLOWED_TERMS = {
     "accessories",
     "availability",
     "available",
-    "basin",
-    "bath",
-    "bathroom",
-    "bathware",
-    "bidet",
     "catalog",
     "catalogue",
-    "cistern",
     "color",
     "colour",
-    "commode",
     "dealer",
     "dealers",
-    "diverter",
-    "faucet",
-    "faucets",
     "finish",
-    "flush",
-    "hook",
     "installation",
-    "mixer",
     "policy",
     "price",
     "product",
     "products",
-    "robe",
-    "sanitary",
-    "sanitaryware",
-    "shower",
-    "showers",
     "showroom",
-    "sink",
     "sku",
-    "soap",
-    "spout",
     "store",
     "support",
-    "tap",
-    "toilet",
-    "towel",
-    "tumbler",
-    "urinal",
     "warranty",
+}
+
+VERTICAL_ALLOWED_TERMS = {
+    "bathware": {
+        "basin",
+        "bath",
+        "bathroom",
+        "bathware",
+        "bidet",
+        "cistern",
+        "commode",
+        "diverter",
+        "faucet",
+        "faucets",
+        "flush",
+        "hook",
+        "mixer",
+        "robe",
+        "sanitary",
+        "sanitaryware",
+        "shower",
+        "showers",
+        "sink",
+        "soap",
+        "spout",
+        "tap",
+        "toilet",
+        "towel",
+        "tumbler",
+        "urinal",
+    },
 }
 
 BLOCKED_CAPABILITY_TERMS = {
@@ -111,6 +116,27 @@ CLAUSE_SPLIT_RE = re.compile(
 )
 MIXED_SPLIT_RE = re.compile(r"\b(?:and|before|after|while|then|so)\b", re.IGNORECASE)
 TOKEN_RE = re.compile(r"[a-z][a-z0-9-]{2,}", re.IGNORECASE)
+
+
+def configured_verticals(agent_config: dict[str, Any] | None) -> set[str]:
+    """Read auditable opt-in vertical profiles from ``domain.verticals`` only.
+
+    Do not infer profiles from an agent name, brand slug, prompt, or free-form
+    description. Those sources are mutable prose and would make one tenant's
+    historical bathware vocabulary silently affect another vertical.
+    """
+    config = agent_config if isinstance(agent_config, dict) else {}
+    domain = config.get("domain") if isinstance(config.get("domain"), dict) else {}
+    raw_verticals = domain.get("verticals")
+    if isinstance(raw_verticals, str):
+        raw_verticals = [raw_verticals]
+    if not isinstance(raw_verticals, list):
+        return set()
+    return {
+        str(vertical).strip().lower()
+        for vertical in raw_verticals
+        if str(vertical).strip().lower() in VERTICAL_ALLOWED_TERMS
+    }
 
 
 @dataclass(frozen=True)
@@ -193,10 +219,21 @@ class CapabilityFirewall:
             ]
         ).lower()
 
+        verticals = configured_verticals(agent_config)
+        vertical_terms = set().union(*VERTICAL_ALLOWED_TERMS.values())
         allowed_terms = set(DEFAULT_ALLOWED_TERMS)
-        allowed_terms.update(self._extract_contract_terms(brand_slug))
-        allowed_terms.update(self._extract_contract_terms(brand_name))
-        allowed_terms.update(self._extract_contract_terms(agent_name))
+        for vertical in verticals:
+            allowed_terms.update(VERTICAL_ALLOWED_TERMS.get(vertical, set()))
+        identity_terms = set()
+        identity_terms.update(self._extract_contract_terms(brand_slug))
+        identity_terms.update(self._extract_contract_terms(brand_name))
+        identity_terms.update(self._extract_contract_terms(agent_name))
+        # Identity prose is useful for brand-local signals, but it must not
+        # silently activate a vertical profile just because a name mentions a
+        # plumbing/bathware term.
+        if not verticals:
+            identity_terms.difference_update(vertical_terms)
+        allowed_terms.update(identity_terms)
 
         allowed_external_capabilities: set[str] = set()
         for capability, terms in BLOCKED_CAPABILITY_TERMS.items():

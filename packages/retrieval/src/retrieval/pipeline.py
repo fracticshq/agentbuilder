@@ -21,6 +21,23 @@ from .types import DocumentChunk, PageContext, RetrievalContext, RetrievalConfig
 logger = structlog.get_logger()
 
 
+NEUTRAL_PRODUCT_KEYWORDS = {
+    "price", "cost", "buy", "purchase", "product", "model", "under",
+    "budget", "features", "specifications", "sku",
+}
+
+VERTICAL_PRODUCT_KEYWORDS = {
+    "bathware": {
+        "faucet", "shower", "sink", "tap", "basin", "toilet", "bath",
+        "diverter", "mixer", "lever", "spout", "valve", "cock",
+        "wash basin", "bathtub", "commode", "urinal", "bidet",
+        "flush", "cistern", "seat cover", "accessories", "wall mounted",
+        "floor mounted", "single bowl", "double bowl", "chrome", "brass",
+        "stainless steel", "ceramic",
+    },
+}
+
+
 class RetrievalPipeline:
     """
     Main retrieval pipeline that orchestrates:
@@ -42,9 +59,15 @@ class RetrievalPipeline:
         rerank_api_key: Optional[str] = None,
         rerank_model: str = "rerank-2.5",
         rerank_base_url: str = "https://api.voyageai.com/v1",
+        verticals: Optional[List[str]] = None,
     ):
         self.config = config or RetrievalConfig()
         self.brand_id = brand_id
+        self.verticals = {
+            str(vertical).strip().lower()
+            for vertical in (verticals or [])
+            if str(vertical).strip().lower() in VERTICAL_PRODUCT_KEYWORDS
+        }
         self.vector_backend = os.getenv("VECTOR_BACKEND", "atlas").lower()
         
         # Initialize search components with brand_id for database isolation
@@ -515,20 +538,11 @@ class RetrievalPipeline:
         """
         query_lower = query.lower()
         
-        # Product search indicators
-        product_keywords = [
-            # Core bathroom products
-            'faucet', 'shower', 'sink', 'tap', 'basin', 'toilet', 'bath',
-            'diverter', 'mixer', 'lever', 'spout', 'valve', 'cock',
-            'wash basin', 'bathtub', 'commode', 'urinal', 'bidet',
-            'flush', 'cistern', 'seat cover', 'accessories',
-            # Purchase/pricing intent
-            'price', 'cost', 'buy', 'purchase', 'product', 'model',
-            'under', 'budget', 'features', 'specifications', 'sku',
-            # Product attributes
-            'wall mounted', 'floor mounted', 'single bowl', 'double bowl',
-            'chrome', 'brass', 'stainless steel', 'ceramic'
-        ]
+        # Product search indicators. Vertical vocabulary is explicit rather
+        # than silently inherited by every Hybrid RAG agent.
+        product_keywords = set(NEUTRAL_PRODUCT_KEYWORDS)
+        for vertical in self.verticals:
+            product_keywords.update(VERTICAL_PRODUCT_KEYWORDS[vertical])
         
         # Dealer search indicators
         dealer_keywords = [

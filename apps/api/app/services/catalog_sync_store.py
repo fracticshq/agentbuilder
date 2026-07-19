@@ -310,6 +310,35 @@ class CatalogSyncStore:
             raise CatalogSyncStoreUnavailableError("Catalog sync storage is unavailable") from exc
         return bool(getattr(result, "matched_count", 0))
 
+    async def renew_lease(self, job: Dict[str, Any]) -> bool:
+        """Extend a claimed sync lease without changing its execution fence.
+
+        GraphQL cursor traversal can outlive the short initial lease. A worker
+        that has been reclaimed cannot renew or complete the job because every
+        transition remains bound to the original opaque lease token.
+        """
+        now = self._now()
+        lease_expires_at = now + timedelta(seconds=max(30, int(self.settings.CATALOG_SYNC_LEASE_SECONDS)))
+        query = {
+            "_id": job.get("job_id"),
+            "kind": CATALOG_SYNC_KIND,
+            "status": "running",
+            "lease_token": job.get("lease_token"),
+        }
+        try:
+            result = await self._collection().update_one(
+                query,
+                {
+                    "$set": {
+                        "lease_expires_at": lease_expires_at,
+                        "updated_at": self._timestamp(now),
+                    }
+                },
+            )
+        except Exception as exc:
+            raise CatalogSyncStoreUnavailableError("Catalog sync storage is unavailable") from exc
+        return bool(getattr(result, "matched_count", 0))
+
     async def complete(self, job: Dict[str, Any], updates: Dict[str, Any]) -> bool:
         return await self._transition_terminal(job, "completed", {"phase": "completed", **updates})
 

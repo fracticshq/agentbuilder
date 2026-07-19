@@ -82,14 +82,45 @@ async def _process_job(job: dict[str, Any], settings: Settings) -> dict[str, Any
     return {"phase": "completed", "counts": {"products_marked_inactive": count}}
 
 
+async def _maintain_lease(
+    store: CatalogSyncStore,
+    job: dict[str, Any],
+    settings: Settings,
+    stop: asyncio.Event,
+    lease_lost: asyncio.Event,
+) -> None:
+    """Renew a long-running GraphQL sync fence until the worker finishes."""
+    interval = max(5.0, min(30.0, float(settings.CATALOG_SYNC_LEASE_SECONDS) / 3))
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            if not await store.renew_lease(job):
+                lease_lost.set()
+                logger.warning("catalog_sync_lease_lost", job_id=job.get("job_id"))
+                return
+        except CatalogSyncStoreUnavailableError:
+            lease_lost.set()
+            logger.warning("catalog_sync_lease_renewal_unavailable", job_id=job.get("job_id"))
+            return
+
+
 async def run_once(store: CatalogSyncStore, settings: Settings, *, identifier: str) -> bool:
     job = await store.claim_next(worker_id=identifier)
     if not job:
         return False
     action = str(job.get("action") or "sync")
     started = time.monotonic()
+    stop_heartbeat = asyncio.Event()
+    lease_lost = asyncio.Event()
+    heartbeat = asyncio.create_task(_maintain_lease(store, job, settings, stop_heartbeat, lease_lost))
     try:
         updates = await _process_job(job, settings)
+        if lease_lost.is_set():
+            raise RuntimeError("catalog_sync_lease_lost")
         await store.complete(job, updates)
         CATALOG_SYNC_COUNT.labels(action=action, status="completed").inc()
         CATALOG_SYNC_DURATION.labels(action=action).observe(time.monotonic() - started)
@@ -114,6 +145,13 @@ async def run_once(store: CatalogSyncStore, settings: Settings, *, identifier: s
             action=job.get("action"),
             error_type=type(exc).__name__,
         )
+    finally:
+        stop_heartbeat.set()
+        heartbeat.cancel()
+        try:
+            await heartbeat
+        except asyncio.CancelledError:
+            pass
     return True
 
 

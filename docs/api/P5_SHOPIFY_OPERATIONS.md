@@ -13,6 +13,10 @@ brand/source scope and encrypted access-token snapshot are persisted. A
 `catalog-sync-worker` claims it with a time-bound Mongo lease and retries a
 failed job up to `CATALOG_SYNC_MAX_ATTEMPTS`.
 
+The worker renews its fenced lease while it traverses Admin GraphQL product and
+variant cursors. A reclaimed worker cannot renew or complete the job; the
+catalog writer's deterministic source-key upserts make the replay safe.
+
 The worker preserves the existing product upsert semantics and marks products
 absent from a successful full snapshot inactive. A brand has only one active
 full Shopify snapshot: overlapping manual or webhook syncs return its existing
@@ -24,8 +28,9 @@ work on its own.
 
 Production Shopify sync requirements:
 
-- An Admin API token and a canonical HTTPS `<shop>.myshopify.com` host are
-  required. Public/custom-domain import is no longer a production sync path.
+- An Admin API token with `read_products` and `read_inventory`, and a canonical
+  HTTPS `<shop>.myshopify.com` host, are required. Public/custom-domain import
+  is no longer a production sync path.
 - The platform refuses to associate the same canonical Shopify shop with two
   brands.
 - The access token is stored encrypted in the brand configuration and is
@@ -34,6 +39,16 @@ Production Shopify sync requirements:
 - `SHOPIFY_ADMIN_API_VERSION` defaults to `2026-04`; set it deliberately during
   Shopify version upgrades and verify the sync regression suite before changing
   it.
+- The worker reads only the Admin GraphQL endpoint
+  `/admin/api/<version>/graphql.json`; REST `shop.json` and `products.json`
+  are not a production catalog-sync path. GraphQL `200` responses containing
+  `errors`, malformed cursor pages, and missing inventory access fail the
+  snapshot before stale products can be deactivated.
+- GraphQL IDs are adapted to Shopify `legacyResourceId` values before the
+  canonical writer. This preserves numeric product/variant source keys and
+  delete-webhook matching across the REST-to-GraphQL migration. Product and
+  variant cursors are fully exhausted before a snapshot is published; throttled
+  requests use bounded retry and a partial snapshot is never published.
 
 ### Job polling
 
@@ -73,6 +88,15 @@ SHOPIFY_WEBHOOK_MAX_BODY_BYTES=1048576
 `SHOPIFY_WEBHOOK_SECRET` is required at production API startup when webhooks are
 enabled. An unavailable queue returns a retryable `503`; do not acknowledge and
 discard webhook events.
+
+## Provider capability truthfulness
+
+HubSpot, Salesforce, Zendesk, Slack, Google Sheets, Airtable, Notion, Zapier,
+and n8n are not exposed by the Agent Tools API or admin capability UI in this
+release. Their old configuration schemas remain internal only to keep existing
+encrypted credentials masked during a migration; they are never registered as
+runtime tools. Use the separately implemented, tenant-scoped HTTP or MCP
+Context Connector path for supported external integrations.
 
 ## Operations and alerts
 
