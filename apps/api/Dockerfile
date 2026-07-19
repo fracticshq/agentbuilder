@@ -4,7 +4,7 @@
 #   docker build -f apps/api/Dockerfile -t agentbuilder-api .
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM python:3.12@sha256:1a7dbae78e9568b95a8e2934719c4bf984d7ae319b3659ed129f59d8aca6d7a8
+FROM python:3.14@sha256:311ea5bb79f1a238ee9e38f8d5f09cb3b4b244575cf49e27cf365ea7e60f11d4
 
 WORKDIR /app
 
