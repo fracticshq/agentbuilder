@@ -6,7 +6,7 @@
 # Runtime requirements declared by packages/{commons,llm,memory,retrieval}.
 # Keep these in sync with those package manifests. tools and agent_runtime have
 # no runtime dependencies at this time.
-cryptography>=41.0.0
+cryptography>=49.0.0
 httpx>=0.28.0
 motor>=3.7.0
 openai>=2.0.0
