@@ -15,7 +15,7 @@
     "@tailwindcss/postcss": "^4.1.12",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.12.2",
-    "autoprefixer": "^10.4.21",
+    "autoprefixer": "^10.5.4",
     "clsx": "^2.1.1",
     "dompurify": "^3.2.7",
     "lucide-react": "^0.542.0",
