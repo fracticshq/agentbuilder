@@ -37,6 +37,18 @@ role.
 The server derives the agent, conversation, user, and actor IDs from that
 signed token. Client-supplied values for those fields are not authoritative.
 
+Human-takeover control uses two separate WebSockets and never puts either
+credential in a URL query string:
+
+| WebSocket | Required subprotocol pair | Server authorization |
+| --- | --- | --- |
+| `/api/v1/messages/ws/widget/{conversation_id}` | `widget-session`, `<widget-session-jwt>` | The signed token's conversation/user/agent must match the immutable server-side conversation scope. |
+| `/api/v1/messages/ws/admin/{conversation_id}` | `bearer`, `<dashboard-access-jwt>` | The operator must be active, have `message:write`, have Agent Console access, and belong to the stored conversation brand. |
+
+The old `control_secret`, `agent_id`, and `admin_key` query parameters are not
+accepted for these channels. The server returns only the non-secret protocol
+name in its WebSocket upgrade response.
+
 ### Activity events
 
 `POST /api/v1/activity/events` and
@@ -60,8 +72,9 @@ The permission required matches the operation: `document:read`,
 
 | Endpoint | Required scope / change |
 | --- | --- |
-| `POST /api/v1/knowledge/upload` | Multipart form must include the target `brand_id`; the operator must own that brand. |
-| `POST /api/v1/knowledge/bulk-upload` | Body contains `brand_id`; the operator must own that brand. |
+| `POST /api/v1/knowledge/upload` | Multipart form must include the target `brand_id`; `agent_id` is optional. The route persists encrypted source/context payloads and a durable job before returning `pending`. |
+| `POST /api/v1/knowledge/bulk-upload` | Body contains `brand_id`, optional `agent_id` and `folder_path`; it preserves structured product/dealer fields through the durable worker and returns `pending`. |
+| `GET /api/v1/knowledge/jobs/{job_id}` | The job is authorized through its immutable creation-time brand scope. Poll until `completed` before treating the data as searchable. |
 | `GET /api/v1/knowledge/tree`, document preview/list/delete, folder CRUD, and retrieval preview | Include `brand_id`; cross-tenant access is rejected. |
 | `POST /api/v1/ingest/documents?agent_id=...` | `agent_id` is required and controls the only permitted storage destination. Clients should send `Idempotency-Key` when retrying an upload; same key plus different source returns `409`. |
 | `POST /api/v1/ingest/chunks` | Body must include `agent_id`. User metadata cannot choose the destination tenant. |
@@ -73,6 +86,13 @@ payloads and an immutable, Mongo-backed job have been persisted. A separate
 worker performs staging and deterministic publish retries. Clients must not
 treat `pending` or `processing` as proof that searchable content exists; poll
 until `completed`, `error`, or `cancelled`.
+
+All three durable upload routes accept `Idempotency-Key`; repeating a matching
+submission returns the original job, while divergent source bytes or structured
+context under that key return `409 Conflict`. Upload limits are enforced before
+the encrypted payload is stored: `MAX_FILE_SIZE_MB` per source,
+`MAX_UPLOAD_FILES` and `MAX_UPLOAD_TOTAL_SIZE_MB` for multi-file ingestion,
+and bounded DOCX ZIP entry, expansion-size, and compression-ratio limits.
 
 ## Commerce catalog and Shopify
 
@@ -157,7 +177,9 @@ of a synthetic successful deployment list.
 
 Production API startup requires, at minimum, `SECRET_KEY`, `ADMIN_API_KEY`,
 `SETTINGS_ENCRYPTION_KEY`, `PII_ENCRYPTION_KEY`, `MONGODB_URI`, `REDIS_URL`,
-and `MCP_SERVICE_AUTH_TOKEN`. The Shopify MCP service additionally requires
+and `MCP_SERVICE_AUTH_TOKEN`. `RATE_LIMIT_FAIL_CLOSED` must be true. When
+`VECTOR_BACKEND=qdrant`, `QDRANT_API_KEY` is required and `QDRANT_URL` must
+not point at loopback. The Shopify MCP service additionally requires
 `SESSION_SECRET`, `REDIS_URL`, and the same `MCP_SERVICE_AUTH_TOKEN`.
 
 See [P0 security migration](./P0_SECURITY_MIGRATION.md) for rollout order,
@@ -166,4 +188,6 @@ client-impact checklist, and operational verification, and the
 and deployment checks. See the [P2 production hardening contract](./P2_PRODUCTION_HARDENING.md)
 for tenant-control-plane and evidence-validation behavior, and the
 [P3 durable-ingestion contract](./P3_DURABLE_INGESTION.md) for queue, retry,
-worker, and source-payload behavior.
+worker, and source-payload behavior, and the [P4 edge and knowledge
+hardening contract](./P4_EDGE_AND_KNOWLEDGE_HARDENING.md) for WebSocket,
+rate-limit, Qdrant, and legacy knowledge-upload requirements.

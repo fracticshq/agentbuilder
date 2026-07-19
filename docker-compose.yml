@@ -20,7 +20,7 @@ services:
       ENVIRONMENT: "${ENVIRONMENT:-production}"
       DEBUG: "${DEBUG:-false}"
       REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
-      REQUIRE_REDIS: "${REQUIRE_REDIS:-false}"
+      REQUIRE_REDIS: "${REQUIRE_REDIS:-true}"
       ENABLE_HUMAN_TAKEOVER: "${ENABLE_HUMAN_TAKEOVER:-true}"
       ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
       STRAPI_URL: "${DOCKER_STRAPI_URL:-http://host.docker.internal:1337}"
@@ -36,6 +36,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -74,6 +79,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
 
   # ── React Admin Dashboard ────────────────────────────────────────────────────
   admin:
@@ -90,6 +100,11 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/"]
       interval: 30s
@@ -111,6 +126,11 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:5174/"]
       interval: 30s
@@ -142,6 +162,11 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3005/health"]
       interval: 30s
@@ -158,6 +183,11 @@ services:
     volumes:
       - mongo_data:/data/db
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
@@ -174,6 +204,11 @@ services:
     volumes:
       - redis_data:/data
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -184,11 +219,18 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.12.5@sha256:05fecce7dce45d1254e0468bc037e8210e187fd56fa847688b012293d5f08aae
     container_name: agentbuilder-qdrant
-    ports:
-      - "6333:6333"
+    environment:
+      # Qdrant stays on the compose-only network. The API key protects the
+      # service even if a future deployment attaches another network.
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY must be set in .env.docker}"
     volumes:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
 
 volumes:
   mongo_data:

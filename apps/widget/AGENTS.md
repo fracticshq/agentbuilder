@@ -119,5 +119,6 @@ npm run test:e2e
 - Follows "No source → No answer" principle
 - Real-time streaming via WebSocket/SSE fallback
 - Page context extraction for better responses
+- Human-takeover control is authorized by the server-issued widget session. Send it only as the `widget-session` WebSocket subprotocol, never as a query parameter or a client-generated control secret.
 
 **End of widget AGENTS.md.** 

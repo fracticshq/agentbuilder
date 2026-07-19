@@ -112,14 +112,28 @@ async def upload_documents(
                 )
 
         # Read file contents before starting background task
-        max_file_bytes = get_settings().MAX_FILE_SIZE_MB * 1024 * 1024
+        settings = get_settings()
+        if len(files) > settings.MAX_UPLOAD_FILES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Document upload exceeds the {settings.MAX_UPLOAD_FILES} file limit",
+            )
+        max_file_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+        max_total_bytes = settings.MAX_UPLOAD_TOTAL_SIZE_MB * 1024 * 1024
+        total_bytes = 0
         file_contents = []
         for file in files:
             content = await file.read()
             if len(content) > max_file_bytes:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"File {file.filename} exceeds the {get_settings().MAX_FILE_SIZE_MB}MB upload limit"
+                    detail=f"File {file.filename} exceeds the {settings.MAX_FILE_SIZE_MB}MB upload limit"
+                )
+            total_bytes += len(content)
+            if total_bytes > max_total_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Document upload exceeds the {settings.MAX_UPLOAD_TOTAL_SIZE_MB}MB aggregate limit",
                 )
             file_contents.append({
                 'content': content,

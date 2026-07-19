@@ -19,8 +19,6 @@ Fallback:
 """
 
 import asyncio
-import hashlib
-import hmac
 import json
 import uuid
 from typing import Dict, Set, Optional
@@ -58,7 +56,6 @@ class ConnectionManager:
         self._local_control:  Dict[str, bool]   = {}
         self._local_agent_ids: Dict[str, str]   = {}
         self._local_buffers:  Dict[str, list]   = {}
-        self._local_widget_secret_hashes: Dict[str, str] = {}
 
         # asyncio tasks running the Redis subscription loops
         self._sub_tasks: Dict[str, asyncio.Task] = {}
@@ -67,9 +64,6 @@ class ConnectionManager:
 
     def _redis(self):
         return connection_manager.redis_client
-
-    def _hash_widget_secret(self, control_secret: str) -> str:
-        return hashlib.sha256(control_secret.encode("utf-8")).hexdigest()
 
     async def _publish(self, channel: str, message: dict) -> bool:
         """Publish to Redis. Returns True on success, False if Redis is unavailable."""
@@ -175,14 +169,26 @@ class ConnectionManager:
 
     # ── connect / disconnect ─────────────────────────────────────────────────
 
-    async def connect_widget(self, websocket: WebSocket, conversation_id: str):
-        await websocket.accept()
+    async def connect_widget(
+        self,
+        websocket: WebSocket,
+        conversation_id: str,
+        *,
+        subprotocol: str | None = None,
+    ):
+        await websocket.accept(subprotocol=subprotocol)
         self.widget_connections.setdefault(conversation_id, set()).add(websocket)
         self._start_sub(conversation_id, "widget")
         logger.info("widget_websocket_connected", conversation_id=conversation_id)
 
-    async def connect_admin(self, websocket: WebSocket, conversation_id: str):
-        await websocket.accept()
+    async def connect_admin(
+        self,
+        websocket: WebSocket,
+        conversation_id: str,
+        *,
+        subprotocol: str | None = None,
+    ):
+        await websocket.accept(subprotocol=subprotocol)
         self.admin_connections.setdefault(conversation_id, set()).add(websocket)
         self._start_sub(conversation_id, "admin")
         logger.info("admin_websocket_connected", conversation_id=conversation_id)
@@ -279,54 +285,6 @@ class ConnectionManager:
             except Exception as e:
                 logger.warning("redis_get_agent_id_failed", error=str(e))
         return self._local_agent_ids.get(conversation_id)
-
-    async def authorize_widget_control(
-        self,
-        conversation_id: str,
-        agent_id: str,
-        control_secret: str,
-    ) -> bool:
-        """Authorize widget control traffic with a per-conversation secret."""
-        if not agent_id or len(control_secret) < 32:
-            return False
-
-        secret_hash = self._hash_widget_secret(control_secret)
-        r = self._redis()
-        if r:
-            try:
-                state = await r.hgetall(_state_key(conversation_id))
-                stored_hash = state.get("widget_control_secret_hash")
-                stored_agent_id = state.get("agent_id")
-
-                if not stored_hash:
-                    await r.hset(
-                        _state_key(conversation_id),
-                        mapping={
-                            "agent_id": agent_id,
-                            "widget_control_secret_hash": secret_hash,
-                        },
-                    )
-                    await r.expire(_state_key(conversation_id), _STATE_TTL)
-                    return True
-
-                if stored_agent_id and stored_agent_id != agent_id:
-                    return False
-
-                return hmac.compare_digest(stored_hash, secret_hash)
-            except Exception as e:
-                logger.warning("redis_widget_auth_failed", error=str(e))
-
-        stored_hash = self._local_widget_secret_hashes.get(conversation_id)
-        stored_agent_id = self._local_agent_ids.get(conversation_id)
-        if not stored_hash:
-            self._local_agent_ids[conversation_id] = agent_id
-            self._local_widget_secret_hashes[conversation_id] = secret_hash
-            return True
-
-        if stored_agent_id and stored_agent_id != agent_id:
-            return False
-
-        return hmac.compare_digest(stored_hash, secret_hash)
 
     async def buffer_takeover_message(self, conversation_id: str, role: str, content: str):
         entry = json.dumps({"role": role, "content": content})

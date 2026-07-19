@@ -199,7 +199,9 @@ class Settings(BaseSettings):
     # Rate Limiting
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60
     RATE_LIMIT_BURST: int = 10
-    RATE_LIMIT_FAIL_CLOSED: bool = False
+    # Public and operator request limits are an abuse boundary. A Redis outage
+    # must therefore reject traffic instead of silently disabling throttling.
+    RATE_LIMIT_FAIL_CLOSED: bool = True
     RATE_LIMIT_POLICY_WIDGET_CHAT: int = 60
     RATE_LIMIT_POLICY_WIDGET_STREAM: int = 40
     RATE_LIMIT_POLICY_WIDGET_WS_CONNECT: int = 30
@@ -210,6 +212,11 @@ class Settings(BaseSettings):
     
     # File Upload Configuration
     MAX_FILE_SIZE_MB: int = 10
+    MAX_UPLOAD_FILES: int = 20
+    MAX_UPLOAD_TOTAL_SIZE_MB: int = 50
+    MAX_ARCHIVE_FILES: int = 5000
+    MAX_ARCHIVE_UNCOMPRESSED_SIZE_MB: int = 100
+    MAX_ARCHIVE_COMPRESSION_RATIO: int = 100
     ALLOWED_FILE_TYPES: str = "pdf,txt,md,docx,html"
     UPLOAD_DIR: str = "./uploads"
     # Durable ingestion is processed by a separate Mongo-backed worker. Source
@@ -295,7 +302,7 @@ class Settings(BaseSettings):
             return v.lower() in ("true", "1", "yes", "on")
         return v
     
-    @field_validator("API_WORKERS", "RATE_LIMIT_REQUESTS_PER_MINUTE", "RATE_LIMIT_BURST", "RATE_LIMIT_POLICY_WIDGET_CHAT", "RATE_LIMIT_POLICY_WIDGET_STREAM", "RATE_LIMIT_POLICY_WIDGET_WS_CONNECT", "RATE_LIMIT_POLICY_WIDGET_WS_MESSAGE", "RATE_LIMIT_POLICY_ADMIN_API", "RATE_LIMIT_POLICY_UPLOAD", "RATE_LIMIT_POLICY_STRAPI_SYNC", "MAX_FILE_SIZE_MB", "INGESTION_JOB_TTL_SECONDS", "INGESTION_PAYLOAD_TTL_SECONDS", "INGESTION_LEASE_SECONDS", "INGESTION_MAX_ATTEMPTS", "INGESTION_RETRY_DELAY_SECONDS", "ACCESS_TOKEN_EXPIRE_MINUTES", "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "SHORT_TERM_TTL", "EPISODIC_TTL", "SUMMARY_CACHE_TTL", "AUTO_SUMMARY_TURNS", "MAX_MESSAGES_PER_CONVERSATION", "MAX_FACTS_PER_USER", "MAX_SUMMARIES_PER_CONVERSATION", "REDIS_CONNECTION_TIMEOUT", "SUMMARY_MAX_TOKENS", "VECTOR_DIMENSIONS", mode="before")
+    @field_validator("API_WORKERS", "RATE_LIMIT_REQUESTS_PER_MINUTE", "RATE_LIMIT_BURST", "RATE_LIMIT_POLICY_WIDGET_CHAT", "RATE_LIMIT_POLICY_WIDGET_STREAM", "RATE_LIMIT_POLICY_WIDGET_WS_CONNECT", "RATE_LIMIT_POLICY_WIDGET_WS_MESSAGE", "RATE_LIMIT_POLICY_ADMIN_API", "RATE_LIMIT_POLICY_UPLOAD", "RATE_LIMIT_POLICY_STRAPI_SYNC", "MAX_FILE_SIZE_MB", "MAX_UPLOAD_FILES", "MAX_UPLOAD_TOTAL_SIZE_MB", "MAX_ARCHIVE_FILES", "MAX_ARCHIVE_UNCOMPRESSED_SIZE_MB", "MAX_ARCHIVE_COMPRESSION_RATIO", "INGESTION_JOB_TTL_SECONDS", "INGESTION_PAYLOAD_TTL_SECONDS", "INGESTION_LEASE_SECONDS", "INGESTION_MAX_ATTEMPTS", "INGESTION_RETRY_DELAY_SECONDS", "ACCESS_TOKEN_EXPIRE_MINUTES", "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "SHORT_TERM_TTL", "EPISODIC_TTL", "SUMMARY_CACHE_TTL", "AUTO_SUMMARY_TURNS", "MAX_MESSAGES_PER_CONVERSATION", "MAX_FACTS_PER_USER", "MAX_SUMMARIES_PER_CONVERSATION", "REDIS_CONNECTION_TIMEOUT", "SUMMARY_MAX_TOKENS", "VECTOR_DIMENSIONS", mode="before")
     @classmethod
     def parse_int_fields(cls, v):
         """Parse integer fields from string."""
@@ -369,6 +376,16 @@ class Settings(BaseSettings):
             strapi_url = str(self.STRAPI_URL or "").strip()
             if "localhost" in strapi_url or "127.0.0.1" in strapi_url:
                 missing.append("STRAPI_URL (must not point at localhost in production)")
+
+        if not self.RATE_LIMIT_FAIL_CLOSED:
+            missing.append("RATE_LIMIT_FAIL_CLOSED (must be true in production)")
+
+        if self.VECTOR_BACKEND == "qdrant":
+            if not str(self.QDRANT_API_KEY or "").strip():
+                missing.append("QDRANT_API_KEY")
+            qdrant_url = str(self.QDRANT_URL or "").strip().lower()
+            if "localhost" in qdrant_url or "127.0.0.1" in qdrant_url:
+                missing.append("QDRANT_URL (must not point at localhost in production)")
 
         if missing:
             raise ValueError(

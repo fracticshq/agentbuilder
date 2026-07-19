@@ -148,6 +148,7 @@ export default function DocumentUploadWizard({
         content_type: contentType as 'product' | 'dealer',
         items: itemsWithDefaults,
         brand_id: brandId,
+        agent_id: agentId,
         folder_id: selectedFolder?.id || undefined,
         folder_path: selectedFolder?.path || '/',
       });

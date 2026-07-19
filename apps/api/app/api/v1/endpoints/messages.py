@@ -10,11 +10,12 @@ from pydantic import BaseModel, Field
 import json
 import asyncio
 import structlog
-from urllib.parse import urlparse
+from fastapi.security import HTTPAuthorizationCredentials
 
 from commons.types.requests import MessageRequest
 from commons.types.responses import MessageResponse, StreamingMessageResponse
-from ....auth.admin_key import is_admin_key_authorized
+from ....auth.dependencies import CONSOLE_ACCESS_ROLES, get_current_active_user, get_current_user
+from ....auth.models import Permission
 from ....auth.widget_session import (
     WidgetSession,
     decode_widget_session,
@@ -24,6 +25,11 @@ from ....auth.widget_session import (
 from ....connections import connection_manager
 from ....dependencies import get_message_service, get_settings
 from ....security.rate_limiter import check_named_rate_limit
+from ....services.conversation_scope_store import (
+    ConversationScope,
+    ConversationScopeStoreError,
+    conversation_scope_store,
+)
 from ....services.message_service import MessageService
 from ....services.observability_service import ObservabilityService
 from ....websocket_manager import ws_manager
@@ -171,26 +177,104 @@ async def _get_agent_brand_slug(agent_id: str | None) -> str | None:
     return brand_slug or None
 
 
-def _origin_matches_base_url(origin: str | None, base_url: str | None) -> bool:
-    if not origin or not base_url:
-        return False
+def _websocket_token(websocket: WebSocket, scheme: str) -> str | None:
+    """Read a browser-safe token from a WebSocket subprotocol.
 
-    try:
-        origin_parts = urlparse(origin)
-        base_parts = urlparse(base_url)
-    except Exception:
-        return False
+    Browsers cannot set an Authorization header for WebSocket handshakes.  The
+    SDK therefore sends ``[scheme, token]`` as ``Sec-WebSocket-Protocol``.  The
+    token is deliberately not accepted from a URL query string, which would
+    leak it into access logs and proxy telemetry. Non-browser clients may still
+    use an Authorization header.
+    """
+    authorization = websocket.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization.split(" ", 1)[1].strip() or None
 
-    if not origin_parts.hostname or not base_parts.hostname:
-        return False
+    protocols = [
+        item.strip()
+        for item in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if item.strip()
+    ]
+    for index, value in enumerate(protocols[:-1]):
+        if value.lower() == scheme.lower():
+            return protocols[index + 1]
+    return None
 
-    origin_port = origin_parts.port or (443 if origin_parts.scheme == "https" else 80)
-    base_port = base_parts.port or (443 if base_parts.scheme == "https" else 80)
-    return (
-        origin_parts.scheme == base_parts.scheme
-        and origin_parts.hostname == base_parts.hostname
-        and origin_port == base_port
+
+def _websocket_offers_protocol(websocket: WebSocket, protocol: str) -> bool:
+    return any(
+        value.strip().lower() == protocol.lower()
+        for value in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if value.strip()
     )
+
+
+async def _require_widget_control_scope(
+    websocket: WebSocket,
+    conversation_id: str,
+) -> tuple[WidgetSession, ConversationScope] | None:
+    token = _websocket_token(websocket, "widget-session")
+    session = decode_widget_session(token)
+    if session is None or session.conversation_id != conversation_id:
+        await _close_websocket(websocket, "Invalid widget session")
+        return None
+    try:
+        scope = await conversation_scope_store.get(conversation_id)
+    except ConversationScopeStoreError:
+        await _close_websocket(websocket, "Conversation authorization unavailable")
+        return None
+    if scope is None or scope.agent_id != session.agent_id or scope.user_id != session.user_id:
+        await _close_websocket(websocket, "Widget session does not own this conversation")
+        return None
+    return session, scope
+
+
+async def _require_admin_takeover_scope(
+    websocket: WebSocket,
+    conversation_id: str,
+) -> ConversationScope | None:
+    """Require an operator JWT and its creation-time tenant scope for takeover."""
+    token = _websocket_token(websocket, "bearer")
+    if not token:
+        await _close_websocket(websocket, "Dashboard authentication required")
+        return None
+    try:
+        system_db = connection_manager.get_system_db()
+        user = await get_current_active_user(
+            await get_current_user(
+                HTTPAuthorizationCredentials(scheme="Bearer", credentials=token),
+                system_db,
+            )
+        )
+        if user.role not in CONSOLE_ACCESS_ROLES or not user.has_permission(Permission.MESSAGE_WRITE):
+            await _close_websocket(websocket, "Operator permission required")
+            return None
+        scope = await conversation_scope_store.get(conversation_id)
+    except HTTPException:
+        await _close_websocket(websocket, "Dashboard authentication failed")
+        return None
+    except ConversationScopeStoreError:
+        await _close_websocket(websocket, "Conversation authorization unavailable")
+        return None
+
+    if scope is None or not user.has_brand_access(scope.brand_id):
+        # Return a generic policy error to avoid confirming a conversation's
+        # existence or tenant to an unauthorized operator.
+        await _close_websocket(websocket, "Conversation is outside your scope")
+        return None
+    return scope
+
+
+async def _conversation_agent_id(conversation_id: str) -> str | None:
+    """Resolve the immutable conversation agent without trusting WebSocket input."""
+    agent_id = await ws_manager.get_agent_id(conversation_id)
+    if agent_id:
+        return agent_id
+    try:
+        scope = await conversation_scope_store.get(conversation_id)
+    except ConversationScopeStoreError:
+        return None
+    return scope.agent_id if scope else None
 
 
 async def _require_widget_session(
@@ -224,7 +308,8 @@ async def start_session(request: SessionRequest):
     """
     system_db = connection_manager.get_system_db()
     agent = await system_db.agents.find_one(
-        {"id": request.agent_id, "status": "active"}, {"id": 1, "configuration": 1}
+        {"id": request.agent_id, "status": "active"},
+        {"id": 1, "brand_id": 1, "brand_slug": 1, "configuration": 1},
     )
     channels = (((agent or {}).get("configuration") or {}).get("channels") or {})
     widget = channels.get("widget") or {}
@@ -237,6 +322,23 @@ async def start_session(request: SessionRequest):
         session = existing
     else:
         token, session = issue_widget_session(request.agent_id)
+
+    brand_id = (agent or {}).get("brand_id")
+    brand_slug = (agent or {}).get("brand_slug")
+    if not isinstance(brand_id, str) or not brand_id or not isinstance(brand_slug, str) or not brand_slug:
+        raise HTTPException(status_code=503, detail="Agent does not have a complete tenant scope")
+    try:
+        await conversation_scope_store.bind(
+            conversation_id=session.conversation_id,
+            user_id=session.user_id,
+            agent_id=session.agent_id,
+            brand_id=brand_id,
+            brand_slug=brand_slug,
+        )
+    except ConversationScopeStoreError:
+        # Do not issue a usable public session that an operator WebSocket cannot
+        # authorize by tenant. The caller can retry safely with the same token.
+        raise HTTPException(status_code=503, detail="Widget sessions are temporarily unavailable")
 
     return SessionResponse(
         conversation_id=session.conversation_id,
@@ -427,32 +529,32 @@ async def admin_websocket_endpoint(
     conversation_id: str,
     message_service: MessageService = Depends(get_message_service),
 ):
-    """Admin WebSocket for human takeover and live conversation monitoring."""
+    """Tenant-scoped operator WebSocket for human takeover.
+
+    Authentication is a dashboard access JWT supplied in the ``bearer``
+    WebSocket subprotocol, followed by a lookup of the immutable server-side
+    conversation scope. A global admin key or a caller-supplied agent ID can
+    never grant access to another tenant's conversation.
+    """
+    scope = await _require_admin_takeover_scope(websocket, conversation_id)
+    if scope is None:
+        return
     if not await _enforce_websocket_rate_limit(
         websocket,
         "WS_CONNECT:/messages/ws/admin",
         "admin_api",
+        agent_id=scope.agent_id,
+        brand_slug=scope.brand_slug,
         conversation_id=conversation_id,
     ):
         return
     settings = get_settings()
 
-    admin_key = websocket.headers.get("x-admin-key") or websocket.query_params.get("admin_key")
-    trusted_strapi_origin = (
-        not settings.is_production
-        and _origin_matches_base_url(websocket.headers.get("origin"), settings.STRAPI_URL)
+    await ws_manager.connect_admin(
+        websocket,
+        conversation_id,
+        subprotocol="bearer" if _websocket_offers_protocol(websocket, "bearer") else None,
     )
-    if not is_admin_key_authorized(admin_key, settings) and not trusted_strapi_origin:
-        logger.warning(
-            "admin_websocket_rejected_invalid_admin_key",
-            conversation_id=conversation_id,
-            origin=websocket.headers.get("origin"),
-            has_admin_key=bool(admin_key),
-        )
-        await _close_websocket(websocket, "Invalid admin key")
-        return
-
-    await ws_manager.connect_admin(websocket, conversation_id)
     try:
         while True:
             data = await websocket.receive_text()
@@ -460,6 +562,8 @@ async def admin_websocket_endpoint(
                 websocket,
                 "WS_MESSAGE:/messages/ws/admin",
                 "admin_api",
+                agent_id=scope.agent_id,
+                brand_slug=scope.brand_slug,
                 conversation_id=conversation_id,
             ):
                 return
@@ -510,7 +614,7 @@ async def admin_websocket_endpoint(
 
                 # Inject history BEFORE notifying widget that AI is back in control.
                 # This ensures the AI has full context before the user can send the next message.
-                agent_id = await ws_manager.get_agent_id(conversation_id)
+                agent_id = await _conversation_agent_id(conversation_id)
                 if agent_id and takeover_messages:
                     try:
                         await message_service.inject_history(conversation_id, agent_id, takeover_messages)
@@ -559,7 +663,7 @@ async def admin_websocket_endpoint(
                 # Buffer for memory injection on release
                 await ws_manager.buffer_takeover_message(conversation_id, "assistant", content)
                 # Persist to Strapi (role 'agent' matches Strapi convention)
-                agent_id = await ws_manager.get_agent_id(conversation_id)
+                agent_id = await _conversation_agent_id(conversation_id)
                 brand_slug = await _get_agent_brand_slug(agent_id)
                 message_service.strapi.save_message(
                     conversation_id,
@@ -583,40 +687,34 @@ async def widget_control_channel(
     conversation_id: str,
     message_service: MessageService = Depends(get_message_service),
 ):
-    """Widget control channel — registers widget with ws_manager so admin can push to it.
+    """Signed widget control channel for human takeover.
 
     Receives:
-    - register: widget sends agent_id so backend can restore AI context on release
+    - register: confirms the already server-bound conversation scope
     - ping: heartbeat
     - user_message: forwarded to admin during human takeover, buffered, and persisted
     """
     settings = get_settings()
-    agent_id = (websocket.query_params.get("agent_id") or "").strip()
+    session_and_scope = await _require_widget_control_scope(websocket, conversation_id)
+    if session_and_scope is None:
+        return
+    _, scope = session_and_scope
+    agent_id = scope.agent_id
     if not await _enforce_websocket_rate_limit(
         websocket,
         "WS_CONNECT:/messages/ws/widget",
         "widget_ws_connect",
-        agent_id=agent_id or None,
+        agent_id=agent_id,
+        brand_slug=scope.brand_slug,
         conversation_id=conversation_id,
     ):
         return
-    control_secret = (websocket.query_params.get("control_secret") or "").strip()
-    is_authorized = await ws_manager.authorize_widget_control(
+    await ws_manager.register_agent_id(conversation_id, agent_id)
+    await ws_manager.connect_widget(
+        websocket,
         conversation_id,
-        agent_id,
-        control_secret,
+        subprotocol="widget-session" if _websocket_offers_protocol(websocket, "widget-session") else None,
     )
-    if not is_authorized:
-        logger.warning(
-            "widget_control_rejected_unauthorized",
-            conversation_id=conversation_id,
-            agent_id=agent_id,
-            control_secret_length=len(control_secret),
-        )
-        await _close_websocket(websocket, "Unauthorized widget control channel")
-        return
-
-    await ws_manager.connect_widget(websocket, conversation_id)
     try:
         while True:
             data = await websocket.receive_text()
@@ -624,7 +722,8 @@ async def widget_control_channel(
                 websocket,
                 "WS_MESSAGE:/messages/ws/widget",
                 "widget_ws_message",
-                agent_id=agent_id or None,
+                agent_id=agent_id,
+                brand_slug=scope.brand_slug,
                 conversation_id=conversation_id,
             ):
                 return
@@ -640,9 +739,9 @@ async def widget_control_channel(
                     return
 
             elif msg_type == "register":
-                # Widget sends its agent_id so we can inject history into the right memory
-                if agent_id:
-                    await ws_manager.register_agent_id(conversation_id, agent_id)
+                # The agent was bound by the signed session and immutable
+                # conversation record before accepting this socket.
+                await ws_manager.register_agent_id(conversation_id, agent_id)
 
             elif msg_type == "user_message":
                 if await ws_manager.is_human_in_control(conversation_id):
@@ -656,13 +755,13 @@ async def widget_control_channel(
                     # Buffer for memory injection on release
                     await ws_manager.buffer_takeover_message(conversation_id, "user", content)
                     # Persist to Strapi
-                    brand_slug = await _get_agent_brand_slug(agent_id or None)
+                    brand_slug = scope.brand_slug
                     message_service.strapi.save_message(
                         conversation_id,
                         content,
                         "user",
                         brand_slug=brand_slug,
-                        agent_id=agent_id or None,
+                        agent_id=agent_id,
                     )
 
     except WebSocketDisconnect:

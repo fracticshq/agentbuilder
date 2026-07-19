@@ -9,6 +9,7 @@ by a MongoDB TTL index.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from typing import Any, Iterable
 
 import structlog
@@ -71,12 +72,19 @@ class IngestionPayloadStore:
                 content = file_data.get("content")
                 filename = file_data.get("filename")
                 content_type = file_data.get("content_type")
+                context = file_data.get("context")
                 if not isinstance(content, bytes):
                     raise InvalidIngestionPayloadError("Upload source must be bytes")
                 if not isinstance(filename, str) or not filename:
                     raise InvalidIngestionPayloadError("Upload filename is required")
                 if not isinstance(content_type, str) or not content_type:
                     raise InvalidIngestionPayloadError("Upload content type is required")
+                if context is not None and not isinstance(context, dict):
+                    raise InvalidIngestionPayloadError("Upload context must be an object")
+                try:
+                    context_bytes = json.dumps(context or {}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                except (TypeError, ValueError) as exc:
+                    raise InvalidIngestionPayloadError("Upload context is invalid") from exc
                 payload_id = f"{job_id}:{file_index}"
                 encrypted = self._fernet.encrypt(content)
                 document = {
@@ -87,6 +95,10 @@ class IngestionPayloadStore:
                     "filename": filename,
                     "content_type": content_type,
                     "content_encrypted": Binary(encrypted),
+                    # Structured product/dealer metadata and folder paths are
+                    # source-derived too. Keep them encrypted alongside bytes,
+                    # never in the job record or Redis cache.
+                    "context_encrypted": Binary(self._fernet.encrypt(context_bytes)),
                     "created_at": now,
                     "expires_at": expires_at,
                 }
@@ -117,11 +129,17 @@ class IngestionPayloadStore:
             content = self._fernet.decrypt(encrypted)
             filename = document["filename"]
             content_type = document["content_type"]
+            context_encrypted = document.get("context_encrypted")
+            context = {}
+            if context_encrypted is not None:
+                context = json.loads(self._fernet.decrypt(bytes(context_encrypted)).decode("utf-8"))
             if not isinstance(filename, str) or not isinstance(content_type, str):
                 raise ValueError("source metadata invalid")
+            if not isinstance(context, dict):
+                raise ValueError("source context invalid")
         except (KeyError, TypeError, ValueError, InvalidToken) as exc:
             raise InvalidIngestionPayloadError("Ingestion source payload is invalid") from exc
-        return {"content": content, "filename": filename, "content_type": content_type}
+        return {"content": content, "filename": filename, "content_type": content_type, "context": context}
 
     async def delete_job_payloads(self, job_id: str) -> None:
         try:

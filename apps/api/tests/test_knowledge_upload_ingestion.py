@@ -1,7 +1,7 @@
 import types
 
 import pytest
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import HTTPException
 
 from app.api.v1.endpoints import knowledge as knowledge_module
 from app.api.v1.endpoints.knowledge import _hydrate_product_cards, _product_card_from_data, upload_document
@@ -199,29 +199,31 @@ class FakeUploadFile:
 
 
 class FakeEndpointKnowledgeService:
-    def __init__(self):
-        self.started = None
-        self.processed = None
-
     def detect_source_type(self, content_type, filename):
         return KnowledgeService(Settings()).detect_source_type(content_type, filename)
 
-    async def start_document_upload(self, **kwargs):
-        self.started = kwargs
-        return "job-123"
 
-    async def process_document_upload(self, **kwargs):
-        self.processed = kwargs
+class FakeEndpointIngestionService:
+    def __init__(self):
+        self.submitted = None
+
+    def snapshot_chunking_from_agent(self, _agent):
+        return 500, 60
+
+    async def submit_durable_job(self, files, **kwargs):
+        self.submitted = {"files": files, **kwargs}
+        return "job-123"
 
 
 @pytest.mark.asyncio
 async def test_upload_endpoint_accepts_supported_extension_when_mime_is_generic(monkeypatch):
     service = FakeEndpointKnowledgeService()
+    ingestion_service = FakeEndpointIngestionService()
 
     class Collection:
-        async def find_one(self, query):
+        async def find_one(self, query, projection=None):
             if query.get("id") == "agent-1":
-                return {"id": "agent-1", "brand_id": "brand-1"}
+                return {"id": "agent-1", "brand_id": "brand-1", "brand_slug": "brand-1"}
             return {"id": "brand-1", "slug": "brand-1"}
 
     class SystemDb:
@@ -231,7 +233,6 @@ async def test_upload_endpoint_accepts_supported_extension_when_mime_is_generic(
     monkeypatch.setattr(knowledge_module.connection_manager, "get_system_db", lambda: SystemDb())
 
     response = await upload_document(
-        background_tasks=BackgroundTasks(),
         file=FakeUploadFile(),
         content_type="guide",
         brand_id="brand-1",
@@ -239,30 +240,32 @@ async def test_upload_endpoint_accepts_supported_extension_when_mime_is_generic(
         product_data=None,
         dealer_data=None,
         knowledge_service=service,
+        ingestion_service=ingestion_service,
         current_user=None,
     )
 
     assert response.job_id == "job-123"
-    assert service.started["filename"] == "catalog.csv"
-    assert service.started["content_type_header"] == "application/octet-stream"
-    assert service.started["agent_id"] == "agent-1"
+    assert ingestion_service.submitted["files"][0]["filename"] == "catalog.csv"
+    assert ingestion_service.submitted["files"][0]["content_type"] == "application/octet-stream"
+    assert ingestion_service.submitted["agent_id"] == "agent-1"
 
 
 @pytest.mark.asyncio
 async def test_upload_endpoint_rejects_unknown_source_type():
     service = FakeEndpointKnowledgeService()
+    ingestion_service = FakeEndpointIngestionService()
     file = FakeUploadFile()
     file.filename = "malware.exe"
 
     with pytest.raises(HTTPException) as exc_info:
         await upload_document(
-            background_tasks=BackgroundTasks(),
             file=file,
             content_type="guide",
             brand_id="brand-1",
             product_data=None,
             dealer_data=None,
             knowledge_service=service,
+            ingestion_service=ingestion_service,
             current_user=None,
         )
 

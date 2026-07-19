@@ -9,6 +9,7 @@ import json
 import math
 import hashlib
 import re
+import zipfile
 from typing import Any, AsyncIterator, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 from fastapi import UploadFile
@@ -134,12 +135,13 @@ class IngestionService:
         self,
         files: List[dict],
         *,
-        agent_id: str,
+        agent_id: str | None,
         brand_id: str,
         brand_slug: str,
         chunk_size: int,
         chunk_overlap: int,
         idempotency_key: str | None = None,
+        job_metadata: dict[str, Any] | None = None,
     ) -> str:
         """Persist encrypted sources and an immutable v2 job before returning.
 
@@ -148,11 +150,14 @@ class IngestionService:
         this method creates work that the restart-safe worker is allowed to
         claim.
         """
-        if not all(isinstance(value, str) and value for value in (agent_id, brand_id, brand_slug)):
+        if not all(isinstance(value, str) and value for value in (brand_id, brand_slug)):
             raise InvalidIngestionInputError("Agent brand scope is incomplete")
+        if agent_id is not None and (not isinstance(agent_id, str) or not agent_id):
+            raise InvalidIngestionInputError("Agent identifier is invalid")
         if not files:
             raise InvalidIngestionInputError("At least one document is required")
         normalized_idempotency_key = self._normalize_idempotency_key(idempotency_key)
+        normalized_job_metadata = self._normalize_durable_job_metadata(job_metadata)
         source_manifest = self._source_manifest(files)
         if normalized_idempotency_key:
             existing = await self.job_store.find_durable_job_by_idempotency(
@@ -190,6 +195,7 @@ class IngestionService:
                     "snapshot": snapshot,
                     "payload_refs": payload_refs,
                     "source_manifest": source_manifest,
+                    **normalized_job_metadata,
                     **({"idempotency_key": normalized_idempotency_key} if normalized_idempotency_key else {}),
                     "max_attempts": max(1, int(self.settings.INGESTION_MAX_ATTEMPTS)),
                 },
@@ -227,14 +233,49 @@ class IngestionService:
         return value
 
     @staticmethod
+    def _normalize_durable_job_metadata(value: dict[str, Any] | None) -> dict[str, Any]:
+        """Allow only small, source-free status metadata in a durable job."""
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise InvalidIngestionInputError("Job metadata is invalid")
+        allowed = {"submission_kind", "items_count"}
+        if set(value) - allowed:
+            raise InvalidIngestionInputError("Job metadata contains unsupported fields")
+        normalized: dict[str, Any] = {}
+        if "submission_kind" in value:
+            kind = value["submission_kind"]
+            if not isinstance(kind, str) or kind not in {"document", "knowledge_document", "knowledge_bulk"}:
+                raise InvalidIngestionInputError("Job submission kind is invalid")
+            normalized["submission_kind"] = kind
+        if "items_count" in value:
+            try:
+                items_count = int(value["items_count"])
+            except (TypeError, ValueError) as exc:
+                raise InvalidIngestionInputError("Job item count is invalid") from exc
+            if not 1 <= items_count <= 1000:
+                raise InvalidIngestionInputError("Job item count is invalid")
+            normalized["items_count"] = items_count
+        return normalized
+
+    @staticmethod
     def _source_manifest(files: List[dict]) -> list[dict[str, Any]]:
         manifest: list[dict[str, Any]] = []
         for index, file_data in enumerate(files):
             content = file_data.get("content")
             filename = file_data.get("filename")
             content_type = file_data.get("content_type")
+            context = file_data.get("context")
             if not isinstance(content, bytes) or not isinstance(filename, str) or not isinstance(content_type, str):
                 raise InvalidIngestionInputError("Document upload is invalid")
+            if context is not None:
+                try:
+                    context_serialized = json.dumps(context, sort_keys=True, separators=(",", ":"))
+                except (TypeError, ValueError) as exc:
+                    raise InvalidIngestionInputError("Document upload context is invalid") from exc
+                context_sha256 = hashlib.sha256(context_serialized.encode("utf-8")).hexdigest()
+            else:
+                context_sha256 = None
             manifest.append(
                 {
                     "file_index": index,
@@ -242,6 +283,7 @@ class IngestionService:
                     "content_type": content_type,
                     "size_bytes": len(content),
                     "sha256": hashlib.sha256(content).hexdigest(),
+                    **({"context_sha256": context_sha256} if context_sha256 else {}),
                 }
             )
         return manifest
@@ -322,15 +364,17 @@ class IngestionService:
         snapshot = job.get("snapshot")
         if not isinstance(snapshot, dict):
             raise InvalidIngestionInputError("Ingestion snapshot is missing")
-        required = ("agent_id", "brand_id", "brand_slug", "chunk_size", "chunk_overlap")
+        required = ("brand_id", "brand_slug", "chunk_size", "chunk_overlap")
         if any(snapshot.get(key) in (None, "") for key in required):
             raise InvalidIngestionInputError("Ingestion snapshot is invalid")
         # Scope fields are duplicated outside the snapshot for authorization.
         # Requiring equality prevents a malformed Mongo record from silently
         # writing to a different brand database.
-        for key in ("agent_id", "brand_id", "brand_slug"):
+        for key in ("brand_id", "brand_slug"):
             if job.get(key) != snapshot.get(key):
                 raise InvalidIngestionInputError("Ingestion scope snapshot is invalid")
+        if job.get("agent_id") != snapshot.get("agent_id"):
+            raise InvalidIngestionInputError("Ingestion scope snapshot is invalid")
         try:
             chunk_size, chunk_overlap = int(snapshot["chunk_size"]), int(snapshot["chunk_overlap"])
         except (TypeError, ValueError) as exc:
@@ -338,7 +382,7 @@ class IngestionService:
         if chunk_size <= 0 or chunk_overlap < 0 or chunk_overlap >= chunk_size:
             raise InvalidIngestionInputError("Ingestion chunking snapshot is invalid")
         return {
-            "agent_id": str(snapshot["agent_id"]),
+            "agent_id": str(snapshot["agent_id"]) if snapshot.get("agent_id") else None,
             "brand_id": str(snapshot["brand_id"]),
             "brand_slug": str(snapshot["brand_slug"]),
             "chunk_size": chunk_size,
@@ -368,6 +412,12 @@ class IngestionService:
                 )
             except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
                 raise InvalidIngestionInputError("Document cannot be processed") from exc
+            chunks = self._apply_payload_context(
+                chunks,
+                context=file_data.get("context"),
+                filename=file_data["filename"],
+                content_type_header=file_data["content_type"],
+            )
             if not chunks:
                 raise InvalidIngestionInputError("Document contains no ingestible content")
             for chunk_index, chunk in enumerate(chunks):
@@ -385,6 +435,103 @@ class IngestionService:
                 )
             if not await self.job_store.mark_progress(job_id, lease_token, index + 1):
                 return
+
+    @staticmethod
+    def _normalize_folder_path(value: object) -> str:
+        raw_path = str(value or "/").strip()
+        if not raw_path:
+            raw_path = "/"
+        if not raw_path.startswith("/"):
+            raw_path = f"/{raw_path}"
+        normalized = re.sub(r"/+", "/", raw_path).rstrip("/")
+        return normalized or "/"
+
+    @staticmethod
+    def _source_type(content_type: str, filename: str) -> str:
+        normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+        content_types = {
+            "application/pdf": "pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+            "text/plain": "txt",
+            "text/markdown": "md",
+            "text/html": "html",
+            "application/json": "json",
+            "text/csv": "csv",
+        }
+        if normalized_content_type in content_types:
+            return content_types[normalized_content_type]
+        lowered_filename = (filename or "").lower()
+        for suffix, source_type in {
+            ".pdf": "pdf", ".docx": "docx", ".txt": "txt", ".md": "md",
+            ".markdown": "md", ".html": "html", ".htm": "html", ".json": "json", ".csv": "csv",
+        }.items():
+            if lowered_filename.endswith(suffix):
+                return source_type
+        return "unknown"
+
+    def _apply_payload_context(
+        self,
+        chunks: list[dict],
+        *,
+        context: object,
+        filename: str,
+        content_type_header: str,
+    ) -> list[dict]:
+        """Apply encrypted knowledge metadata after source extraction.
+
+        The job document contains only opaque references. This method is the
+        first point at which optional folder/product/dealer metadata is made
+        available to the worker, after its encrypted payload is recovered.
+        """
+        if context is None:
+            return chunks
+        if not isinstance(context, dict):
+            raise InvalidIngestionInputError("Document upload context is invalid")
+        allowed = {"kb_content_type", "folder_path", "product_data", "dealer_data"}
+        if set(context) - allowed:
+            raise InvalidIngestionInputError("Document upload context is invalid")
+
+        kb_content_type = context.get("kb_content_type")
+        if kb_content_type is not None and (
+            not isinstance(kb_content_type, str)
+            or kb_content_type not in {"product", "dealer", "faq", "office", "category", "guide", "document"}
+        ):
+            raise InvalidIngestionInputError("Document content type is invalid")
+        product_data = context.get("product_data")
+        dealer_data = context.get("dealer_data")
+        if product_data is not None and not isinstance(product_data, dict):
+            raise InvalidIngestionInputError("Product metadata is invalid")
+        if dealer_data is not None and not isinstance(dealer_data, dict):
+            raise InvalidIngestionInputError("Dealer metadata is invalid")
+        if product_data is not None and dealer_data is not None:
+            raise InvalidIngestionInputError("Document cannot be both product and dealer data")
+
+        folder = self._normalize_folder_path(context.get("folder_path"))
+        name = filename.strip().strip("/") or "untitled"
+        path = f"{folder.rstrip('/')}/{name}" if folder != "/" else f"/{name}"
+        source_type = self._source_type(content_type_header, filename)
+        for chunk in chunks:
+            metadata = dict(chunk.get("metadata") or {})
+            metadata.update(
+                {
+                    "filename": filename,
+                    "name": name,
+                    "folder": folder,
+                    "path": path,
+                    "content_type_header": content_type_header,
+                    "source_type": source_type,
+                }
+            )
+            chunk["metadata"] = metadata
+            if kb_content_type is not None:
+                chunk["content_type"] = kb_content_type
+            if product_data is not None:
+                chunk["product_data"] = dict(product_data)
+                chunk["dealer_data"] = None
+            if dealer_data is not None:
+                chunk["dealer_data"] = dict(dealer_data)
+                chunk["product_data"] = None
+        return chunks
 
     @staticmethod
     def _durable_chunk_id(job_id: str, file_index: int, chunk_index: int) -> str:
@@ -738,17 +885,29 @@ class IngestionService:
             if not has_product_fields:
                 return None
             
-            return {
+            product = {
                 "sku": json_obj.get("sku") or json_obj.get("product_id"),
                 "name": json_obj.get("name") or json_obj.get("product_name"),
                 "price": json_obj.get("price"),
                 "currency": json_obj.get("currency"),
                 "category": json_obj.get("category"),
-                "image_url": json_obj.get("image_url"),
-                "product_url": json_obj.get("product_url"),
+                "image_url": json_obj.get("image_url") or json_obj.get("image"),
+                "product_url": json_obj.get("product_url") or json_obj.get("url"),
                 "in_stock": json_obj.get("in_stock", True),
-                "features": json_obj.get("features", [])
+                "features": json_obj.get("features", []),
             }
+            # Keep commerce variant and provenance fields intact. Product cards
+            # and Shopify reconciliation depend on these, so durable bulk
+            # ingestion must not silently flatten them into generic text.
+            for field in (
+                "id", "price_unit", "currency_source", "product_group_id", "handle", "parent_name",
+                "has_variants", "variant_count", "price_min", "price_max", "default_variant_id",
+                "variant_id", "variant_sku", "variant_title", "variant_options", "variant_url", "variants",
+                "source_type", "source_url", "source_product_id", "source_variant_id", "source_key", "source_active",
+            ):
+                if field in json_obj:
+                    product[field] = json_obj.get(field)
+            return product
         except Exception as e:
             logger.warning("Failed to extract product data", error=str(e))
             return None
@@ -834,6 +993,7 @@ class IngestionService:
 
     def _extract_docx_text(self, content: bytes) -> str:
         """Extract text from a DOCX using python-docx."""
+        self._validate_docx_archive(content)
         try:
             from docx import Document
         except ImportError as exc:
@@ -848,6 +1008,30 @@ class IngestionService:
                 if cells:
                     table_rows.append(" | ".join(cells))
         return "\n\n".join(paragraphs + table_rows)
+
+    def _validate_docx_archive(self, content: bytes) -> None:
+        """Reject compressed DOCX archives that can exhaust worker memory/CPU."""
+        max_files = max(1, int(self.settings.MAX_ARCHIVE_FILES))
+        max_uncompressed = max(1, int(self.settings.MAX_ARCHIVE_UNCOMPRESSED_SIZE_MB)) * 1024 * 1024
+        max_ratio = max(1, int(self.settings.MAX_ARCHIVE_COMPRESSION_RATIO))
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                entries = archive.infolist()
+                if len(entries) > max_files:
+                    raise InvalidIngestionInputError("DOCX archive contains too many files")
+                uncompressed = sum(max(0, int(entry.file_size)) for entry in entries)
+                compressed = sum(max(0, int(entry.compress_size)) for entry in entries)
+        except InvalidIngestionInputError:
+            raise
+        except (zipfile.BadZipFile, OSError, ValueError) as exc:
+            raise InvalidIngestionInputError("DOCX archive is invalid") from exc
+        if uncompressed > max_uncompressed:
+            raise InvalidIngestionInputError("DOCX archive exceeds the uncompressed size limit")
+        # Empty archives are invalid DOCX documents and should be rejected by
+        # python-docx. Avoid division by zero while still catching a compressed
+        # payload that expands beyond its declared ratio.
+        if uncompressed and (compressed == 0 or uncompressed / max(compressed, 1) > max_ratio):
+            raise InvalidIngestionInputError("DOCX archive compression ratio is too high")
 
     async def _extract_and_chunk(
         self,

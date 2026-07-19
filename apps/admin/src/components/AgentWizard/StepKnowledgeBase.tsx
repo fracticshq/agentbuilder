@@ -394,6 +394,7 @@ export default function StepKnowledgeBase({ data, onChange, agentId, brandId }: 
       <div className="max-w-6xl">
         <DocumentUploadWizard
           brandId={resolvedBrandId}
+          agentId={agentId}
           onComplete={handleUploadComplete}
           onCancel={() => setShowWizard(false)}
         />

@@ -298,7 +298,7 @@ class JobStore:
     async def find_durable_job_by_idempotency(
         self,
         *,
-        agent_id: str,
+        agent_id: str | None,
         brand_id: str,
         idempotency_key: str,
     ) -> Optional[Dict[str, Any]]:

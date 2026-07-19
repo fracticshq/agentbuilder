@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import json
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -174,6 +176,57 @@ async def test_submission_persists_encrypted_payload_and_immutable_scope_snapsho
     assert source not in repr(job).encode()
     assert source not in bytes(payload["content_encrypted"])
     assert (await service.payload_store.load(payload["_id"], job_id=job_id))["content"] == source
+
+
+@pytest.mark.asyncio
+async def test_brand_scoped_structured_upload_is_encrypted_durable_and_preserves_product_contract(durable_mongo):
+    system, brands = durable_mongo
+    service = IngestionService(Settings(VECTOR_BACKEND="atlas"))
+    service._generate_embeddings = AsyncMock(return_value=[0.25] * 1024)
+    source = json.dumps([
+        {
+            "sku": "SKU-BLACK",
+            "name": "Mixer Black",
+            "price": 420000,
+            "currency": "INR",
+            "category": "mixers",
+            "in_stock": True,
+            "features": ["matte"],
+            "product_group_id": "shopify:mixer",
+            "variant_id": "black",
+            "variant_sku": "SKU-BLACK",
+            "variant_options": {"Colour": "Black"},
+        }
+    ]).encode("utf-8")
+
+    job_id = await service.submit_durable_job(
+        [{
+            "content": source,
+            "filename": "catalog.json",
+            "content_type": "application/json",
+            "context": {"kb_content_type": "product", "folder_path": "/catalog/2026"},
+        }],
+        agent_id=None,
+        brand_id="brand-a",
+        brand_slug="brand-a-slug",
+        chunk_size=500,
+        chunk_overlap=60,
+        job_metadata={"submission_kind": "knowledge_bulk", "items_count": 1},
+    )
+
+    payload = next(iter(system["ingestion_payloads"].documents.values()))
+    assert b"SKU-BLACK" not in bytes(payload["content_encrypted"])
+    assert b"catalog/2026" not in bytes(payload["context_encrypted"])
+    assert "context" not in system["ingestion_jobs"].documents[job_id]
+
+    assert await service.process_next_durable_job(worker_id="worker-1") is True
+    job = system["ingestion_jobs"].documents[job_id]
+    assert job["status"] == "completed"
+    published = next(iter(brands["brand-a-slug"]["knowledge_base"].documents.values()))
+    assert published["agent_id"] is None
+    assert published["metadata"]["folder"] == "/catalog/2026"
+    assert published["product_data"]["variant_sku"] == "SKU-BLACK"
+    assert published["product_data"]["product_group_id"] == "shopify:mixer"
 
 
 @pytest.mark.asyncio

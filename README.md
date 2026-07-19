@@ -66,7 +66,7 @@ Core services:
 | Widget | `apps/widget` | http://localhost:5174 | Embeddable chat widget |
 | Shopify MCP | `apps/shopify-mcp` | http://localhost:3005 | Shopify OAuth and MCP bridge |
 | MongoDB | Compose service | internal | Agent data, knowledge, memory, source of truth |
-| Qdrant | Compose service | http://localhost:6333 | Local/self-hosted vector search |
+| Qdrant | Compose-only internal service | not host-published | Local/self-hosted vector search; requires an API key |
 | Redis | Compose service | internal | Rate limits, jobs, pub/sub, session state |
 
 The API image is built from the repository root so it installs the same canonical
@@ -125,6 +125,7 @@ MONGODB_URI=mongodb://mongodb:27017
 REDIS_URL=redis://redis:6379
 VECTOR_BACKEND=qdrant
 QDRANT_URL=http://qdrant:6333
+QDRANT_API_KEY=<openssl rand -hex 32>
 CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost:5174
 ENVIRONMENT=production
 DEBUG=false
