@@ -18,5 +18,5 @@ tenacity>=9.0.0
 
 # Build backends used when the local packages are installed with
 # --no-build-isolation after the lock is installed.
-setuptools>=61.0
+setuptools>=83.0.0
 wheel
