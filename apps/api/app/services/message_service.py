@@ -66,6 +66,7 @@ from .agent_turn_planner import AgentTurnPlan, AgentTurnPlanner
 from .tool_registry import ToolRegistryService
 from .conversation_scope_store import ConversationScopeStoreError, conversation_scope_store
 from . import response_metadata as _response_metadata
+from .stateful_turn_context import StatefulTurnContext, build_stateful_turn_context
 
 logger = structlog.get_logger(__name__)
 
@@ -1997,6 +1998,30 @@ Rules:
             filters=request.filters,
         )
 
+    def _build_stateful_turn_context(
+        self,
+        *,
+        conversation_summary: str,
+        recent_messages: list,
+        request: MessageRequest,
+        capability_scope: dict | None,
+        memory_context: dict | None = None,
+        include_memory: bool = False,
+    ) -> StatefulTurnContext:
+        """Adapt loaded turn data to the pure shared state-context assembler."""
+        args = {
+            "conversation_summary": conversation_summary,
+            "recent_messages": recent_messages,
+            "prompt_runtime": self._build_prompt_runtime_context(request),
+            "prompt_metadata": self.prompt_metadata,
+            "capability_scope": capability_scope,
+        }
+        if is_commerce_agent_config(self.agent_config or {}):
+            args["commerce"] = (self.agent_config or {}).get("commerce") or {}
+        if include_memory:
+            args["memory"] = memory_context
+        return build_stateful_turn_context(**args)
+
     def _normalized_request_page_context(self, request: MessageRequest) -> dict | None:
         url_context_config = (self.agent_config or {}).get("url_context_boost") or {}
         if isinstance(url_context_config, dict) and url_context_config.get("enabled") is False:
@@ -2186,58 +2211,22 @@ Rules:
                 recent_messages = conv_ctx["recent"]
                 conversation_summary = conv_ctx["summary"]
 
-            # Build chat history AND extract session state (e.g. cart_id) from
-            # previous assistant message metadata so the agent can reuse the cart.
-            chat_history = []
-            session_state: dict = {}
-            if conversation_summary:
-                # Lead with the rolling memory so older context survives compaction.
-                chat_history.append({
-                    "role": "system",
-                    "content": f"Conversation memory so far (earlier turns):\n{conversation_summary}",
-                    "metadata": {"memory_summary": True},
-                })
-            for msg in recent_messages:
-                role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
-                chat_history.append({
-                    "role": role,
-                    "content": msg.content,
-                    "metadata": msg.metadata or {}
-                })
-                # The most recent assistant message that carried session state wins.
-                if role == "assistant":
-                    meta = msg.metadata or {}
-                    if "cart_id" in meta:
-                        session_state["cart_id"] = meta["cart_id"]
-                    if "captured_ids" in meta:
-                        session_state["captured_ids"] = meta.get("captured_ids", {})
-                    if "last_searched" in meta:
-                        session_state["last_searched"] = meta.get("last_searched", {})
-                    for key in (
-                        "active_product_focus",
-                        "product_reference_map",
-                        "last_user_query",
-                        "last_search_query",
-                        "last_constraints",
-                        "rerank_results",
-                        "connector_inputs",
-                    ):
-                        if key in meta:
-                            session_state[key] = meta.get(key)
+            turn_context = self._build_stateful_turn_context(
+                conversation_summary=conversation_summary,
+                recent_messages=recent_messages,
+                request=request,
+                capability_scope=capability_scope,
+                memory_context=memory_context,
+                include_memory=True,
+            )
+            chat_history = turn_context.chat_history
+            session_state = turn_context.session_state
 
             remembered_inputs = session_state.get("connector_inputs") or {}
             if remembered_inputs:
                 self._apply_remembered_connector_inputs(remembered_inputs)
 
-            context_dict = {
-                "memory": memory_context,
-                "session_state": session_state,
-                "prompt_runtime": self._build_prompt_runtime_context(request),
-                "prompt_metadata": self.prompt_metadata,
-                "capability_scope": capability_scope,
-            }
-            if is_commerce_agent_config(self.agent_config or {}):
-                context_dict["commerce"] = (self.agent_config or {}).get("commerce") or {}
+            context_dict = turn_context.context
 
             # Chart-first Lal Kitab runtime (mirrors the streaming path): parse
             # birth details, geocode the birthplace automatically, build the
@@ -2965,41 +2954,14 @@ Rules:
                 recent_messages = conv_ctx["recent"]
                 conversation_summary = conv_ctx["summary"]
 
-            # Build chat history AND extract session state (e.g. cart_id) from
-            # previous assistant message metadata so the agent can reuse the cart.
-            chat_history = []
-            session_state: dict = {}
-            if conversation_summary:
-                # Lead with the rolling memory so older context survives compaction.
-                chat_history.append({
-                    "role": "system",
-                    "content": f"Conversation memory so far (earlier turns):\n{conversation_summary}",
-                    "metadata": {"memory_summary": True},
-                })
-            for msg in recent_messages:
-                role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
-                chat_history.append({
-                    "role": role,
-                    "content": msg.content,
-                    "metadata": msg.metadata or {}
-                })
-                # The most recent assistant message that carried session state wins.
-                if role == "assistant":
-                    meta = msg.metadata or {}
-                    if "cart_id" in meta:
-                        session_state["cart_id"] = meta["cart_id"]
-                    if "checkout_url" in meta:
-                        session_state["checkout_url"] = meta["checkout_url"]
-                    if "cart_lines" in meta:
-                        session_state["cart_lines"] = meta["cart_lines"]
-                    if "captured_ids" in meta:
-                        session_state["captured_ids"] = meta.get("captured_ids", {})
-                    if "last_searched" in meta:
-                        session_state["last_searched"] = meta.get("last_searched", {})
-                    # Remembered connector inputs (birthplace, location, account
-                    # id, …) so follow-up tool calls reuse them automatically.
-                    if isinstance(meta.get("connector_inputs"), dict) and meta["connector_inputs"]:
-                        session_state["connector_inputs"] = {**session_state.get("connector_inputs", {}), **meta["connector_inputs"]}
+            turn_context = self._build_stateful_turn_context(
+                conversation_summary=conversation_summary,
+                recent_messages=recent_messages,
+                request=request,
+                capability_scope=capability_scope,
+            )
+            chat_history = turn_context.chat_history
+            session_state = turn_context.session_state
 
             # Make remembered inputs available to any connector tool the
             # orchestrator may call this turn (universal for connector agents).
@@ -3017,14 +2979,7 @@ Rules:
                 for event in planner_events:
                     yield event
 
-            prompt_context = {
-                "session_state": session_state,
-                "prompt_runtime": self._build_prompt_runtime_context(request),
-                "prompt_metadata": self.prompt_metadata,
-                "capability_scope": capability_scope,
-            }
-            if is_commerce_agent_config(self.agent_config or {}):
-                prompt_context["commerce"] = (self.agent_config or {}).get("commerce") or {}
+            prompt_context = turn_context.context
             if lalkitab_plan.handled and lalkitab_plan.api_context:
                 prompt_context["prompt_runtime"]["calculated_api_context"] = {
                     "normalized_birth_input": lalkitab_plan.api_context.get("normalized_birth_input"),

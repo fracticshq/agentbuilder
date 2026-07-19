@@ -138,6 +138,6 @@ async def delete_subject_data(
         raise HTTPException(status_code=503, detail="Privacy deletion is temporarily unavailable") from exc
     return JSONResponse(
         jsonable_encoder(receipt),
-        status_code=202 if receipt["status"] == "pending" else 200,
+        status_code=200 if receipt["status"] == "completed" else 202,
         headers={"Cache-Control": "no-store"},
     )

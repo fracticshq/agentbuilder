@@ -118,6 +118,35 @@ services:
           cpus: "0.50"
           memory: 512M
 
+  # Processes the explicitly enabled, signed Strapi privacy contract. The
+  # default contract_pending mode only retains durable requests; it creates no
+  # network client or outbound traffic until the remote contract is deployed.
+  strapi-privacy-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: agentbuilder-api
+    container_name: agentbuilder-strapi-privacy-worker
+    env_file:
+      - .env.docker
+    environment:
+      STRAPI_PRIVACY_WORKER: "true"
+      STRAPI_PRIVACY_MODE: "${STRAPI_PRIVACY_MODE:-contract_pending}"
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      DEBUG: "${DEBUG:-false}"
+      REQUIRE_MONGODB: "${REQUIRE_MONGODB:-true}"
+      REQUIRE_REDIS: "false"
+      ALLOW_ADMIN_KEY_BYPASS: "${ALLOW_ADMIN_KEY_BYPASS:-false}"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
   # Processes Mongo-leased Shopify catalog snapshots and signed webhook
   # lifecycle actions. It deliberately shares the API image so catalog product
   # normalization cannot drift from the deployed request path.

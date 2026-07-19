@@ -38,6 +38,9 @@ def fetch_akv_secrets(vault_name: str) -> dict:
             "ADMIN-API-KEY",
             "QWEN-API-KEY",
             "STRAPI-API-TOKEN",
+            "STRAPI-PRIVACY-SUBJECT-HMAC-KEY",
+            "STRAPI-PRIVACY-REQUEST-SIGNING-KEY",
+            "STRAPI-PRIVACY-RECEIPT-PUBLIC-KEY",
             "FIRECRAWL-API-KEY",
             "MCP-SERVICE-AUTH-TOKEN",
             "GOOGLE-CLIENT-ID",
@@ -296,6 +299,31 @@ class Settings(BaseSettings):
     PRIVACY_DEFAULT_RETENTION_DAYS: int = 90
     PRIVACY_RETENTION_POLL_SECONDS: float = 3600.0
     PRIVACY_EXPORT_MAX_RECORDS: int = 10000
+
+    # Staging-quality evidence is intentionally dark by default.  Enabling it
+    # is an explicit deployment decision and never inferred from ENVIRONMENT.
+    # The target allowlist must contain only opaque, protected staging profile
+    # names (for example ``synthetic-external-staging``), never URLs.
+    EVAL_STAGING_ENABLED: bool = False
+    EVAL_STAGING_TARGET_ALLOWLIST: str = ""
+    EVAL_STAGING_MAX_CASES: int = 25
+    EVAL_RESULT_TTL_SECONDS: int = 604800
+
+    # External Strapi privacy processing is independent from the legacy
+    # dashboard conversation mirror.  It is explicitly contract-pending by
+    # default; STRAPI_URL and STRAPI_API_TOKEN must never enable it implicitly.
+    STRAPI_PRIVACY_MODE: str = "contract_pending"  # contract_pending | active | disabled
+    STRAPI_PRIVACY_SUBJECT_HMAC_KEY: str = ""
+    STRAPI_PRIVACY_URL: str = ""
+    STRAPI_PRIVACY_REQUEST_SIGNING_KEY: str = ""
+    STRAPI_PRIVACY_REQUEST_KEY_ID: str = ""
+    STRAPI_PRIVACY_RECEIPT_PUBLIC_KEY: str = ""
+    STRAPI_PRIVACY_TIMEOUT_SECONDS: float = 10.0
+    STRAPI_PRIVACY_LEASE_SECONDS: int = 120
+    STRAPI_PRIVACY_MAX_ATTEMPTS: int = 8
+    STRAPI_PRIVACY_RETRY_DELAY_SECONDS: int = 60
+    STRAPI_PRIVACY_WORKER_POLL_SECONDS: float = 2.0
+    STRAPI_PRIVACY_WORKER: bool = False
     
     # Strapi Dashboard Integration
     STRAPI_URL: str = "http://localhost:1337"
@@ -331,7 +359,7 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
     
-    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_HUMAN_TAKEOVER", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "ENABLE_TTL_CLEANUP", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", "ALLOW_PUBLIC_SIGNUP", "RATE_LIMIT_FAIL_CLOSED", "ATLAS_AUTO_CREATE_VECTOR_INDEXES", "SHOPIFY_WEBHOOKS_ENABLED", mode="before")
+    @field_validator("REDIS_SSL", "API_RELOAD", "ENABLE_WEBSOCKETS", "ENABLE_SSE", "ENABLE_METRICS", "ENABLE_TRACING", "ENABLE_HUMAN_TAKEOVER", "ENABLE_AUTO_SUMMARY", "ENABLE_PII_VAULTING", "ENABLE_FACT_EXTRACTION", "ENABLE_GRAPH_RULES", "REDIS_FALLBACK_TO_MONGO", "USE_AZURE_KEYVAULT", "ALLOW_PUBLIC_SIGNUP", "RATE_LIMIT_FAIL_CLOSED", "ATLAS_AUTO_CREATE_VECTOR_INDEXES", "SHOPIFY_WEBHOOKS_ENABLED", "STRAPI_PRIVACY_WORKER", "EVAL_STAGING_ENABLED", mode="before")
     @classmethod
     def parse_bool_fields(cls, v):
         """Parse boolean fields from string."""
@@ -339,7 +367,7 @@ class Settings(BaseSettings):
             return v.lower() in ("true", "1", "yes", "on")
         return v
     
-    @field_validator("API_WORKERS", "RATE_LIMIT_REQUESTS_PER_MINUTE", "RATE_LIMIT_BURST", "RATE_LIMIT_POLICY_WIDGET_CHAT", "RATE_LIMIT_POLICY_WIDGET_STREAM", "RATE_LIMIT_POLICY_WIDGET_WS_CONNECT", "RATE_LIMIT_POLICY_WIDGET_WS_MESSAGE", "RATE_LIMIT_POLICY_ADMIN_API", "RATE_LIMIT_POLICY_UPLOAD", "RATE_LIMIT_POLICY_STRAPI_SYNC", "MAX_FILE_SIZE_MB", "MAX_UPLOAD_FILES", "MAX_UPLOAD_TOTAL_SIZE_MB", "MAX_ARCHIVE_FILES", "MAX_ARCHIVE_UNCOMPRESSED_SIZE_MB", "MAX_ARCHIVE_COMPRESSION_RATIO", "INGESTION_JOB_TTL_SECONDS", "INGESTION_PAYLOAD_TTL_SECONDS", "INGESTION_LEASE_SECONDS", "INGESTION_MAX_ATTEMPTS", "INGESTION_RETRY_DELAY_SECONDS", "SHOPIFY_WEBHOOK_MAX_BODY_BYTES", "CATALOG_SYNC_JOB_TTL_SECONDS", "CATALOG_SYNC_LEASE_SECONDS", "CATALOG_SYNC_MAX_ATTEMPTS", "CATALOG_SYNC_RETRY_DELAY_SECONDS", "ACCESS_TOKEN_EXPIRE_MINUTES", "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "SHORT_TERM_TTL", "EPISODIC_TTL", "SUMMARY_CACHE_TTL", "AUTO_SUMMARY_TURNS", "MAX_MESSAGES_PER_CONVERSATION", "MAX_FACTS_PER_USER", "MAX_SUMMARIES_PER_CONVERSATION", "REDIS_CONNECTION_TIMEOUT", "SUMMARY_MAX_TOKENS", "VECTOR_DIMENSIONS", "PRIVACY_DEFAULT_RETENTION_DAYS", "PRIVACY_EXPORT_MAX_RECORDS", mode="before")
+    @field_validator("API_WORKERS", "RATE_LIMIT_REQUESTS_PER_MINUTE", "RATE_LIMIT_BURST", "RATE_LIMIT_POLICY_WIDGET_CHAT", "RATE_LIMIT_POLICY_WIDGET_STREAM", "RATE_LIMIT_POLICY_WIDGET_WS_CONNECT", "RATE_LIMIT_POLICY_WIDGET_WS_MESSAGE", "RATE_LIMIT_POLICY_ADMIN_API", "RATE_LIMIT_POLICY_UPLOAD", "RATE_LIMIT_POLICY_STRAPI_SYNC", "MAX_FILE_SIZE_MB", "MAX_UPLOAD_FILES", "MAX_UPLOAD_TOTAL_SIZE_MB", "MAX_ARCHIVE_FILES", "MAX_ARCHIVE_UNCOMPRESSED_SIZE_MB", "MAX_ARCHIVE_COMPRESSION_RATIO", "INGESTION_JOB_TTL_SECONDS", "INGESTION_PAYLOAD_TTL_SECONDS", "INGESTION_LEASE_SECONDS", "INGESTION_MAX_ATTEMPTS", "INGESTION_RETRY_DELAY_SECONDS", "SHOPIFY_WEBHOOK_MAX_BODY_BYTES", "CATALOG_SYNC_JOB_TTL_SECONDS", "CATALOG_SYNC_LEASE_SECONDS", "CATALOG_SYNC_MAX_ATTEMPTS", "CATALOG_SYNC_RETRY_DELAY_SECONDS", "ACCESS_TOKEN_EXPIRE_MINUTES", "PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "SHORT_TERM_TTL", "EPISODIC_TTL", "SUMMARY_CACHE_TTL", "AUTO_SUMMARY_TURNS", "MAX_MESSAGES_PER_CONVERSATION", "MAX_FACTS_PER_USER", "MAX_SUMMARIES_PER_CONVERSATION", "REDIS_CONNECTION_TIMEOUT", "SUMMARY_MAX_TOKENS", "VECTOR_DIMENSIONS", "PRIVACY_DEFAULT_RETENTION_DAYS", "PRIVACY_EXPORT_MAX_RECORDS", "STRAPI_PRIVACY_LEASE_SECONDS", "STRAPI_PRIVACY_MAX_ATTEMPTS", "STRAPI_PRIVACY_RETRY_DELAY_SECONDS", "EVAL_STAGING_MAX_CASES", "EVAL_RESULT_TTL_SECONDS", mode="before")
     @classmethod
     def parse_int_fields(cls, v):
         """Parse integer fields from string."""
@@ -347,7 +375,7 @@ class Settings(BaseSettings):
             return int(v)
         return v
 
-    @field_validator("INGESTION_WORKER_POLL_SECONDS", "CATALOG_SYNC_WORKER_POLL_SECONDS", "CATALOG_SYNC_SCHEDULER_POLL_SECONDS", "MALWARE_SCAN_TIMEOUT_SECONDS", "PRIVACY_RETENTION_POLL_SECONDS", mode="before")
+    @field_validator("INGESTION_WORKER_POLL_SECONDS", "CATALOG_SYNC_WORKER_POLL_SECONDS", "CATALOG_SYNC_SCHEDULER_POLL_SECONDS", "MALWARE_SCAN_TIMEOUT_SECONDS", "PRIVACY_RETENTION_POLL_SECONDS", "STRAPI_PRIVACY_TIMEOUT_SECONDS", "STRAPI_PRIVACY_WORKER_POLL_SECONDS", mode="before")
     @classmethod
     def parse_ingestion_worker_poll_seconds(cls, v):
         if isinstance(v, str):
@@ -414,12 +442,67 @@ class Settings(BaseSettings):
             raise ValueError("PRIVACY_RETENTION_POLL_SECONDS must be greater than zero")
         return value
 
+    @field_validator("EVAL_STAGING_TARGET_ALLOWLIST", mode="before")
+    @classmethod
+    def validate_evaluation_target_allowlist(cls, value: str) -> str:
+        normalized = ",".join(
+            item.strip().lower() for item in str(value or "").split(",") if item.strip()
+        )
+        if not normalized:
+            return ""
+        profile_pattern = re.compile(r"^[a-z][a-z0-9._:-]{1,127}$")
+        profiles = normalized.split(",")
+        if len(profiles) != len(set(profiles)) or any(not profile_pattern.fullmatch(profile) for profile in profiles):
+            raise ValueError("EVAL_STAGING_TARGET_ALLOWLIST must be a comma-separated list of safe staging profiles")
+        return normalized
+
+    @field_validator("EVAL_STAGING_MAX_CASES")
+    @classmethod
+    def validate_evaluation_max_cases(cls, value: int) -> int:
+        if not 1 <= value <= 100:
+            raise ValueError("EVAL_STAGING_MAX_CASES must be between 1 and 100")
+        return value
+
+    @field_validator("EVAL_RESULT_TTL_SECONDS")
+    @classmethod
+    def validate_evaluation_result_ttl(cls, value: int) -> int:
+        if not 300 <= value <= 31_536_000:
+            raise ValueError("EVAL_RESULT_TTL_SECONDS must be between 300 and 31536000")
+        return value
+
+    @field_validator("STRAPI_PRIVACY_MODE", mode="before")
+    @classmethod
+    def validate_strapi_privacy_mode(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"contract_pending", "active", "disabled"}:
+            raise ValueError("STRAPI_PRIVACY_MODE must be contract_pending, active, or disabled")
+        return normalized
+
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT == "production"
 
+    @property
+    def evaluation_target_allowlist(self) -> set[str]:
+        """Configured protected target profiles; empty means evaluation is dark."""
+        return {item for item in self.EVAL_STAGING_TARGET_ALLOWLIST.split(",") if item}
+
     @model_validator(mode="after")
     def validate_production_settings(self):
+        # Active privacy deletion has its own endpoint, HMAC signing key and
+        # Ed25519 receipt pin. It intentionally never falls back to the legacy
+        # STRAPI_URL/STRAPI_API_TOKEN dashboard-sync configuration.
+        if self.STRAPI_PRIVACY_MODE == "active":
+            from app.services.strapi_privacy_client import validate_active_privacy_configuration
+
+            try:
+                validate_active_privacy_configuration(self)
+            except RuntimeError as exc:
+                raise ValueError(str(exc)) from exc
+
+        if self.EVAL_STAGING_ENABLED and not self.evaluation_target_allowlist:
+            raise ValueError("EVAL_STAGING_TARGET_ALLOWLIST is required when EVAL_STAGING_ENABLED is true")
+
         if not self.is_production:
             return self
 
@@ -435,17 +518,22 @@ class Settings(BaseSettings):
                 "MONGODB_URI",
                 "REDIS_URL",
                 "MCP_SERVICE_AUTH_TOKEN",
+                "STRAPI_PRIVACY_SUBJECT_HMAC_KEY",
             ]
             if not str(getattr(self, name, "") or "").strip()
         ]
 
-        if str(self.STRAPI_URL or "").strip() and not str(self.STRAPI_API_TOKEN or "").strip():
-            missing.append("STRAPI_API_TOKEN")
+        # The dedicated privacy worker never receives or uses the legacy
+        # dashboard sync bearer token. Other production processes retain the
+        # existing dashboard-sync configuration requirements.
+        if not self.STRAPI_PRIVACY_WORKER:
+            if str(self.STRAPI_URL or "").strip() and not str(self.STRAPI_API_TOKEN or "").strip():
+                missing.append("STRAPI_API_TOKEN")
 
-        if str(self.STRAPI_API_TOKEN or "").strip():
-            strapi_url = str(self.STRAPI_URL or "").strip()
-            if "localhost" in strapi_url or "127.0.0.1" in strapi_url:
-                missing.append("STRAPI_URL (must not point at localhost in production)")
+            if str(self.STRAPI_API_TOKEN or "").strip():
+                strapi_url = str(self.STRAPI_URL or "").strip()
+                if "localhost" in strapi_url or "127.0.0.1" in strapi_url:
+                    missing.append("STRAPI_URL (must not point at localhost in production)")
 
         if not self.RATE_LIMIT_FAIL_CLOSED:
             missing.append("RATE_LIMIT_FAIL_CLOSED (must be true in production)")

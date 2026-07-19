@@ -25,14 +25,16 @@ if [ "${ENVIRONMENT:-development}" = "production" ]; then
   require_env MONGODB_URI
   require_env REDIS_URL
   require_env MCP_SERVICE_AUTH_TOKEN
-  require_env STRAPI_API_TOKEN
+  if [ "${STRAPI_PRIVACY_WORKER:-false}" != "true" ]; then
+    require_env STRAPI_API_TOKEN
 
-  case "${STRAPI_URL:-}" in
-    ""|*localhost*|*127.0.0.1*)
-      echo "ERROR: STRAPI_URL must point at the deployed Strapi service in production." >&2
-      exit 1
-      ;;
-  esac
+    case "${STRAPI_URL:-}" in
+      ""|*localhost*|*127.0.0.1*)
+        echo "ERROR: STRAPI_URL must point at the deployed Strapi service in production." >&2
+        exit 1
+        ;;
+    esac
+  fi
 fi
 
 if [ "${INGESTION_WORKER:-false}" = "true" ]; then
@@ -41,6 +43,10 @@ fi
 
 if [ "${PRIVACY_RETENTION_WORKER:-false}" = "true" ]; then
   exec python -m app.workers.privacy_retention_worker
+fi
+
+if [ "${STRAPI_PRIVACY_WORKER:-false}" = "true" ]; then
+  exec python -m app.workers.strapi_privacy_worker
 fi
 
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000

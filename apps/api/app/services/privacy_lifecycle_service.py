@@ -8,8 +8,6 @@ the creation-time brand database without trusting a client-provided tenant.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -19,6 +17,12 @@ import structlog
 from ..config import Settings
 from ..connections import connection_manager
 from ..websocket_manager import ws_manager
+from .strapi_privacy_store import (
+    StrapiPrivacyStore,
+    StrapiPrivacyStoreError,
+    idempotency_reference,
+    subject_reference,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -32,6 +36,10 @@ _BRAND_COLLECTIONS = {
     "episodic_facts": "episodic_memory",
     "activity_events": "activity_events",
     "observability_events": "observability_events",
+    # Aggregate-only synthetic staging evidence still has a bounded retention
+    # period. It is never exported as subject data because it contains no
+    # subject identifiers.
+    "quality_evaluation_runs": "quality_evaluation_runs",
 }
 
 
@@ -48,14 +56,7 @@ class PrivacyLifecycleService:
 
     def __init__(self, settings: Settings):
         self.settings = settings
-
-    @staticmethod
-    def _subject_digest(subject_id: str, secret: str) -> str:
-        return hmac.new(
-            secret.encode("utf-8"),
-            subject_id.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+        self.strapi_privacy_store = StrapiPrivacyStore(settings)
 
     def _system_db(self):
         try:
@@ -156,6 +157,7 @@ class PrivacyLifecycleService:
                 "episodic_facts": (await db[_BRAND_COLLECTIONS["episodic_facts"]].delete_many({"created_at": {"$lt": cutoff}})).deleted_count,
                 "activity_events": (await db[_BRAND_COLLECTIONS["activity_events"]].delete_many({"timestamp": {"$lt": cutoff}})).deleted_count,
                 "observability_events": (await db[_BRAND_COLLECTIONS["observability_events"]].delete_many({"timestamp": {"$lt": cutoff}})).deleted_count,
+                "quality_evaluation_runs": (await db[_BRAND_COLLECTIONS["quality_evaluation_runs"]].delete_many({"created_at": {"$lt": cutoff}})).deleted_count,
             }
         except Exception as exc:
             raise PrivacyLifecycleError("Retention cleanup failed") from exc
@@ -230,12 +232,55 @@ class PrivacyLifecycleService:
             raise PrivacyLifecycleError("Long-term memory deletion failed") from exc
         return {"deleted": result.deleted_count, "verified": verified}
 
-    def _external_processors(self) -> list[dict[str, str]]:
-        # The legacy Strapi mirror has no signed export/delete endpoint.  It is
-        # reported explicitly instead of allowing the API to claim full erasure.
-        if self.settings.STRAPI_URL:
-            return [{"name": "strapi", "status": "pending_contract"}]
-        return []
+    def _external_processors(self, request: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """Report Strapi from the explicit privacy mode, never STRAPI_URL.
+
+        The dashboard conversation mirror does not implement this protocol;
+        its URL/token are intentionally irrelevant to privacy completion.
+        """
+        mode = str(getattr(self.settings, "STRAPI_PRIVACY_MODE", "contract_pending") or "contract_pending").lower()
+        if request:
+            return [{
+                "name": "strapi",
+                "status": request.get("status", "pending_contract"),
+                "request_id": request.get("request_id"),
+                "receipt_verified": bool(request.get("receipt_verified")),
+            }]
+        if mode == "disabled":
+            return [{"name": "strapi", "status": "disabled"}]
+        if mode == "active":
+            return [{"name": "strapi", "status": "active_contract"}]
+        return [{"name": "strapi", "status": "pending_contract"}]
+
+    def _strapi_privacy_references(self, *, brand_id: str, subject_id: str) -> tuple[str, str]:
+        """Derive only opaque external references before erasing local data."""
+        secret = str(getattr(self.settings, "STRAPI_PRIVACY_SUBJECT_HMAC_KEY", "") or "")
+        try:
+            return (
+                subject_reference(subject_id=subject_id, brand_id=brand_id, secret=secret),
+                idempotency_reference(subject_id=subject_id, brand_id=brand_id, secret=secret),
+            )
+        except ValueError as exc:
+            raise PrivacyLifecycleError("Strapi privacy subject reference is not configured") from exc
+
+    async def _create_or_reuse_strapi_deletion_request(
+        self,
+        *,
+        brand_id: str,
+        brand_slug: str,
+        subject_reference_value: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        try:
+            request, _ = await self.strapi_privacy_store.create_or_get_deletion_request(
+                brand_id=brand_id,
+                brand_slug=brand_slug,
+                subject_reference=subject_reference_value,
+                idempotency_key=idempotency_key,
+            )
+            return request
+        except (StrapiPrivacyStoreError, ValueError) as exc:
+            raise PrivacyLifecycleError("Strapi privacy deletion request could not be recorded") from exc
 
     async def delete_subject(
         self,
@@ -245,6 +290,13 @@ class PrivacyLifecycleService:
         subject_id: str,
         requested_by: str | None = None,
     ) -> dict[str, Any]:
+        # Validate the separate privacy HMAC before first-party deletion. A
+        # deletion caller must never receive a local-completion receipt without
+        # the durable external operation that makes its state auditable.
+        strapi_subject_reference, strapi_idempotency_key = self._strapi_privacy_references(
+            brand_id=brand_id,
+            subject_id=subject_id,
+        )
         conversation_ids = await self._subject_conversation_ids(brand_id, subject_id)
         conversations_query = self._conversation_query(subject_id, conversation_ids)
         activity_query = self._activity_query(subject_id, conversation_ids)
@@ -286,23 +338,38 @@ class PrivacyLifecycleService:
             await ws_manager.purge_conversation_state(conversation_id)
 
         locally_verified = all(verification.values())
-        external_processors = self._external_processors()
-        status = "completed" if locally_verified and not external_processors else "pending"
+        # The durable request is written after first-party verification but
+        # before any deletion receipt is reported. contract_pending and
+        # disabled modes still create this audit record; neither performs I/O.
+        external_request = await self._create_or_reuse_strapi_deletion_request(
+            brand_id=brand_id,
+            brand_slug=brand_slug,
+            subject_reference_value=strapi_subject_reference,
+            idempotency_key=strapi_idempotency_key,
+        )
+        external_processors = self._external_processors(external_request)
+        externally_verified = (
+            external_request.get("status") == "completed"
+            and external_request.get("receipt_verified") is True
+        )
+        status = "completed" if locally_verified and externally_verified else "pending"
         request_id = f"privacy_{uuid.uuid4().hex}"
         receipt = {
             "id": request_id,
             "schema_version": "v1",
             "brand_id": brand_id,
             "brand_slug": brand_slug,
-            "subject_digest": self._subject_digest(subject_id, self.settings.SECRET_KEY),
+            "subject_reference": strapi_subject_reference,
             "requested_by": requested_by,
             "status": status,
             "deleted": deleted,
             "verified": verification,
             "tombstoned_sessions": tombstones.modified_count,
             "external_processors": external_processors,
-            "completed_at": _utc_now(),
+            "requested_at": _utc_now(),
         }
+        if status == "completed":
+            receipt["completed_at"] = _utc_now()
         try:
             await self._system_db()[PRIVACY_DELETION_RECEIPTS_COLLECTION].insert_one(receipt)
         except Exception as exc:

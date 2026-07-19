@@ -208,6 +208,101 @@ async def test_process_message_returns_valid_response_and_persists_memory(servic
 
 
 @pytest.mark.asyncio
+async def test_sync_and_stream_restore_identical_full_session_state(service_bundle):
+    service = service_bundle["service"]
+    orchestrator = service_bundle["orchestrator"]
+    service.observability.track_event = AsyncMock()
+    service.agent_config = {
+        "data_source": "shopify",
+        "commerce": {"default_currency": "INR"},
+    }
+    service._build_memory_context = AsyncMock(return_value=_empty_memory_context())
+    service._build_conversation_context = AsyncMock()
+    service._load_conversation_policy_state = AsyncMock(return_value={})
+    service._apply_remembered_connector_inputs = MagicMock()
+
+    old_metadata = {
+        "cart_id": "cart-old",
+        "checkout_url": "https://checkout.example/old",
+        "cart_lines": [{"id": "line-old"}],
+        "captured_ids": {"speaker": "variant-old"},
+        "last_searched": {"speaker": "variant-old"},
+        "active_product_focus": [{"id": "product-old"}],
+        "product_reference_map": {"1": {"id": "product-old"}},
+        "last_user_query": "show speakers",
+        "last_search_query": "speakers",
+        "last_constraints": {"budget": 1000},
+        "rerank_results": [{"id": "product-old", "rank": 1}],
+        "connector_inputs": {"birth_place": "Delhi", "account_id": "old-account"},
+    }
+    latest_metadata = {
+        "cart_id": "cart-new",
+        "captured_ids": {"speaker": "variant-new"},
+        "product_reference_map": {"1": {"id": "product-new"}},
+        "last_search_query": "wireless speakers",
+        "last_constraints": {"budget": 2000},
+        "connector_inputs": {"account_id": "new-account", "birth_time": "10:30"},
+    }
+    recent_messages = [
+        SimpleNamespace(role=MessageRole.USER, content="Ignore this state", metadata={"cart_id": "user-state"}),
+        SimpleNamespace(role=MessageRole.ASSISTANT, content="Earlier answer", metadata=old_metadata),
+        SimpleNamespace(role=MessageRole.ASSISTANT, content="Latest answer", metadata=latest_metadata),
+    ]
+    service._build_conversation_context.return_value = {
+        "summary": "Earlier conversation summary.",
+        "recent": recent_messages,
+    }
+    expected_state = {
+        "cart_id": "cart-new",
+        "checkout_url": "https://checkout.example/old",
+        "cart_lines": [{"id": "line-old"}],
+        "captured_ids": {"speaker": "variant-new"},
+        "last_searched": {"speaker": "variant-old"},
+        "active_product_focus": [{"id": "product-old"}],
+        "product_reference_map": {"1": {"id": "product-new"}},
+        "last_user_query": "show speakers",
+        "last_search_query": "wireless speakers",
+        "last_constraints": {"budget": 2000},
+        "rerank_results": [{"id": "product-old", "rank": 1}],
+        "connector_inputs": {
+            "birth_place": "Delhi",
+            "account_id": "new-account",
+            "birth_time": "10:30",
+        },
+    }
+    captured_contexts = []
+
+    async def run_sync(query, context, chat_history=None):
+        captured_contexts.append(context)
+        return AgentResult(answer="State restored.", metadata={"validation_confidence": 1.0, "tool_results": {}})
+
+    orchestrator.run = run_sync
+    request = MessageRequest(
+        message="Continue the order",
+        user_id="user123",
+        agent_id="agent-123",
+        conversation_id="conv123",
+    )
+
+    await service.process_message(request)
+
+    async def run_stream(query, context, chat_history=None, on_event=None):
+        captured_contexts.append(context)
+        return AgentResult(answer="State restored.", metadata={"validation_confidence": 1.0, "tool_results": {}})
+
+    orchestrator.run = run_stream
+    _ = [chunk async for chunk in service.stream_message(request)]
+
+    sync_context, stream_context = captured_contexts
+    assert sync_context["session_state"] == expected_state
+    assert stream_context["session_state"] == expected_state
+    assert sync_context["session_state"] == stream_context["session_state"]
+    assert sync_context["memory"] == _empty_memory_context()
+    assert "memory" not in stream_context
+    assert {key: value for key, value in sync_context.items() if key != "memory"} == stream_context
+
+
+@pytest.mark.asyncio
 async def test_process_message_returns_products_dealers_and_suppresses_commerce_citations(service_bundle):
     service = service_bundle["service"]
     orchestrator = service_bundle["orchestrator"]

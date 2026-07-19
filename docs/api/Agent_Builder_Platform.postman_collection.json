@@ -1,6 +1,6 @@
 {
   "info": {
-    "_postman_id": "e66f8a43-302b-1fcd-8818-954569586fab",
+    "_postman_id": "aedefb40-b2f0-767c-352c-f54ff644d4c3",
     "description": "Generated from docs/api/openapi.json. Do not edit manually.",
     "name": "Agent Builder Platform API (generated)",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
@@ -1009,6 +1009,94 @@
           "response": []
         },
         {
+          "name": "list_staging_evaluation_runs_api_v1_admin_brands__brand_id__evaluations_runs_get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "List Staging Evaluation Runs",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/evaluations/runs"
+          },
+          "response": []
+        },
+        {
+          "name": "get_staging_evaluation_run_api_v1_admin_brands__brand_id__evaluations_runs__run_id__get",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "description": "Get Staging Evaluation Run",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/evaluations/runs/:run_id"
+          },
+          "response": []
+        },
+        {
+          "name": "submit_staging_evaluation_review_api_v1_admin_brands__brand_id__evaluations_runs__run_id__reviews_post",
+          "request": {
+            "auth": {
+              "bearer": [
+                {
+                  "key": "token",
+                  "type": "string",
+                  "value": "{{accessToken}}"
+                }
+              ],
+              "type": "bearer"
+            },
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"case_id\": \"value\",\n  \"dimensions\": [\n    {}\n  ],\n  \"outcome\": \"pass\",\n  \"provenance\": {},\n  \"redacted_rationale\": \"value\",\n  \"reviewer_ref\": \"value\",\n  \"reviewer_type\": \"human\"\n}"
+            },
+            "description": "Store a redacted human decision or an optional pinned-model opinion.\n\nHuman review remains primary: a pinned-model record can only be appended\nafter a human review of that case. The endpoint stores declared metadata;\nit never calls a model or provider.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/brands/:brand_id/evaluations/runs/:run_id/reviews"
+          },
+          "response": []
+        },
+        {
           "name": "get_retention_policy_api_v1_admin_brands__brand_id__privacy_retention_get",
           "request": {
             "auth": {
@@ -1256,6 +1344,34 @@
             ],
             "method": "GET",
             "url": "{{baseUrl}}/api/v1/admin/console/agents/:agent_id/runs"
+          },
+          "response": []
+        },
+        {
+          "name": "ingest_staging_evaluation_run_api_v1_admin_evaluations_runs_post",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"agent_id\": \"value\",\n  \"brand_id\": \"value\",\n  \"report\": {},\n  \"target_profile\": {\n    \"access_mode\": \"value\",\n    \"data_classification\": \"value\",\n    \"profile\": \"value\"\n  }\n}"
+            },
+            "description": "Persist a signed-by-scope, synthetic-only staging summary.\n\nThis endpoint intentionally performs no evaluation work and imports no\nprovider/model adapter. A service has to generate the offline contract\nreport elsewhere and hold the explicit ``evaluations:write`` key scope.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admin/evaluations/runs"
           },
           "response": []
         },

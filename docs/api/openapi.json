@@ -1822,6 +1822,89 @@
         "title": "DocumentUploadResponse",
         "type": "object"
       },
+      "EvaluationReviewRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "case_id": {
+            "maxLength": 96,
+            "minLength": 1,
+            "title": "Case Id",
+            "type": "string"
+          },
+          "dimensions": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "title": "Dimensions",
+            "type": "array"
+          },
+          "outcome": {
+            "enum": [
+              "pass",
+              "fail",
+              "needs_adjudication"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "provenance": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Provenance",
+            "type": "object"
+          },
+          "redacted_rationale": {
+            "maxLength": 96,
+            "minLength": 12,
+            "title": "Redacted Rationale",
+            "type": "string"
+          },
+          "reviewer_ref": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 2,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewer Ref"
+          },
+          "reviewer_type": {
+            "enum": [
+              "human",
+              "pinned_model"
+            ],
+            "title": "Reviewer Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "case_id",
+          "reviewer_type",
+          "dimensions",
+          "outcome",
+          "redacted_rationale",
+          "provenance"
+        ],
+        "title": "EvaluationReviewRequest",
+        "type": "object"
+      },
       "FolderCreateRequest": {
         "properties": {
           "agent_id": {
@@ -2599,6 +2682,8 @@
           "privacy:read",
           "privacy:write",
           "privacy:delete",
+          "evaluation:read",
+          "evaluation:review",
           "api_key:read",
           "api_key:write",
           "api_key:delete",
@@ -3348,6 +3433,40 @@
         "title": "ShopifyImportRequest",
         "type": "object"
       },
+      "StagingEvaluationIngestRequest": {
+        "additionalProperties": false,
+        "description": "The only accepted result is the aggregate-only v2 sanitized summary.",
+        "properties": {
+          "agent_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "brand_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Brand Id",
+            "type": "string"
+          },
+          "report": {
+            "additionalProperties": true,
+            "title": "Report",
+            "type": "object"
+          },
+          "target_profile": {
+            "$ref": "#/components/schemas/TargetProfileRequest"
+          }
+        },
+        "required": [
+          "agent_id",
+          "brand_id",
+          "target_profile",
+          "report"
+        ],
+        "title": "StagingEvaluationIngestRequest",
+        "type": "object"
+      },
       "SyncConfigUpdate": {
         "properties": {
           "access_token": {
@@ -3432,6 +3551,34 @@
           "metrics"
         ],
         "title": "SystemStatus",
+        "type": "object"
+      },
+      "TargetProfileRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "access_mode": {
+            "const": "read_only",
+            "title": "Access Mode",
+            "type": "string"
+          },
+          "data_classification": {
+            "const": "synthetic_only",
+            "title": "Data Classification",
+            "type": "string"
+          },
+          "profile": {
+            "maxLength": 128,
+            "minLength": 2,
+            "title": "Profile",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile",
+          "data_classification",
+          "access_mode"
+        ],
+        "title": "TargetProfileRequest",
         "type": "object"
       },
       "Token": {
@@ -5988,6 +6135,233 @@
         ]
       }
     },
+    "/api/v1/admin/brands/{brand_id}/evaluations/runs": {
+      "get": {
+        "operationId": "list_staging_evaluation_runs_api_v1_admin_brands__brand_id__evaluations_runs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "brand_id",
+            "required": true,
+            "schema": {
+              "title": "Brand Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-admin-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Staging Evaluation Runs",
+        "tags": [
+          "admin",
+          "staging-evaluations"
+        ]
+      }
+    },
+    "/api/v1/admin/brands/{brand_id}/evaluations/runs/{run_id}": {
+      "get": {
+        "operationId": "get_staging_evaluation_run_api_v1_admin_brands__brand_id__evaluations_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "brand_id",
+            "required": true,
+            "schema": {
+              "title": "Brand Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-admin-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Staging Evaluation Run",
+        "tags": [
+          "admin",
+          "staging-evaluations"
+        ]
+      }
+    },
+    "/api/v1/admin/brands/{brand_id}/evaluations/runs/{run_id}/reviews": {
+      "post": {
+        "description": "Store a redacted human decision or an optional pinned-model opinion.\n\nHuman review remains primary: a pinned-model record can only be appended\nafter a human review of that case. The endpoint stores declared metadata;\nit never calls a model or provider.",
+        "operationId": "submit_staging_evaluation_review_api_v1_admin_brands__brand_id__evaluations_runs__run_id__reviews_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "brand_id",
+            "required": true,
+            "schema": {
+              "title": "Brand Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-admin-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Admin-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvaluationReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Submit Staging Evaluation Review",
+        "tags": [
+          "admin",
+          "staging-evaluations"
+        ]
+      }
+    },
     "/api/v1/admin/brands/{brand_id}/privacy/retention": {
       "get": {
         "operationId": "get_retention_policy_api_v1_admin_brands__brand_id__privacy_retention_get",
@@ -6570,6 +6944,97 @@
         "tags": [
           "admin",
           "agent-console"
+        ]
+      }
+    },
+    "/api/v1/admin/evaluations/runs": {
+      "post": {
+        "description": "Persist a signed-by-scope, synthetic-only staging summary.\n\nThis endpoint intentionally performs no evaluation work and imports no\nprovider/model adapter. A service has to generate the offline contract\nreport elsewhere and hold the explicit ``evaluations:write`` key scope.",
+        "operationId": "ingest_staging_evaluation_run_api_v1_admin_evaluations_runs_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-agent-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Agent-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StagingEvaluationIngestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingest Staging Evaluation Run",
+        "tags": [
+          "admin",
+          "staging-evaluations"
         ]
       }
     },

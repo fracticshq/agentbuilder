@@ -72,3 +72,57 @@ assertion.
 
 Every new regression must add a fixture/case before it adds a special-case
 runtime branch. Evaluation outputs must contain no secrets or raw subject data.
+
+## Privacy-safe staging quality contract (v2)
+
+`cases/v2/staging_quality_cases.json` and
+`cases/v2/staging_quality_reviews.json` are a versioned contract for a future
+human review of external staging. They are intentionally not an execution
+dataset: each case contains opaque synthetic turn descriptors, a deterministic
+seed, a target profile, public invariant tags, and `side_effect_mode` set to
+`read_only`. The v2 fixture covers Hybrid RAG, ecommerce, Shopify, Lal Kitab,
+provider-outage, prompt-injection, and tenant-isolation boundaries.
+
+The strict standard-library validator rejects unknown fields, prompt/query or
+source fields, tenant/customer/birth identifiers, URLs, direct identifiers,
+and credential-shaped values. Review records are equally strict: they carry a
+human or optional `pinned_model` reviewer type, per-rubric pass/fail/
+needs-adjudication dimensions, a `[redacted]` rationale, and case/fixture/
+rubric provenance hashes. Human review is primary; a pinned model is only a
+second opinion. These artifacts do **not** claim an LLM faithfulness metric.
+
+The only CI-safe command is offline validation:
+
+```bash
+python evals/run_staging_quality.py --validate-only
+```
+
+An aggregate-only artifact can be written without turns, descriptors,
+rationales, provenance values, prompts, or source text:
+
+```bash
+python evals/run_staging_quality.py --validate-only --json-output /tmp/staging-quality-summary.json
+```
+
+`--execute` is deliberately not implemented. It validates the artifacts, then
+fails closed; it never makes a network call in this repository slice. A future
+executor must still require both `STAGING_QUALITY_EXECUTE_ENABLED=1` and a
+comma-separated `STAGING_QUALITY_TARGET_ALLOWLIST` that explicitly includes
+every target profile.
+
+### External staging prerequisites (not implemented here)
+
+The later FastAPI integration must provide all of the following before any
+external staging call can be enabled:
+
+- An explicitly configured FastAPI staging base URL, with TLS and a fixed
+  host allowlist; no caller-controlled endpoint.
+- A dedicated, least-privilege staging API key supplied only by a secret
+  manager or CI secret, never by a fixture, review artifact, CLI argument, or
+  log.
+- The explicit execution flag and target-profile allowlist above, checked
+  before constructing any client or request.
+- Server-side `read_only` enforcement, synthetic-data-only authorization, and
+  an auditable proof that no write/tool mutation capability is available.
+- Human review as the release decision; a pinned evaluator may inform
+  adjudication but cannot substitute for human approval.

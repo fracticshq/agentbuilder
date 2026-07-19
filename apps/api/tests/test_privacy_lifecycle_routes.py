@@ -12,6 +12,8 @@ from app.services.conversation_scope_store import ConversationScope
 
 
 class _PrivacyService:
+    deletion_status = "pending"
+
     async def export_subject(self, **kwargs):
         return {
             "schema_version": "v1",
@@ -24,7 +26,7 @@ class _PrivacyService:
     async def delete_subject(self, **kwargs):
         return {
             "id": "privacy_1",
-            "status": "pending",
+            "status": self.deletion_status,
             "completed_at": datetime.now(timezone.utc),
             "deleted": {},
             "verified": {},
@@ -35,7 +37,7 @@ class _PrivacyService:
         return {"deleted": 3, "verified": True}
 
 
-def _client(monkeypatch):
+def _client(monkeypatch, *, deletion_status="pending"):
     from app.api.v1.endpoints import messages as messages_module
 
     session_token, session = issue_widget_session("agent-1")
@@ -59,7 +61,9 @@ def _client(monkeypatch):
 
     monkeypatch.setattr(messages_module.conversation_scope_store, "require_active_widget_scope", require_scope)
     monkeypatch.setattr(messages_module.conversation_scope_store, "set_long_term_memory_consent", set_consent)
-    monkeypatch.setattr(messages_module, "PrivacyLifecycleService", lambda _settings: _PrivacyService())
+    service = _PrivacyService()
+    service.deletion_status = deletion_status
+    monkeypatch.setattr(messages_module, "PrivacyLifecycleService", lambda _settings: service)
 
     app = FastAPI()
     app.include_router(messages_module.router, prefix="/api/v1/messages")
@@ -98,6 +102,29 @@ def test_public_privacy_deletion_reports_pending_external_processor(monkeypatch)
     assert response.status_code == 202
     assert response.headers["cache-control"] == "no-store"
     assert response.json()["external_processors"][0]["name"] == "strapi"
+
+
+def test_public_privacy_deletion_returns_200_only_after_completed_receipt(monkeypatch):
+    client, token, _ = _client(monkeypatch, deletion_status="completed")
+
+    response = client.delete(
+        "/api/v1/messages/privacy",
+        headers={"X-Widget-Session": token},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_public_privacy_deletion_keeps_noncompleted_states_pending(monkeypatch):
+    client, token, _ = _client(monkeypatch, deletion_status="failed")
+
+    response = client.delete(
+        "/api/v1/messages/privacy",
+        headers={"X-Widget-Session": token},
+    )
+
+    assert response.status_code == 202
 
 
 def test_withdrawing_consent_erases_long_term_facts(monkeypatch):

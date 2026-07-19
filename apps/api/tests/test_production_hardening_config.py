@@ -1,4 +1,5 @@
 import pytest
+import base64
 from pydantic import ValidationError
 
 from app.config import Settings
@@ -14,6 +15,7 @@ def _production_settings(**overrides):
         "MONGODB_URI": "mongodb://mongo.internal:27017",
         "REDIS_URL": "redis://redis.internal:6379",
         "MCP_SERVICE_AUTH_TOKEN": "test-mcp-key",
+        "STRAPI_PRIVACY_SUBJECT_HMAC_KEY": "privacy-subject-hmac-key-which-is-long-enough",
         "STRAPI_URL": "https://strapi.example.test",
         "STRAPI_API_TOKEN": "test-strapi-key",
         "VECTOR_BACKEND": "qdrant",
@@ -58,3 +60,49 @@ def test_production_requires_a_signing_secret_when_shopify_webhooks_are_enabled(
 def test_shopify_admin_api_release_label_is_validated():
     with pytest.raises(ValidationError, match="SHOPIFY_ADMIN_API_VERSION"):
         Settings(SECRET_KEY="test-secret", SHOPIFY_ADMIN_API_VERSION="latest")
+
+
+def test_strapi_privacy_defaults_to_contract_pending_even_with_dashboard_url():
+    settings = Settings(
+        SECRET_KEY="test-secret",
+        STRAPI_URL="https://dashboard-strapi.example.test",
+        STRAPI_API_TOKEN="legacy-dashboard-token",
+    )
+
+    assert settings.STRAPI_PRIVACY_MODE == "contract_pending"
+
+
+def test_active_strapi_privacy_fails_closed_without_its_own_endpoint_and_keys():
+    with pytest.raises(ValidationError, match="STRAPI_PRIVACY_URL"):
+        Settings(
+            SECRET_KEY="test-secret",
+            STRAPI_PRIVACY_MODE="active",
+            STRAPI_URL="https://dashboard-strapi.example.test",
+            STRAPI_API_TOKEN="legacy-dashboard-token",
+        )
+
+
+def test_active_strapi_privacy_accepts_a_pinned_ed25519_key_without_dashboard_token():
+    settings = Settings(
+        SECRET_KEY="test-secret",
+        STRAPI_PRIVACY_MODE="active",
+        STRAPI_PRIVACY_URL="https://privacy-strapi.example.test",
+        STRAPI_PRIVACY_SUBJECT_HMAC_KEY="privacy-subject-hmac-key-which-is-long-enough",
+        STRAPI_PRIVACY_REQUEST_SIGNING_KEY="privacy-request-signing-key-which-is-long-enough",
+        STRAPI_PRIVACY_REQUEST_KEY_ID="privacy-key-1",
+        STRAPI_PRIVACY_RECEIPT_PUBLIC_KEY=base64.b64encode(b"p" * 32).decode("ascii"),
+        STRAPI_URL="",
+        STRAPI_API_TOKEN="",
+    )
+
+    assert settings.STRAPI_PRIVACY_MODE == "active"
+
+
+def test_production_privacy_worker_does_not_require_legacy_dashboard_token():
+    settings = _production_settings(
+        STRAPI_PRIVACY_WORKER=True,
+        STRAPI_API_TOKEN="",
+        STRAPI_URL="",
+    )
+
+    assert settings.STRAPI_PRIVACY_WORKER is True

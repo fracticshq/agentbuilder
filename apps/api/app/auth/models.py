@@ -45,6 +45,11 @@ class Permission(str, Enum):
     PRIVACY_READ = "privacy:read"
     PRIVACY_WRITE = "privacy:write"
     PRIVACY_DELETE = "privacy:delete"
+
+    # Staging-quality evidence permissions. These deliberately do not grant
+    # provider execution or access to customer evaluation data.
+    EVALUATION_READ = "evaluation:read"
+    EVALUATION_REVIEW = "evaluation:review"
     
     # API Key permissions
     API_KEY_READ = "api_key:read"
@@ -67,6 +72,7 @@ ADMIN_PERMISSIONS = [
     Permission.DOCUMENT_READ, Permission.DOCUMENT_WRITE, Permission.DOCUMENT_DELETE,
     Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
     Permission.PRIVACY_READ, Permission.PRIVACY_WRITE, Permission.PRIVACY_DELETE,
+    Permission.EVALUATION_READ, Permission.EVALUATION_REVIEW,
     Permission.API_KEY_READ, Permission.API_KEY_WRITE, Permission.API_KEY_DELETE,
     Permission.USER_READ, Permission.USER_WRITE, Permission.USER_DELETE,
     Permission.SYSTEM_ADMIN,
@@ -78,6 +84,7 @@ BRAND_ADMIN_PERMISSIONS = [
     Permission.DOCUMENT_READ, Permission.DOCUMENT_WRITE, Permission.DOCUMENT_DELETE,
     Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
     Permission.PRIVACY_READ, Permission.PRIVACY_WRITE, Permission.PRIVACY_DELETE,
+    Permission.EVALUATION_READ, Permission.EVALUATION_REVIEW,
     Permission.API_KEY_READ, Permission.API_KEY_WRITE, Permission.API_KEY_DELETE,
 ]
 
@@ -86,6 +93,7 @@ OPERATOR_PERMISSIONS = [
     Permission.AGENT_READ,
     Permission.DOCUMENT_READ,
     Permission.MESSAGE_READ, Permission.MESSAGE_WRITE,
+    Permission.EVALUATION_READ, Permission.EVALUATION_REVIEW,
 ]
 
 

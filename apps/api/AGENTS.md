@@ -38,6 +38,10 @@ This is the core FastAPI backend providing:
 | `AZURE_RESOURCE_GROUP` | For admin Azure discovery | `agentbuilder-rg` | Resource group containing the Azure OpenAI account |
 | `AZURE_OPENAI_ACCOUNT_NAME` | For admin Azure discovery | `anant-resource` | Azure OpenAI account name used on the ARM deployments route |
 | `SETTINGS_ENCRYPTION_KEY` | Recommended | `random-32-char-string` | Encrypts runtime settings stored in MongoDB. Falls back to `PII_ENCRYPTION_KEY`, then `SECRET_KEY`. |
+| `EVAL_STAGING_ENABLED` | No | `false` | Explicit opt-in for synthetic staging-evaluation evidence; never inferred from `ENVIRONMENT`. |
+| `EVAL_STAGING_TARGET_ALLOWLIST` | When evaluation enabled | `synthetic-external-staging` | Comma-separated protected synthetic/read-only target profiles. |
+| `EVAL_STAGING_MAX_CASES` | No | `25` | Maximum sanitized contract cases accepted per report. |
+| `EVAL_RESULT_TTL_SECONDS` | No | `604800` | TTL for aggregate-only evaluation results. |
 
 ---
 

@@ -64,6 +64,28 @@ routes and dedicated `privacy:*` permissions. See the versioned
 retention, and external-processor semantics; `202` is pending, not verified
 full deletion.
 
+### Synthetic staging-quality evaluations
+
+The staging-quality surface is disabled by default. When an isolated staging
+deployment explicitly sets `EVAL_STAGING_ENABLED=true`, it must also configure
+`EVAL_STAGING_TARGET_ALLOWLIST` with a protected `synthetic_only`, `read_only`
+profile, a bounded `EVAL_STAGING_MAX_CASES`, and a short
+`EVAL_RESULT_TTL_SECONDS`. It is not enabled merely because `ENVIRONMENT` says
+`staging`, and it never accepts a URL, provider/connector payload, customer or
+conversation identifier, raw turn, free-form rationale, secret, or Lal Kitab
+birth field.
+
+`POST /api/v1/admin/evaluations/runs` is a service-to-service ingest route. It
+accepts only a brand- and agent-bound Agent API key with the explicit
+`evaluations:write` scope; dashboard JWTs and generic API keys cannot ingest.
+The run body must match the checked-in v2 aggregate-only contract summary.
+Dashboard list/detail/review routes are brand-scoped, `no-store`, and require
+`evaluation:read` or `evaluation:review`. Human review is the decision of
+record. A pinned-model result may be persisted only as an already-produced,
+hash-pinned second opinion after a human review of the same case; this API does
+not invoke models or providers. See the detailed
+[staging-quality evaluation contract](./STAGING_QUALITY_EVALUATIONS.md).
+
 Human-takeover control uses two separate WebSockets and never puts either
 credential in a URL query string:
 
