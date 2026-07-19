@@ -31,6 +31,13 @@ RUN pip install --no-cache-dir --require-hashes -r /app/requirements.lock \
 # ── Copy API source ────────────────────────────────────────────────────────────
 COPY apps/api/app /app/api/app
 COPY apps/api/run.py apps/api/docker-entrypoint.sh /app/api/
+# The protected staging-evaluation API validates reports against the checked-in
+# contract fixtures.  They are runtime artifacts, not test-only source.
+COPY evals /app/evals
+
+# The application runs from /app/api while the repository-owned evaluation
+# package lives at /app/evals in the image.
+ENV PYTHONPATH=/app
 
 WORKDIR /app/api
 
