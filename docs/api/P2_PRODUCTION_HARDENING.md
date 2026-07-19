@@ -21,9 +21,10 @@ Job records are retained for 24 hours and status errors are generic, such as
 `Document embedding failed`; provider URLs, credentials, and raw backend errors
 are not returned to dashboard clients.
 
-This makes state durable, not the executor: FastAPI background work is not a
-durable queue and is not resumed automatically after an interruption. A queued
-worker with retry/lease semantics remains a follow-up production requirement.
+P3 completed the executor boundary: `ingestion-worker` claims queued jobs from
+Mongo with leases/fencing, retries safely after interruption, and publishes
+through deterministic upserts. FastAPI request handlers do not run embedding
+work in `BackgroundTasks`; see the [P3 durable-ingestion contract](P3_DURABLE_INGESTION.md).
 
 ## Tenant control-plane rules
 

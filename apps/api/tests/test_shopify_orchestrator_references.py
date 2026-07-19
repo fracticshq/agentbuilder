@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
+from agent_runtime import orchestrator_shopify
 from tools.types import ToolResult
 
 
@@ -247,3 +248,31 @@ async def test_tool_exception_does_not_return_diagnostic_to_the_orchestrator():
     assert result.success is False
     assert "secret-shopify-token" not in (result.error or "")
     assert "commerce service" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_cart_mutation_stops_loop_before_any_follow_up_action():
+    class ExplodingCartTool:
+        def __init__(self):
+            self.calls = 0
+
+        async def run(self, **_kwargs):
+            self.calls += 1
+            raise RuntimeError("connection dropped after cart mutation: secret-token")
+
+    class NoFollowUpLLM:
+        async def generate(self, *_args, **_kwargs):
+            raise AssertionError("the agent loop must stop after an uncertain cart mutation")
+
+    cart = ExplodingCartTool()
+    orchestrator = ShopifyOrchestrator(NoFollowUpLLM(), FakeTools(update_cart=cart))
+    orchestrator.active_product_focus = [product(1, "Heart Drop Earrings", "gid://shopify/ProductVariant/1", 149900)]
+    orchestrator.last_searched = {"heart drop earrings": "gid://shopify/ProductVariant/1"}
+    orchestrator.conversation = [{"role": "user", "content": "add this product to my cart"}]
+
+    answer, results = await orchestrator._agent_loop()
+
+    assert answer == orchestrator_shopify._SAFE_TOOL_FAILURE_MESSAGE
+    assert cart.calls == 1
+    assert orchestrator._has_uncertain_side_effect_outcome("update_cart", results["update_cart"])
+    assert "secret-token" not in answer

@@ -40,6 +40,25 @@ _SHOPIFY_API_VERSION_PATTERN = re.compile(r"^20\d{2}-(?:01|04|07|10)$")
 _SHOPIFY_GRAPHQL_PRODUCTS_PAGE_SIZE = 10
 _SHOPIFY_GRAPHQL_VARIANTS_PAGE_SIZE = 100
 _SHOPIFY_GRAPHQL_MAX_RETRIES = 3
+_CATALOG_SYNC_FAILURE_CODE = "catalog_sync_failed"
+_SAFE_CATALOG_SYNC_FAILURE_CODES = frozenset(
+    {
+        _CATALOG_SYNC_FAILURE_CODE,
+        "shopify_graphql_throttled",
+        "shopify_graphql_query_failed",
+        "shopify_graphql_product_cursor_invalid",
+    }
+)
+
+
+def _catalog_sync_failure_code(exc: Exception) -> str:
+    """Return a stable public/admin sync code, never a provider exception."""
+    if isinstance(exc, ShopifyGraphQLRequestError):
+        candidate = str(exc)
+        if candidate in _SAFE_CATALOG_SYNC_FAILURE_CODES:
+            return candidate
+    return _CATALOG_SYNC_FAILURE_CODE
+_CATALOG_ITEM_FAILURE_MESSAGE = "Catalog item import failed. Review server logs for details."
 
 _SHOPIFY_SHOP_CURRENCY_QUERY = """
 query ShopCurrency {
@@ -374,7 +393,11 @@ async def _resolve_configured_default_currency(brand_id: Optional[str]) -> Optio
         )
         return normalize_currency_code(explicit_currency)
     except Exception as exc:
-        logger.warning("catalog_default_currency_resolution_failed", brand_id=brand_id, error=str(exc))
+        logger.warning(
+            "catalog_default_currency_resolution_failed",
+            brand_id=brand_id,
+            error_type=type(exc).__name__,
+        )
         return None
 
 
@@ -389,7 +412,11 @@ async def _update_brand_sync_state(brand_id: Optional[str], updates: Dict[str, A
             {"$set": set_fields},
         )
     except Exception as exc:
-        logger.warning("catalog_sync_state_persist_failed", brand_id=brand_id, error=str(exc))
+        logger.warning(
+            "catalog_sync_state_persist_failed",
+            brand_id=brand_id,
+            error_type=type(exc).__name__,
+        )
 
 
 # ── Normalizers ───────────────────────────────────────────────────────────────
@@ -878,11 +905,12 @@ async def fetch_shopify_products(
         logger.info("shopify_fetch_complete", items=len(all_items))
 
     except Exception as exc:
-        error_message = str(exc)
+        failure_code = _catalog_sync_failure_code(exc)
         finished_at = datetime.utcnow().isoformat()
         await _job_store.update(job_id, {
             "status": "error",
-            "error": error_message,
+            "error": failure_code,
+            "error_type": type(exc).__name__,
             "completed_at": finished_at,
             "counts": {
                 "products_seen": len(all_items),
@@ -894,7 +922,7 @@ async def fetch_shopify_products(
         await _update_brand_sync_state(brand_id, {
             "last_sync_status": "error",
             "last_sync_completed_at": finished_at,
-            "last_sync_error": error_message,
+            "last_sync_error": failure_code,
             "last_sync_counts": {
                 "products_seen": len(all_items),
                 "products_upserted": 0,
@@ -902,7 +930,7 @@ async def fetch_shopify_products(
                 "error_count": 1,
             },
         })
-        logger.error("shopify_fetch_failed", error=str(exc))
+        logger.error("shopify_fetch_failed", error_type=type(exc).__name__)
 
 
 async def _upsert_shopify_catalog_into_knowledge(
@@ -1164,8 +1192,17 @@ async def run_firecrawl_scrape(
             })
 
         except Exception as exc:
-            logger.error("firecrawl_url_error", url=url, error=str(exc))
-            per_url.append({"url": url, "status": "error", "error": str(exc), "item_count": 0})
+            logger.error(
+                "firecrawl_url_error",
+                url=url,
+                error_type=type(exc).__name__,
+            )
+            per_url.append({
+                "url": url,
+                "status": "error",
+                "error": _CATALOG_ITEM_FAILURE_MESSAGE,
+                "item_count": 0,
+            })
 
     await _job_store.update(job_id, {
         "items": all_items,

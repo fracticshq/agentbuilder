@@ -83,7 +83,11 @@ serialized to an unauthenticated widget client. WebSocket errors use the same
 ## CI baseline
 
 The repository CI workflow validates the API suite, widget lint/test/build,
-Shopify MCP tests, admin production build, container builds, and compose
-configuration. Dependabot opens weekly dependency updates for Python, npm, and
-Docker manifests. Add SAST, dependency-vulnerability enforcement, and deployed
-tenant-isolation tests before declaring a fully mature production release.
+Shopify MCP tests, admin production build, generated API contracts, deterministic
+safety/quality fixtures, SAST, dependency-vulnerability enforcement, SBOM/supply
+chain evidence, and compose configuration. Dependabot opens weekly dependency
+updates for Python, npm, and Docker manifests.
+
+Deployed tenant-isolation, managed Redis-loss, and provider-outage verification
+remain release-environment gates; they cannot be proven by local or mocked CI
+tests alone.

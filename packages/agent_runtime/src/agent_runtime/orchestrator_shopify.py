@@ -22,6 +22,7 @@ _SAFE_LOOP_FAILURE_MESSAGE = (
     "The commerce service is temporarily unavailable. Do not make or claim any "
     "cart changes; ask the customer to try again."
 )
+_SIDE_EFFECTING_TOOL_NAMES = frozenset({"update_cart"})
 
 
 def _safe_checkout_url(value: Any) -> Optional[str]:
@@ -67,6 +68,7 @@ class ShopifyOrchestrator(Orchestrator):
         self.rerank_results: List[Dict[str, Any]] = []
         self.resolved_reference: Optional[Dict[str, Any]] = None
         self.pending_clarification_response: Optional[str] = None
+        self._uncertain_side_effect_outcomes: set[str] = set()
 
     async def run(
         self, 
@@ -131,6 +133,7 @@ class ShopifyOrchestrator(Orchestrator):
         self.rerank_results = session_state.get("rerank_results", [])
         self.resolved_reference = None
         self.pending_clarification_response = None
+        self._uncertain_side_effect_outcomes.clear()
         self.prompt_runtime_context = (context or {}).get("prompt_runtime", {})
         self.active_product_focus = self._normalize_focus_products(self.active_product_focus)
         self.product_reference_map = self._build_product_reference_map(self.active_product_focus)
@@ -191,12 +194,22 @@ class ShopifyOrchestrator(Orchestrator):
                             "role": "assistant",
                             "content": json.dumps(first_pass_call),
                         })
-                        content = tool_result.error if not tool_result.success else self._format_tool_output(tool_result.data)
+                        content = (
+                            _SAFE_TOOL_FAILURE_MESSAGE
+                            if not tool_result.success
+                            else self._format_tool_output(tool_result.data)
+                        )
                         self.conversation.append({
                             "role": "tool",
                             "name": tool_name,
                             "content": content,
                         })
+                        if self._has_uncertain_side_effect_outcome(tool_name, tool_result):
+                            logger.warning(
+                                "shopify_side_effect_outcome_uncertain",
+                                tool=tool_name,
+                            )
+                            return _SAFE_TOOL_FAILURE_MESSAGE, tool_results_map
                         if confirmed_cart_add:
                             self.conversation.append({
                                 "role": "system",
@@ -250,6 +263,12 @@ class ShopifyOrchestrator(Orchestrator):
                     "name": tool_name,
                     "content": content
                 })
+                if self._has_uncertain_side_effect_outcome(tool_name, tool_result):
+                    logger.warning(
+                        "shopify_side_effect_outcome_uncertain",
+                        tool=tool_name,
+                    )
+                    return _SAFE_TOOL_FAILURE_MESSAGE, tool_results_map
             except Exception as loop_err:
                 logger.error(
                     "shopify_agent_loop_error",
@@ -267,6 +286,20 @@ class ShopifyOrchestrator(Orchestrator):
 
         logger.warning("shopify_agent_loop_max_iterations_or_loop")
         return "I've run into an issue processing your request. Could you please specify which product or action you'd like me to take?", tool_results_map
+
+    def _has_uncertain_side_effect_outcome(self, tool_name: str, result: ToolResult) -> bool:
+        """Only stop the loop when an invoked mutation could have succeeded.
+
+        A normal failed result remains available to the model as a safe,
+        redacted tool failure.  An exception while a mutation RPC is in flight
+        is different: retrying (or moving to another tool) could duplicate an
+        add/remove/update whose remote outcome is unknown.
+        """
+        return (
+            tool_name in _SIDE_EFFECTING_TOOL_NAMES
+            and tool_name in self._uncertain_side_effect_outcomes
+            and not result.success
+        )
 
     def _get_confirmed_cart_add(self) -> Optional[Dict[str, Any]]:
         """Resolve pronoun-based add-to-cart requests from the Shopify session focus only."""
@@ -561,6 +594,7 @@ class ShopifyOrchestrator(Orchestrator):
 
     async def _execute_tool_action(self, tool_name: str, tool_input: Dict[str, Any]) -> ToolResult:
         """Preprocess, execute, and postprocess a tool call."""
+        invocation_started = False
         try:
             # 1. Resolve IDs from cache and inject cart_id
             self._preprocess_input(tool_name, tool_input)
@@ -572,13 +606,27 @@ class ShopifyOrchestrator(Orchestrator):
             if not tool:
                 logger.error("shopify_tool_not_found", tool_name=tool_name)
                 return ToolResult(success=False, data=None, error=f"Tool '{tool_name}' not found.")
-                
+
+            # Once a mutation RPC has been started, a transport/provider
+            # exception leaves its remote outcome unknowable.  Preserve the
+            # redacted result contract while marking that special case for the
+            # iterative loop to stop before another action can be attempted.
+            self._uncertain_side_effect_outcomes.discard(tool_name)
+            invocation_started = True
             result = await tool.run(**tool_input)
             logger.info("shopify_tool_result_raw", tool=tool_name, success=result.success, error=result.error)
             
             # 3. Capture state from result (cart_id, products, etc.)
             if result.success:
-                self._capture_result_state(tool_name, result)
+                try:
+                    self._capture_result_state(tool_name, result)
+                except Exception as exc:
+                    logger.error(
+                        "shopify_tool_result_processing_failed",
+                        tool=tool_name,
+                        error_type=type(exc).__name__,
+                    )
+                    return ToolResult(success=False, data=None, error=_SAFE_TOOL_FAILURE_MESSAGE)
             return result
         except Exception as exc:
             logger.error(
@@ -586,7 +634,13 @@ class ShopifyOrchestrator(Orchestrator):
                 tool=tool_name,
                 error_type=type(exc).__name__,
             )
-            return ToolResult(success=False, data=None, error=_SAFE_TOOL_FAILURE_MESSAGE)
+            if invocation_started and tool_name in _SIDE_EFFECTING_TOOL_NAMES:
+                self._uncertain_side_effect_outcomes.add(tool_name)
+            return ToolResult(
+                success=False,
+                data=None,
+                error=_SAFE_TOOL_FAILURE_MESSAGE,
+            )
 
     def _preprocess_input(self, tool_name: str, tool_input: Dict[str, Any]):
         """Inject state and resolve natural language references to GIDs."""

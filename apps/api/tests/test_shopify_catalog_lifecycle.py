@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -75,6 +76,24 @@ def _webhook_settings():
         SHOPIFY_WEBHOOK_SECRET="test-webhook-secret",
         SHOPIFY_WEBHOOK_MAX_BODY_BYTES=1_048_576,
     )
+
+
+def test_catalog_job_endpoint_response_never_exposes_provider_error_text():
+    response = catalog_endpoint._catalog_job_for_response({
+        "job_id": "catalog-job-1",
+        "status": "error",
+        "error": "Authorization: Bearer private-shopify-token",
+        "results": [{
+            "url": "https://store.example/product",
+            "status": "error",
+            "error": "provider response included private-firecrawl-token",
+        }],
+    })
+
+    assert response["error"] == "Catalog import failed. Review server logs for details."
+    assert response["results"][0]["error"] == "Catalog item import failed. Review server logs for details."
+    assert "private-shopify-token" not in str(response)
+    assert "private-firecrawl-token" not in str(response)
 
 
 @pytest.mark.asyncio
@@ -193,6 +212,116 @@ async def test_catalog_worker_decrypts_only_the_encrypted_job_snapshot(monkeypat
     assert fetch.await_args.args[1] == "shpat_snapshot_only"
     assert store.complete.await_args.args[1]["counts"]["products_upserted"] == 2
     store.fail.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_catalog_worker_does_not_record_completion_after_stale_lease_rejection(monkeypatch):
+    job = {
+        "job_id": "catalog-job-1",
+        "brand_id": "brand-a",
+        "source_url": "https://store.myshopify.com",
+        "action": "sync",
+        "lease_token": "stale-lease",
+    }
+    store = SimpleNamespace(
+        claim_next=AsyncMock(return_value=job),
+        complete=AsyncMock(return_value=False),
+        fail=AsyncMock(return_value=True),
+        renew_lease=AsyncMock(return_value=True),
+    )
+    metrics = SimpleNamespace(labels=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no stale metric")))
+    monkeypatch.setattr(catalog_sync_worker, "CATALOG_SYNC_COUNT", metrics)
+    monkeypatch.setattr(catalog_sync_worker, "CATALOG_SYNC_DURATION", metrics)
+    monkeypatch.setattr(catalog_sync_worker, "_process_job", AsyncMock(return_value={"phase": "completed"}))
+
+    assert await catalog_sync_worker.run_once(store, Settings(SECRET_KEY="test-secret"), identifier="worker-a") is True
+    store.complete.assert_awaited_once()
+    store.fail.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_catalog_worker_does_not_record_failure_after_stale_lease_rejection(monkeypatch):
+    job = {
+        "job_id": "catalog-job-1",
+        "brand_id": "brand-a",
+        "source_url": "https://store.myshopify.com",
+        "action": "sync",
+        "lease_token": "stale-lease",
+    }
+    store = SimpleNamespace(
+        claim_next=AsyncMock(return_value=job),
+        complete=AsyncMock(return_value=True),
+        fail=AsyncMock(return_value=False),
+        renew_lease=AsyncMock(return_value=True),
+    )
+    metrics = SimpleNamespace(labels=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no stale metric")))
+    monkeypatch.setattr(catalog_sync_worker, "CATALOG_SYNC_COUNT", metrics)
+    monkeypatch.setattr(catalog_sync_worker, "CATALOG_SYNC_DURATION", metrics)
+    monkeypatch.setattr(
+        catalog_sync_worker,
+        "_process_job",
+        AsyncMock(side_effect=RuntimeError("provider secret must not affect terminal state")),
+    )
+
+    assert await catalog_sync_worker.run_once(store, Settings(SECRET_KEY="test-secret"), identifier="worker-a") is True
+    store.fail.assert_awaited_once()
+    store.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_catalog_sync_persists_safe_error_code_not_provider_exception(monkeypatch):
+    updates = []
+    monkeypatch.setattr(catalog_service._job_store, "get", AsyncMock(return_value={"job_id": "catalog-job-1"}))
+    monkeypatch.setattr(catalog_service._job_store, "update", AsyncMock(side_effect=lambda _job_id, update: updates.append(update)))
+    monkeypatch.setattr(catalog_service, "_update_brand_sync_state", AsyncMock())
+    monkeypatch.setattr(
+        catalog_service,
+        "normalize_shopify_store_url",
+        lambda _url: (_ for _ in ()).throw(RuntimeError("Authorization: Bearer private-shopify-token")),
+    )
+
+    await catalog_service.fetch_shopify_products(
+        "https://store.myshopify.com",
+        "token",
+        "catalog-job-1",
+        "brand-a",
+    )
+
+    failed_update = updates[-1]
+    assert failed_update["error"] == "catalog_sync_failed"
+    assert "private-shopify-token" not in failed_update["error"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_scrape_result_does_not_persist_raw_provider_exception(monkeypatch):
+    updates = []
+
+    class _FirecrawlApp:
+        def __init__(self, api_key):
+            assert api_key == "firecrawl-key"
+            pass
+
+        def scrape_url(self, *_args, **_kwargs):
+            raise RuntimeError("provider response includes api key private-firecrawl-token")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "firecrawl",
+        SimpleNamespace(V1FirecrawlApp=_FirecrawlApp, V1JsonConfig=lambda **kwargs: kwargs),
+    )
+    monkeypatch.setattr(catalog_service._job_store, "get", AsyncMock(return_value={"brand_id": "brand-a"}))
+    monkeypatch.setattr(catalog_service._job_store, "update", AsyncMock(side_effect=lambda _job_id, update: updates.append(update)))
+
+    await catalog_service.run_firecrawl_scrape(
+        ["https://store.example/product"],
+        "catalog-job-1",
+        "firecrawl-key",
+        "brand-a",
+    )
+
+    result = updates[-1]["results"][0]
+    assert result["error"] == "Catalog item import failed. Review server logs for details."
+    assert "private-firecrawl-token" not in result["error"]
 
 
 @pytest.mark.asyncio

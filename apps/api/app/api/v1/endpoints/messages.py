@@ -35,7 +35,7 @@ from ....services.conversation_scope_store import (
 from ....services.message_service import MessageService
 from ....services.observability_service import ObservabilityService
 from ....services.privacy_lifecycle_service import PrivacyLifecycleError, PrivacyLifecycleService
-from ....websocket_manager import ws_manager
+from ....websocket_manager import TakeoverStateUnavailableError, ws_manager
 from memory.managers.short_term import ShortTermMemory
 
 logger = structlog.get_logger()
@@ -697,11 +697,20 @@ async def admin_websocket_endpoint(
         return
     settings = get_settings()
 
-    await ws_manager.connect_admin(
-        websocket,
-        conversation_id,
-        subprotocol="bearer" if _websocket_offers_protocol(websocket, "bearer") else None,
-    )
+    try:
+        await ws_manager.connect_admin(
+            websocket,
+            conversation_id,
+            subprotocol="bearer" if _websocket_offers_protocol(websocket, "bearer") else None,
+        )
+    except TakeoverStateUnavailableError as exc:
+        logger.warning(
+            "admin_takeover_connect_state_unavailable",
+            conversation_id=conversation_id,
+            error_type=type(exc).__name__,
+        )
+        await _close_websocket(websocket, "Human takeover is temporarily unavailable")
+        return
     try:
         while True:
             data = await websocket.receive_text()
@@ -737,7 +746,19 @@ async def admin_websocket_endpoint(
                     })
                     continue
 
-                await ws_manager.set_human_control(conversation_id, True)
+                try:
+                    await ws_manager.set_human_control(conversation_id, True)
+                except TakeoverStateUnavailableError as exc:
+                    logger.warning(
+                        "admin_take_control_state_unavailable",
+                        conversation_id=conversation_id,
+                        error_type=type(exc).__name__,
+                    )
+                    await ws_manager.send_to_admin(conversation_id, {
+                        "type": "system_notice",
+                        "content": "Human takeover is temporarily unavailable. Please try again.",
+                    })
+                    continue
                 await ws_manager.send_to_admin(conversation_id, {
                     "type": "control_status",
                     "is_human_in_control": True,
@@ -759,28 +780,38 @@ async def admin_websocket_endpoint(
                 # Read, inject, then acknowledge the buffer.  Clearing it before
                 # durable memory writes succeed drops the human conversation on
                 # a transient database failure.
-                takeover_messages = await ws_manager.get_takeover_buffer(conversation_id)
-                if takeover_messages:
-                    try:
+                try:
+                    takeover_messages = await ws_manager.get_takeover_buffer(conversation_id)
+                    if takeover_messages:
                         await message_service.inject_history(
                             conversation_id,
                             scope.agent_id,
                             takeover_messages,
                         )
                         await ws_manager.clear_takeover_buffer(conversation_id)
-                    except Exception as exc:
-                        logger.error(
-                            "takeover_history_release_failed",
-                            conversation_id=conversation_id,
-                            error_type=type(exc).__name__,
-                        )
-                        await ws_manager.send_to_admin(conversation_id, {
-                            "type": "system_notice",
-                            "content": "Conversation history could not be saved. AI control remains with the operator; retry release.",
-                        })
-                        continue
-
-                await ws_manager.set_human_control(conversation_id, False)
+                    await ws_manager.set_human_control(conversation_id, False)
+                except TakeoverStateUnavailableError as exc:
+                    logger.warning(
+                        "takeover_release_state_unavailable",
+                        conversation_id=conversation_id,
+                        error_type=type(exc).__name__,
+                    )
+                    await ws_manager.send_to_admin(conversation_id, {
+                        "type": "system_notice",
+                        "content": "Human takeover is temporarily unavailable. AI control remains with the operator; retry release.",
+                    })
+                    continue
+                except Exception as exc:
+                    logger.error(
+                        "takeover_history_release_failed",
+                        conversation_id=conversation_id,
+                        error_type=type(exc).__name__,
+                    )
+                    await ws_manager.send_to_admin(conversation_id, {
+                        "type": "system_notice",
+                        "content": "Conversation history could not be saved. AI control remains with the operator; retry release.",
+                    })
+                    continue
 
                 await ws_manager.send_to_admin(conversation_id, {
                     "type": "control_status",
@@ -801,7 +832,20 @@ async def admin_websocket_endpoint(
 
             elif msg_type == "admin_message":
                 content = msg.get("content", "")
-                if not settings.ENABLE_HUMAN_TAKEOVER or not await ws_manager.is_human_in_control(conversation_id):
+                try:
+                    is_human_in_control = await ws_manager.is_human_in_control(conversation_id)
+                except TakeoverStateUnavailableError as exc:
+                    logger.warning(
+                        "admin_message_takeover_state_unavailable",
+                        conversation_id=conversation_id,
+                        error_type=type(exc).__name__,
+                    )
+                    await ws_manager.send_to_admin(conversation_id, {
+                        "type": "system_notice",
+                        "content": "Human takeover is temporarily unavailable. Please try again.",
+                    })
+                    continue
+                if not settings.ENABLE_HUMAN_TAKEOVER or not is_human_in_control:
                     logger.warning(
                         "admin_message_rejected_not_in_human_control",
                         conversation_id=conversation_id,
@@ -834,8 +878,12 @@ async def admin_websocket_endpoint(
 
     except WebSocketDisconnect:
         logger.info("Admin WebSocket disconnected", conversation_id=conversation_id)
-    except Exception as e:
-        logger.error("Admin WebSocket error", error=str(e), conversation_id=conversation_id)
+    except Exception as exc:
+        logger.error(
+            "admin_websocket_error",
+            conversation_id=conversation_id,
+            error_type=type(exc).__name__,
+        )
     finally:
         await ws_manager.disconnect_admin(websocket, conversation_id)
 
@@ -868,7 +916,16 @@ async def widget_control_channel(
         conversation_id=conversation_id,
     ):
         return
-    await ws_manager.register_agent_id(conversation_id, agent_id)
+    try:
+        await ws_manager.register_agent_id(conversation_id, agent_id)
+    except TakeoverStateUnavailableError as exc:
+        logger.warning(
+            "widget_takeover_connect_state_unavailable",
+            conversation_id=conversation_id,
+            error_type=type(exc).__name__,
+        )
+        await _close_websocket(websocket, "Human takeover is temporarily unavailable")
+        return
     await ws_manager.connect_widget(
         websocket,
         conversation_id,
@@ -903,7 +960,16 @@ async def widget_control_channel(
                 await ws_manager.register_agent_id(conversation_id, agent_id)
 
             elif msg_type == "user_message":
-                if await ws_manager.is_human_in_control(conversation_id):
+                try:
+                    is_human_in_control = await ws_manager.is_human_in_control(conversation_id)
+                except TakeoverStateUnavailableError as exc:
+                    logger.warning(
+                        "widget_message_takeover_state_unavailable",
+                        conversation_id=conversation_id,
+                        error_type=type(exc).__name__,
+                    )
+                    continue
+                if is_human_in_control:
                     content = msg.get("content", "")
                     # Deliver to admin dashboard in real-time
                     await ws_manager.send_to_admin(conversation_id, {
@@ -925,7 +991,11 @@ async def widget_control_channel(
 
     except WebSocketDisconnect:
         logger.info("Widget control channel disconnected", conversation_id=conversation_id)
-    except Exception as e:
-        logger.error("Widget control channel error", error=str(e), conversation_id=conversation_id)
+    except Exception as exc:
+        logger.error(
+            "widget_control_channel_error",
+            conversation_id=conversation_id,
+            error_type=type(exc).__name__,
+        )
     finally:
         await ws_manager.disconnect_widget(websocket, conversation_id)

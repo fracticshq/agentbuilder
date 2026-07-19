@@ -244,7 +244,11 @@ of a synthetic successful deployment list.
 
 Production API startup requires, at minimum, `SECRET_KEY`, `ADMIN_API_KEY`,
 `SETTINGS_ENCRYPTION_KEY`, `PII_ENCRYPTION_KEY`, `MONGODB_URI`, `REDIS_URL`,
-and `MCP_SERVICE_AUTH_TOKEN`. `RATE_LIMIT_FAIL_CLOSED` must be true. When
+`MCP_SERVICE_AUTH_TOKEN`, and `STRAPI_PRIVACY_SUBJECT_HMAC_KEY`.
+`RATE_LIMIT_FAIL_CLOSED` must be true. The Strapi privacy subject key is needed
+even while the external processor is in its default `contract_pending` mode so
+that a first-party deletion always has an opaque, tenant-bound durable outbox
+record. When
 `VECTOR_BACKEND=qdrant`, `QDRANT_API_KEY` is required and `QDRANT_URL` must
 not point at loopback. The Shopify MCP service additionally requires
 `SESSION_SECRET`, `REDIS_URL`, and the same `MCP_SERVICE_AUTH_TOKEN`.

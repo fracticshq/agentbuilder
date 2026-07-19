@@ -59,12 +59,18 @@ If a rollback is required, roll back the API, widget, and Shopify MCP as one
 compatibility unit and rotate the MCP secret if it was exposed during incident
 handling.
 
-## Remaining work after P0
+## Follow-up and external verification
 
-- Migrate legacy PII envelopes and unscoped ingestion jobs.
-- Replace response filtering as the only prompt-injection defense with
-  structured tool outputs, source attribution, and claim-level grounding.
-- Add dependency/SAST scanning and tenant-isolation integration tests to the
-  CI gates introduced in P1.
-- Implement durable cross-instance job progress and claim-level evidence
-  validation as the next production wave.
+The original implementation follow-ups have been completed in the subsequent
+waves: durable leased ingestion/jobs, claim-level evidence validation,
+dependency/SAST gates, tenant-isolation regressions, and structured tool-data
+boundaries are now enforced by the repository and CI.
+
+Only environment-specific verification remains:
+
+- If records created before the durable-job/PII migrations still exist, run a
+  scoped migration rehearsal and verify their tenant ownership before exposing
+  them to operators.
+- Run the cross-tenant, Redis-loss, provider-outage, and recovery probes in a
+  production-like deployment. Local regression tests cannot establish cloud
+  network isolation or managed-service failover behavior.

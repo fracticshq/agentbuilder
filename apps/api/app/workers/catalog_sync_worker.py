@@ -121,7 +121,17 @@ async def run_once(store: CatalogSyncStore, settings: Settings, *, identifier: s
         updates = await _process_job(job, settings)
         if lease_lost.is_set():
             raise RuntimeError("catalog_sync_lease_lost")
-        await store.complete(job, updates)
+        if not await store.complete(job, updates):
+            # Another worker reclaimed the lease while this job was running.
+            # Its terminal state is authoritative; do not emit a false
+            # completion metric or log from this stale worker.
+            logger.warning(
+                "catalog_sync_terminal_transition_rejected",
+                job_id=job.get("job_id"),
+                action=action,
+                transition="complete",
+            )
+            return True
         CATALOG_SYNC_COUNT.labels(action=action, status="completed").inc()
         CATALOG_SYNC_DURATION.labels(action=action).observe(time.monotonic() - started)
         logger.info(
@@ -131,11 +141,20 @@ async def run_once(store: CatalogSyncStore, settings: Settings, *, identifier: s
             action=job.get("action"),
         )
     except Exception as exc:
-        await store.fail(
+        if not await store.fail(
             job,
             error_code="catalog_sync_failed",
             error_type=type(exc).__name__,
-        )
+        ):
+            # The lease fence rejected this worker's failure transition.  Do
+            # not publish stale failure observability as if it were terminal.
+            logger.warning(
+                "catalog_sync_terminal_transition_rejected",
+                job_id=job.get("job_id"),
+                action=action,
+                transition="fail",
+            )
+            return True
         CATALOG_SYNC_COUNT.labels(action=action, status="failed").inc()
         CATALOG_SYNC_DURATION.labels(action=action).observe(time.monotonic() - started)
         logger.error(

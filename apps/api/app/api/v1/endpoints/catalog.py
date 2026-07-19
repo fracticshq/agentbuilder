@@ -203,7 +203,7 @@ def _decrypt_sync_secret(runtime_settings_service: RuntimeSettingsService, value
     try:
         return runtime_settings_service._decrypt(value)
     except Exception as exc:
-        logger.warning("catalog_sync_secret_decrypt_failed", error=str(exc))
+        logger.warning("catalog_sync_secret_decrypt_failed", error_type=type(exc).__name__)
         return ""
 
 
