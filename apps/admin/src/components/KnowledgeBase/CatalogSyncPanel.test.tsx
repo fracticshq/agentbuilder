@@ -46,7 +46,7 @@ test('shows brand catalog status and opens encrypted sync settings', async () =>
   fireEvent.click(screen.getByRole('button', { name: /Manage sync/i }));
 
   expect(await screen.findByRole('heading', { name: /Shopify Catalog Sync/i })).toBeInTheDocument();
-  expect(screen.getByPlaceholderText(/Token already configured/i)).toBeInTheDocument();
+  expect(await screen.findByPlaceholderText(/Token already configured/i)).toBeInTheDocument();
 });
 
 test('saves the store URL and never requires the redacted token value', async () => {
