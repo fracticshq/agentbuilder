@@ -4,9 +4,12 @@ import type { ProductData, ProductVariantData } from '../types';
 interface ProductCardProps {
   product: ProductData;
   onViewDetails?: (product: ProductData) => void;
+  /** Called instead of opening a link when the CTA is an inquiry request
+   * (no fixed price). Receives the ready-to-send chat message text. */
+  onSendInquiry?: (message: string) => void;
 }
 
-export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails }) => {
+export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails, onSendInquiry }) => {
   const [imageError, setImageError] = useState(false);
   const [variantsExpanded, setVariantsExpanded] = useState(false);
   const variants = useMemo(() => product.variants || [], [product.variants]);
@@ -37,8 +40,8 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
     setImageError(false);
   }, [defaultVariant]);
 
-  const formatPrice = (price?: number, currency?: string) => {
-    if (price === undefined) return 'Price on request';
+  const formatPrice = (price?: number | null, currency?: string) => {
+    if (price === undefined || price === null) return 'Send Inquiry for Price';
 
     const displayPrice = price / 100;
     if (!currency) {
@@ -72,7 +75,9 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
       variants.length > 1 &&
       !selectedVariant &&
       product.price_min !== undefined &&
+      product.price_min !== null &&
       product.price_max !== undefined &&
+      product.price_max !== null &&
       product.price_min !== product.price_max
     ) {
       return `${formatPrice(product.price_min, product.currency)} - ${formatPrice(product.price_max, product.currency)}`;
@@ -80,9 +85,19 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
     return formatPrice(displayProduct.price_minor ?? displayProduct.price, displayProduct.currency);
   };
 
+  const isInquiryProduct = (displayProduct.price_minor ?? displayProduct.price) === undefined
+    || (displayProduct.price_minor ?? displayProduct.price) === null;
+  // The CTA button's destination depends on whether this product has a price:
+  // - Inquiry-based (no price): always go to the dedicated inquiry/quote form.
+  // - Priced: go to the product's own page (official site).
+  const ctaUrl = isInquiryProduct
+    ? (displayProduct.inquiry_url || displayProduct.variant_url || displayProduct.product_url || displayProduct.url)
+    : (displayProduct.variant_url || displayProduct.product_url || displayProduct.url);
+  const titleUrl = displayProduct.variant_url || displayProduct.product_url || displayProduct.url;
+
   const handleViewDetails = (e: React.MouseEvent) => {
     e.stopPropagation();
-    
+
     // Track view details
     if (typeof window !== 'undefined' && window.agentAnalytics) {
       window.agentAnalytics.track('product_view_details', {
@@ -91,11 +106,34 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
         variant_id: displayProduct.variant_id,
       });
     }
-    
+
+    // Inquiry-based products (no fixed price): kick off the conversational
+    // inquiry flow directly in chat instead of opening a separate form/page.
+    if (isInquiryProduct && onSendInquiry) {
+      if (typeof window !== 'undefined' && window.agentAnalytics) {
+        window.agentAnalytics.track('product_send_inquiry_click', {
+          sku: displayProduct.sku || 'unknown',
+          name: displayProduct.name,
+        });
+      }
+      onSendInquiry(`Send inquiry for price of ${displayProduct.name}`);
+      return;
+    }
+
     if (onViewDetails) {
       onViewDetails(displayProduct);
-    } else if (displayProduct.variant_url || displayProduct.product_url) {
-      window.open(displayProduct.variant_url || displayProduct.product_url, '_blank', 'noopener,noreferrer');
+    } else if (ctaUrl) {
+      window.open(ctaUrl, '_blank', 'noopener,noreferrer');
+    }
+  };
+
+  const handleTitleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (typeof window !== 'undefined' && window.agentAnalytics) {
+      window.agentAnalytics.track('product_title_click', {
+        sku: displayProduct.sku || 'unknown',
+        name: displayProduct.name,
+      });
     }
   };
 
@@ -139,7 +177,19 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
         )}
         
         <div className="product-header-row">
-          <h4 className="product-name">{displayProduct.name}</h4>
+          {titleUrl ? (
+            <a
+              href={titleUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="product-name product-name-link"
+              onClick={handleTitleClick}
+            >
+              {displayProduct.name}
+            </a>
+          ) : (
+            <h4 className="product-name">{displayProduct.name}</h4>
+          )}
           {displayProduct.in_stock !== undefined && (
             <span className={`stock-badge ${displayProduct.in_stock ? 'in-stock' : 'out-of-stock'}`}>
               {displayProduct.in_stock ? '✓' : '✗'}
@@ -172,13 +222,13 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
         
         <div className="product-price-row">
           {!isVariantProduct && <span className="product-price">{formatProductPrice()}</span>}
-          {(displayProduct.variant_url || displayProduct.product_url || displayProduct.url) && (
+          {(ctaUrl || (isInquiryProduct && onSendInquiry)) && (
             <button 
               className="view-details-btn"
               onClick={handleViewDetails}
-              aria-label="Learn more about this product"
+              aria-label={isInquiryProduct ? 'Send an inquiry for this product' : 'Learn more about this product'}
             >
-              Learn More →
+              {isInquiryProduct ? 'Send Inquiry for Price →' : 'Learn More →'}
             </button>
           )}
         </div>
@@ -360,8 +410,8 @@ function getVariantId(variant?: ProductVariantData): string {
   return variant?.variant_id || variant?.id || variant?.sku || variant?.variant_sku || variant?.title || '';
 }
 
-function formatVariantPrice(price?: number, currency?: string): string {
-  if (price === undefined) return 'Price on request';
+function formatVariantPrice(price?: number | null, currency?: string): string {
+  if (price === undefined || price === null) return 'Send Inquiry for Price';
   const displayPrice = price / 100;
   if (!currency) {
     return displayPrice.toLocaleString(undefined, {

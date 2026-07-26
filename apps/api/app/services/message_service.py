@@ -31,6 +31,7 @@ from llm.factory import LLMFactory, create_provider_from_env
 # Phase 6: SOTA Agentic Orchestrator (package imports)
 from tools.registry import ToolRegistry
 from tools.builtin.retrieval_tool import CatalogSearchTool, RetrievalTool
+from tools.builtin.inquiry_tool import InquiryTool
 from tools.types import ToolResult
 from agent_runtime.orchestrator import Orchestrator, AgentResult
 from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
@@ -46,6 +47,8 @@ from .capability_firewall import CapabilityDecision, CapabilityFirewall, configu
 from .commerce_config import is_commerce_agent_config, normalize_commerce_configuration
 from . import commerce_response as _commerce_response
 from .observability_service import ObservabilityService
+from .inquiry_service import InquiryService
+from .inquiry_delivery_service import InquiryDeliveryService
 from .prompt_assembler import PromptAssembler
 from .skill_registry import BuiltInSkillRegistry
 from .artifact_registry import is_artifact_enabled
@@ -114,6 +117,27 @@ STREAM_GENERATION_ERROR_METADATA = {
     "code": "generation_failed",
     "retryable": True,
 }
+INQUIRY_CANCEL_PATTERN = re.compile(
+    r"\b(cancel|never\s*mind|nevermind|forget it|stop this|not now|don'?t send|do not send|skip this|no longer)\b",
+    re.IGNORECASE,
+)
+INQUIRY_AFFIRM_PATTERN = re.compile(
+    r"^\s*(yes|yeah|yep|yup|correct|confirm(ed)?|go ahead|please send|send it|that'?s right|looks good|sounds good|ok(ay)?)\b",
+    re.IGNORECASE,
+)
+# Explicit purchase-intent / inquiry triggers (product-card "Send Inquiry for
+# Price" click, or the user typing it). Matched on a FRESH turn (no pending
+# inquiry state yet) to deterministically start the tool - the LLM planner is
+# not reliable about including submit_inquiry in tool_plan on its own,
+# especially once a long/SKU-heavy product name is in the message.
+INQUIRY_TRIGGER_PATTERN = re.compile(
+    r"\b(send\s+(?:an?\s+)?inquir(?:y|ies)|inquir(?:e|y)\s+(?:for|about)|"
+    r"request\s+a?\s*quote|get\s+a?\s*quote|want\s+a?\s*quot(?:e|ation)|"
+    r"quotation\s+for|contact\s+sales|bulk\s+order|want\s+to\s+buy|"
+    r"have\s+(?:your\s+)?team\s+contact\s+me|reach\s+out\s+to\s+me|"
+    r"contact\s+me\s+(?:about|regarding))\b",
+    re.IGNORECASE,
+)
 INTERNAL_SOURCE_TERMS = re.compile(
     r"\b(api|rag|chunk|chunks|connector|connectors|endpoint|endpoints|tool call|tool calls|tool-backed|"
     r"execution history|observation|observations|geocode lookup|runtime|mcp)\b",
@@ -365,6 +389,9 @@ class MessageService:
             api_token=settings.STRAPI_API_TOKEN,
         )
         self.observability = ObservabilityService()
+        self.inquiry_service = InquiryService()
+        self.inquiry_delivery_service = InquiryDeliveryService(settings)
+        self._current_conversation_id: Optional[str] = None
 
         logger.info("message_service_initialized", brand_id=self.brand_id)
 
@@ -809,6 +836,233 @@ class MessageService:
                 "use_connectors": True,
                 "reason": "birth_details_complete_build_chart_first",
             }
+        return turn_plan
+
+    async def _submit_inquiry(self, payload: dict, agent_config: dict) -> dict:
+        """Persist + deliver a captured inquiry. Called by InquiryTool.run().
+
+        Delivery failure does not lose the inquiry: it is always persisted
+        first, then delivery is attempted and the outcome recorded.
+        """
+        product_context = {
+            "name": payload.get("product_name"),
+        }
+        contact = {
+            "name": payload.get("name"),
+            "phone": payload.get("phone"),
+            "email": payload.get("email"),
+            "city": payload.get("city"),
+            "country": payload.get("country"),
+        }
+        inquiry_doc = await self.inquiry_service.save_inquiry(
+            brand_slug=self.brand_id,
+            brand_id=(self.agent_record or {}).get("brand_id"),
+            agent_id=self.agent_id,
+            conversation_id=self._current_conversation_id,
+            contact=contact,
+            requirements=payload.get("query") or "",
+            product_context=product_context,
+        )
+        delivery = await self.inquiry_delivery_service.send(inquiry_doc, agent_config)
+        if delivery.success:
+            await self.inquiry_service.mark_delivered(
+                brand_slug=self.brand_id,
+                inquiry_id=inquiry_doc["inquiry_id"],
+                method=delivery.method,
+            )
+            await self.observability.track_event(
+                event_type="inquiry_submitted",
+                brand_slug=self.brand_id,
+                agent_id=self.agent_id,
+                conversation_id=self._current_conversation_id,
+                payload={"inquiry_id": inquiry_doc["inquiry_id"], "delivery_method": delivery.method},
+            )
+            return {"success": True, "inquiry_id": inquiry_doc["inquiry_id"], "delivered": True}
+
+        await self.inquiry_service.mark_failed(
+            brand_slug=self.brand_id,
+            inquiry_id=inquiry_doc["inquiry_id"],
+            method=delivery.method,
+            error=delivery.error or "unknown_error",
+        )
+        await self.observability.track_event(
+            event_type="inquiry_delivery_failed",
+            brand_slug=self.brand_id,
+            agent_id=self.agent_id,
+            conversation_id=self._current_conversation_id,
+            payload={"inquiry_id": inquiry_doc["inquiry_id"], "delivery_method": delivery.method, "error": delivery.error},
+        )
+        return {"success": False, "inquiry_id": inquiry_doc["inquiry_id"], "delivered": False, "error": delivery.error}
+
+    def _configure_inquiry_tool_for_turn(self, conversation_id: str, session_state: dict) -> None:
+        """Attach the current turn's conversation_id and discussed-product
+        context to the registered inquiry tool, if one is active."""
+        self._current_conversation_id = conversation_id
+        tool = self.tool_registry.get("submit_inquiry") if self.tool_registry else None
+        if not tool:
+            return
+        focus = session_state.get("active_product_focus")
+        product_focus = focus[0] if isinstance(focus, list) and focus else (focus if isinstance(focus, dict) else {})
+        tool.active_product_focus = product_focus or {}
+
+    async def _load_inquiry_pending_state(self, conversation_id: str) -> dict:
+        """Resume an in-flight inquiry across turns.
+
+        Returns the fields collected so far and whether the flow is waiting on
+        the user's explicit confirmation. Stops at the first terminal marker
+        (submitted/cancelled) so an old, already-finished inquiry never gets
+        silently resumed by a later, unrelated conversation turn.
+        """
+        if not self.short_term:
+            return {}
+        try:
+            recent = await self.short_term.get_recent_messages(conversation_id=conversation_id, limit=8)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("inquiry_pending_state_load_failed", error=str(exc))
+            return {}
+        for msg in reversed(recent or []):
+            role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
+            if role != "assistant":
+                continue
+            meta = msg.metadata or {}
+            pending = meta.get("inquiry_pending")
+            if isinstance(pending, dict) and pending:
+                if pending.get("cancelled") or pending.get("submitted"):
+                    return {}
+                if pending.get("resolved_inputs") or pending.get("awaiting_confirmation"):
+                    return dict(pending)
+        return {}
+
+    def _collect_inquiry_pending_state(self, tool_results: dict[str, Any]) -> dict:
+        """Derive the inquiry state to persist for the next turn from this
+        turn's submit_inquiry tool result, if one ran."""
+        result = (tool_results or {}).get("submit_inquiry") if isinstance(tool_results, dict) else None
+        if result is None:
+            return {}
+        metadata = getattr(result, "metadata", None) or {}
+        if metadata.get("inquiry_submitted"):
+            return {"submitted": True}
+        resolved_inputs = metadata.get("resolved_inputs") if isinstance(metadata.get("resolved_inputs"), dict) else {}
+        if not resolved_inputs:
+            return {}
+        return {
+            "resolved_inputs": resolved_inputs,
+            "missing_input": metadata.get("missing_input") or [],
+            "awaiting_confirmation": bool(metadata.get("awaiting_confirmation")),
+        }
+
+    def _adapt_turn_plan_for_inquiry(
+        self, turn_plan: AgentTurnPlan, message: str, pending_state: dict[str, Any]
+    ) -> AgentTurnPlan:
+        """Keep an in-flight inquiry on the submit_inquiry tool every turn.
+
+        The LLM planner independently decides each turn whether to call
+        submit_inquiry again, and it is not reliable about continuing an
+        in-flight multi-turn inquiry: it sometimes just acknowledges the
+        user's free-text reply ("Thanks, I've noted your email...") without
+        calling the tool, silently dropping the collected fields and never
+        reaching confirmation. Once an inquiry is in flight, this
+        deterministically keeps the tool in the plan every turn - mirroring
+        the existing Lal Kitab chart-first override - until it is submitted
+        or the user explicitly cancels.
+        """
+        if self.tool_registry is None or not self.tool_registry.get("submit_inquiry"):
+            return turn_plan
+        has_in_flight_inquiry = bool(
+            pending_state
+            and (pending_state.get("resolved_inputs") or pending_state.get("awaiting_confirmation"))
+        )
+        if not has_in_flight_inquiry:
+            # No inquiry in progress yet: only step in on an explicit,
+            # unambiguous purchase-intent trigger (e.g. the product card's
+            # "Send Inquiry for Price" click, or the user typing "send
+            # inquiry"/"request a quote"). The LLM planner is not reliable
+            # about including submit_inquiry in tool_plan on its own for this
+            # first turn, so this deterministically starts the tool instead
+            # of leaving it to chance.
+            if not INQUIRY_TRIGGER_PATTERN.search(message or ""):
+                return turn_plan
+            # The planner sometimes extracts the trigger message itself
+            # (e.g. "Send inquiry for price") into resolved_inputs.query,
+            # which then flows into every submit_inquiry call as if the
+            # user's actual requirement/question was already given - the
+            # tool never asks for it. A "query" that is just the trigger
+            # phrase restated is not a real requirement, so drop it here.
+            bogus_query = turn_plan.resolved_inputs.get("query") if turn_plan.resolved_inputs else None
+            if bogus_query and INQUIRY_TRIGGER_PATTERN.search(str(bogus_query)):
+                turn_plan.resolved_inputs.pop("query", None)
+            already_calling_inquiry = any(
+                str(step.get("tool_id") or "") == "submit_inquiry" for step in (turn_plan.tool_plan or [])
+            )
+            if not already_calling_inquiry:
+                turn_plan.tool_plan = [
+                    {
+                        "tool_id": "submit_inquiry",
+                        "reason": "Explicit inquiry/quote request detected",
+                        "input": {"payload": {}},
+                        "depends_on": None,
+                    },
+                    *(turn_plan.tool_plan or []),
+                ]
+            if turn_plan.action in {"ask_missing_input", "clarify", "greeting", "ask_question"}:
+                turn_plan.action = "ready"
+                turn_plan.intent = "tool_use"
+                turn_plan.public_response = None
+                turn_plan.response_text = ""
+            return turn_plan
+
+        if INQUIRY_CANCEL_PATTERN.search(message or ""):
+            turn_plan.tool_plan = []
+            turn_plan.action = "clarify"
+            turn_plan.intent = "clarify"
+            cancel_message = "No problem, I've cancelled that inquiry. Let me know if you'd like to start a new one."
+            turn_plan.public_response = cancel_message
+            turn_plan.response_text = cancel_message
+            turn_plan.context_decision = {
+                **(turn_plan.context_decision or {}),
+                "reason": "inquiry_cancelled",
+            }
+            turn_plan.raw_plan = {**(turn_plan.raw_plan or {}), "_inquiry_cancelled": True}
+            return turn_plan
+
+        # Once the tool is awaiting confirmation, an affirmative reply must
+        # set confirm=true so the tool actually sends the inquiry instead of
+        # re-showing the same summary forever.
+        should_confirm = bool(
+            pending_state.get("awaiting_confirmation") and INQUIRY_AFFIRM_PATTERN.search(message or "")
+        )
+        already_calling_inquiry = False
+        for step in turn_plan.tool_plan or []:
+            if str(step.get("tool_id") or "") == "submit_inquiry":
+                already_calling_inquiry = True
+                if should_confirm:
+                    step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+                    step["input"] = {**step_input, "confirm": True}
+        if not already_calling_inquiry:
+            step_input: dict[str, Any] = {"payload": {}}
+            if should_confirm:
+                step_input["confirm"] = True
+            turn_plan.tool_plan = [
+                {
+                    "tool_id": "submit_inquiry",
+                    "reason": "Continuing the in-flight inquiry",
+                    "input": step_input,
+                    "depends_on": None,
+                },
+                *(turn_plan.tool_plan or []),
+            ]
+        # The planner's own missing-field guess (or any other short-circuit
+        # action) must never pre-empt the tool: submit_inquiry has its own,
+        # more accurate missing-field detection, and skipping the tool call
+        # here would silently drop the just-collected field and truncate the
+        # response (this previously caused a bare "Got it — <value> noted."
+        # reply on the turn that completed the last required field, instead
+        # of running the tool and showing the confirmation summary).
+        if turn_plan.action in {"ask_missing_input", "clarify", "ask_question", "greeting", "handoff"}:
+            turn_plan.action = "ready"
+            turn_plan.intent = "tool_use"
+            turn_plan.public_response = None
+            turn_plan.response_text = ""
         return turn_plan
 
     def _apply_remembered_connector_inputs(self, remembered_inputs: dict) -> None:
@@ -1561,7 +1815,17 @@ Answer the user directly.
                 )
             )
             try:
-                result = await tool.run(**run_kwargs)
+                # Hard timeout on every tool call: a tool that blocks forever
+                # (e.g. a synchronous network call not offloaded to a thread)
+                # must never be able to hang the whole request/event loop.
+                result = await asyncio.wait_for(tool.run(**run_kwargs), timeout=30)
+            except asyncio.TimeoutError:
+                result = ToolResult(
+                    success=False,
+                    data=None,
+                    error=f"{tool_name} timed out after 30s.",
+                    metadata={"tool_id": tool_id, "tool_name": tool_name, "timed_out": True},
+                )
             except Exception as exc:  # pragma: no cover - defensive
                 result = ToolResult(success=False, data=None, error=str(exc), metadata={"tool_id": tool_id, "tool_name": tool_name})
             tool_results[tool_name] = result
@@ -1642,6 +1906,9 @@ Rules:
 - Answer the user directly in the configured agent style.
 - Use the evidence internally; do not fabricate missing facts.
 - If evidence is insufficient, ask for the next useful detail or say what you can answer without overclaiming.
+- If any tool result above has a "missing_input" list in its metadata (for example the submit_inquiry tool), you MUST explicitly ask the user for exactly those fields by name in your reply, one short natural sentence — do not just acknowledge the request without asking. Ask for at most 2-3 fields at a time.
+- If a tool result has "awaiting_confirmation": true in its metadata, show a short summary of the fields in its "summary" and explicitly ask the user to confirm before you send it (e.g. "Shall I send this?").
+- If a tool result has "inquiry_submitted": true in its metadata, confirm to the user that it was sent successfully and that the team will follow up.
 - {source_rule}
 """
         response = await self.llm_provider.generate(prompt)
@@ -1752,6 +2019,19 @@ Rules:
                 self.tool_registry.register(connector_tool)
                 registered_tools.append(connector_tool.name)
 
+        inquiry_config = config.get("inquiry") or {}
+        if inquiry_config.get("enabled"):
+            inquiry_tool = InquiryTool(
+                brand_slug=self.brand_id,
+                brand_id=(self.agent_record or {}).get("brand_id"),
+                agent_id=self.agent_id,
+                conversation_id=None,  # set per-turn via _configure_inquiry_tool_for_turn
+                agent_config=config,
+                submit_callback=self._submit_inquiry,
+            )
+            self.tool_registry.register(inquiry_tool)
+            registered_tools.append(inquiry_tool.name)
+
         if registered_skills or registered_tools:
             logger.info(
                 "agent_capabilities_registered",
@@ -1822,6 +2102,11 @@ Rules:
 
     async def _load_agent_config(self, agent_id: str):
         """Load agent configuration from system database."""
+        # Bound at function scope (not only inside the shopify-mcp branch below)
+        # so the `except McpDiscoveryError` clause can never itself raise
+        # UnboundLocalError if an unrelated exception occurs earlier in this
+        # function, before the shopify-only branch would otherwise import it.
+        from tools.mcp_client import McpDiscoveryError
         try:
             self.agent_id = agent_id
             # Initialize brand database first
@@ -1877,7 +2162,7 @@ Rules:
                 # Initialize remote MCP tools only when live Shopify actions are enabled.
                 # Catalog-backed ecommerce answers can run without MCP/customer auth.
                 if config.get("data_source") == "shopify":
-                    from tools.mcp_client import McpClient, McpDiscoveryError
+                    from tools.mcp_client import McpClient
                     from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
 
                     # For local development we assume port 3005 for the Shopify MCP Service
@@ -2143,6 +2428,10 @@ Rules:
             turn_plan, lalkitab_profile = await self._prepare_lalkitab_turn(
                 turn_plan, runtime_message, policy_state, llm_provider=planner_provider
             )
+            inquiry_pending_state = (
+                await self._load_inquiry_pending_state(conversation_id) if short_term_enabled else {}
+            )
+            turn_plan = self._adapt_turn_plan_for_inquiry(turn_plan, runtime_message, inquiry_pending_state)
 
             if turn_plan.should_short_circuit:
                 response_text = turn_plan.response_text
@@ -2155,6 +2444,8 @@ Rules:
                     "validation_passed": True,
                     "validation_confidence": 1.0,
                 }
+                if (turn_plan.raw_plan or {}).get("_inquiry_cancelled"):
+                    metadata["inquiry_pending"] = {"cancelled": True}
                 response_text, metadata = self._apply_post_response_guardrails(response_text, metadata)
                 if short_term_enabled:
                     await self.short_term.add_message(
@@ -2225,6 +2516,7 @@ Rules:
             remembered_inputs = session_state.get("connector_inputs") or {}
             if remembered_inputs:
                 self._apply_remembered_connector_inputs(remembered_inputs)
+            self._configure_inquiry_tool_for_turn(conversation_id, session_state)
 
             context_dict = turn_context.context
 
@@ -2476,6 +2768,7 @@ Rules:
                         "lalkitab_api_context": agent_metadata.get("lalkitab_api_context_full"),
                         "lalkitab_rag_context": agent_metadata.get("lalkitab_rag_context_full"),
                         "connector_inputs": self._collect_connector_inputs(session_state, lalkitab_plan, agent_metadata) or None,
+                        "inquiry_pending": self._collect_inquiry_pending_state(tool_results) or None,
                     }
                 )
 
@@ -2717,6 +3010,10 @@ Rules:
             turn_plan, lalkitab_profile = await self._prepare_lalkitab_turn(
                 turn_plan, runtime_message, policy_state, llm_provider=planner_provider
             )
+            inquiry_pending_state = (
+                await self._load_inquiry_pending_state(conversation_id) if short_term_enabled else {}
+            )
+            turn_plan = self._adapt_turn_plan_for_inquiry(turn_plan, runtime_message, inquiry_pending_state)
             for activity in turn_plan.activities:
                 if activity.get("visibility") != "hidden":
                     yield StreamingMessageResponse(**activity_stream_response_kwargs(activity, conversation_id))
@@ -2729,6 +3026,8 @@ Rules:
                     "validation_passed": True,
                     "validation_confidence": 1.0,
                 }
+                if (turn_plan.raw_plan or {}).get("_inquiry_cancelled"):
+                    short_circuit_metadata["inquiry_pending"] = {"cancelled": True}
                 response_text, short_circuit_metadata = self._apply_post_response_guardrails(
                     turn_plan.response_text,
                     short_circuit_metadata,
@@ -2968,6 +3267,7 @@ Rules:
             remembered_inputs = session_state.get("connector_inputs") or {}
             if remembered_inputs:
                 self._apply_remembered_connector_inputs(remembered_inputs)
+            self._configure_inquiry_tool_for_turn(conversation_id, session_state)
 
             planner_tool_results: dict[str, ToolResult] = {}
             if turn_plan.tool_plan:
@@ -3352,6 +3652,7 @@ Rules:
                         "lalkitab_rag_context": agent_metadata.get("lalkitab_rag_context_full"),
                         # Remembered connector inputs so follow-ups reuse them.
                         "connector_inputs": self._collect_connector_inputs(session_state, lalkitab_plan, agent_metadata) or None,
+                        "inquiry_pending": self._collect_inquiry_pending_state(tool_results) or None,
                     }
                 )
 

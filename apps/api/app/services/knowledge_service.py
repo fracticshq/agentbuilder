@@ -797,6 +797,9 @@ class KnowledgeService:
         *,
         price_unit: Optional[str] = None,
     ) -> str:
+        if price is None or price == "":
+            # Inquiry-based catalog: no fixed price, direct customers to inquire.
+            return "Contact for pricing (send inquiry)"
         try:
             numeric_price = Decimal(str(price))
             if price_unit == "minor":

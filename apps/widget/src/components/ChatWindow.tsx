@@ -426,6 +426,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     showProductCards={showProductCards}
                     apiUrl={apiUrl}
                     agentId={agentId}
+                    onSendMessage={onSendMessage}
                   />
                   {showPlaceChips && (
                     <div className="activity-disambiguation" style={{ margin: '2px 16px 8px' }}>

@@ -19,6 +19,9 @@ interface MessageBubbleProps {
   showProductCards?: boolean;
   apiUrl?: string;
   agentId?: string | null;
+  /** Sends a chat message as if the user typed it (used by the product
+   * card's "Send Inquiry for Price" CTA). */
+  onSendMessage?: (text: string) => void;
 }
 
 // Initialize markdown-it instance
@@ -168,6 +171,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   showProductCards = true,
   apiUrl,
   agentId,
+  onSendMessage,
 }) => {
   const isUser = message.role === 'user';
   const [extractedProducts, setExtractedProducts] = useState<ProductData[]>([]);
@@ -323,7 +327,11 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             </div>
             <div className="cards-grid">
               {allProducts.map((product) => (
-                <ProductCard key={getProductKey(product)} product={product} />
+                <ProductCard
+                  key={getProductKey(product)}
+                  product={product}
+                  onSendInquiry={onSendMessage}
+                />
               ))}
             </div>
           </div>

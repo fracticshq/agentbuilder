@@ -230,6 +230,13 @@ export default function AgentWizard() {
           status: agentData.long_term_memory ? 'enabled' : 'needs_privacy_setup',
         },
       },
+      inquiry: {
+        enabled: agentData.inquiry_enabled,
+        recipient_email: agentData.inquiry_recipient_email,
+        delivery_method: 'email',
+        confirm_before_send: agentData.inquiry_confirm_before_send,
+        success_message: agentData.inquiry_success_message || undefined,
+      },
     },
   };
 

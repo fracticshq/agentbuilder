@@ -36,6 +36,10 @@ export default function JsonFieldMapper({
   const [mapping, setMapping] = useState<FieldMapping>({});
   const [previewData, setPreviewData] = useState<any[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
+  // Inquiry-based brands have no fixed catalog prices — customers must send an inquiry.
+  // When enabled, price/currency become skippable instead of hard-required.
+  const [inquiryBased, setInquiryBased] = useState(false);
+  const skippableWhenInquiryBased = ['price', 'currency'];
 
   // Required fields for each content type
   const requiredFields = contentType === 'product'
@@ -56,7 +60,8 @@ export default function JsonFieldMapper({
   const optionalFields = contentType === 'product'
     ? {
         image_url: { type: 'string', description: 'Product image URL' },
-        product_url: { type: 'string', description: 'Product page URL' },
+        product_url: { type: 'string', description: 'Official product page URL (title links here)' },
+        inquiry_url: { type: 'string', description: 'Inquiry/quote-request form URL — used by "Send Inquiry" button. Use Fixed Value for one shared form.' },
         in_stock: { type: 'boolean', description: 'Stock availability (true/false)' },
         features: { type: 'array', description: 'Array of feature strings' },
       }
@@ -134,6 +139,45 @@ export default function JsonFieldMapper({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jsonData]);
 
+  // Some JSON exports (notably WordPress/WooCommerce REST) store text fields as
+  // nested objects like { rendered: "...", raw: "..." } instead of plain strings,
+  // and numeric IDs (e.g. WooCommerce SKUs like 3269) instead of strings. Unwrap
+  // those automatically so mapped string fields don't end up as objects/numbers,
+  // which the backend schema rejects with a 422.
+  const extractScalarValue = (field: string, rawValue: any): any => {
+    const allFields = { ...requiredFields, ...optionalFields };
+    const expectedType = (allFields as any)[field]?.type;
+
+    if (expectedType !== 'string' || rawValue === null || rawValue === undefined) {
+      return rawValue;
+    }
+
+    if (typeof rawValue === 'number') {
+      return String(rawValue);
+    }
+
+    if (typeof rawValue === 'object' && !Array.isArray(rawValue)) {
+      // Common WordPress/WooCommerce shape: { rendered, raw }
+      if ('rendered' in rawValue) return rawValue.rendered;
+      if ('raw' in rawValue) return rawValue.raw;
+      if ('name' in rawValue) return rawValue.name;
+      if ('value' in rawValue) return rawValue.value;
+      // Fallback: stringify so it's at least a valid string, not an object
+      return JSON.stringify(rawValue);
+    }
+
+    if (Array.isArray(rawValue)) {
+      // e.g. category sometimes comes as [{name: "Faucets"}] or ["Faucets"]
+      const first = rawValue[0];
+      if (first && typeof first === 'object') {
+        return first.name || first.rendered || first.raw || JSON.stringify(first);
+      }
+      return first !== undefined ? String(first) : rawValue;
+    }
+
+    return rawValue;
+  };
+
   // Helper function to parse fixed values to correct types
   const parseFixedValue = (field: string, value: string): any => {
     const allFields = { ...requiredFields, ...optionalFields };
@@ -186,7 +230,7 @@ export default function JsonFieldMapper({
           if (mappingConfig.mode === 'json') {
             // Map from JSON field
             if (mappingConfig.value in item) {
-              newItem[reqField] = item[mappingConfig.value];
+              newItem[reqField] = extractScalarValue(reqField, item[mappingConfig.value]);
             }
           } else if (mappingConfig.mode === 'fixed') {
             // Use fixed value for all items (with type parsing)
@@ -202,7 +246,7 @@ export default function JsonFieldMapper({
 
           if (mappingConfig.mode === 'json') {
             if (mappingConfig.value in item) {
-              newItem[optField] = item[mappingConfig.value];
+              newItem[optField] = extractScalarValue(optField, item[mappingConfig.value]);
             }
           } else if (mappingConfig.mode === 'fixed') {
             newItem[optField] = parseFixedValue(optField, mappingConfig.value);
@@ -218,24 +262,31 @@ export default function JsonFieldMapper({
       setErrors([`Mapping error: ${error instanceof Error ? error.message : 'Unknown error'}`]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapping, jsonData]);
+  }, [mapping, jsonData, inquiryBased]);
 
   const validateMapping = (mappedData: any[]) => {
     const newErrors: string[] = [];
 
     // Check all required fields are mapped
     Object.keys(requiredFields).forEach(field => {
+      const isSkippable = inquiryBased && skippableWhenInquiryBased.includes(field);
       const config = mapping[field];
       if (!config || config.mode === 'empty') {
-        newErrors.push(`Required field "${field}" is not mapped`);
+        if (!isSkippable) {
+          newErrors.push(`Required field "${field}" is not mapped`);
+        }
       } else if (config.mode === 'fixed' && (!config.value || config.value.trim() === '')) {
-        newErrors.push(`Required field "${field}" has empty fixed value`);
+        if (!isSkippable) {
+          newErrors.push(`Required field "${field}" has empty fixed value`);
+        }
       }
     });
 
     // Validate first few items
     mappedData.slice(0, 10).forEach((item, idx) => {
       Object.keys(requiredFields).forEach(field => {
+        const isSkippable = inquiryBased && skippableWhenInquiryBased.includes(field);
+        if (isSkippable) return;
         if (!item[field] || item[field] === null || item[field] === '') {
           newErrors.push(`Item ${idx + 1}: Missing value for required field "${field}"`);
         }
@@ -274,7 +325,7 @@ export default function JsonFieldMapper({
 
         if (config.mode === 'json') {
           if (config.value in item) {
-            newItem[field] = item[config.value];
+            newItem[field] = extractScalarValue(field, item[config.value]);
           }
         } else if (config.mode === 'fixed') {
           // Parse fixed values to correct types using helper
@@ -312,6 +363,8 @@ export default function JsonFieldMapper({
   };
 
   const renderFieldMapping = (fieldName: string, fieldInfo: any, isRequired: boolean) => {
+    const skippable = inquiryBased && skippableWhenInquiryBased.includes(fieldName);
+    const showSkipButton = !isRequired || skippable;
     const config = mapping[fieldName] || { mode: 'empty', value: '' };
 
     return (
@@ -320,7 +373,8 @@ export default function JsonFieldMapper({
           {/* Required Field */}
           <div className="col-span-5">
             <label className="block text-sm font-medium text-gray-900 mb-1">
-              {fieldName} {isRequired && <span className="text-red-500">*</span>}
+              {fieldName} {isRequired && !skippable && <span className="text-red-500">*</span>}
+              {skippable && <span className="ml-2 text-xs font-normal text-amber-600">(inquiry-based — optional)</span>}
             </label>
             <p className="text-xs text-gray-600">{fieldInfo.description}</p>
             <p className="text-xs text-gray-500 mt-1">Type: {fieldInfo.type}</p>
@@ -355,7 +409,7 @@ export default function JsonFieldMapper({
               >
                 Use Fixed Value
               </button>
-              {!isRequired && (
+              {showSkipButton && (
                 <button
                   onClick={() => handleFieldMapping(fieldName, 'empty', '')}
                   className={`px-3 py-1 text-xs rounded ${
@@ -410,7 +464,7 @@ export default function JsonFieldMapper({
               </>
             )}
 
-            {config.mode === 'empty' && !isRequired && (
+            {config.mode === 'empty' && showSkipButton && (
               <p className="text-xs text-gray-500 italic">This field will be skipped</p>
             )}
           </div>
@@ -429,6 +483,36 @@ export default function JsonFieldMapper({
           Your JSON has different field names. Choose how to map each field below.
         </p>
       </div>
+
+      {contentType === 'product' && (
+        <label className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={inquiryBased}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              setInquiryBased(checked);
+              if (checked) {
+                setMapping(prev => ({
+                  ...prev,
+                  price: { mode: 'empty', value: '' },
+                  currency: { mode: 'empty', value: '' },
+                }));
+              }
+            }}
+            className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+          <span>
+            <span className="block text-sm font-medium text-amber-900">
+              This is an inquiry-based catalog (no fixed prices)
+            </span>
+            <span className="block text-xs text-amber-800 mt-1">
+              Skip mapping price and currency. Products will show "Send Inquiry" and the agent
+              will be told to direct customers to send an inquiry for pricing instead of stating a price.
+            </span>
+          </span>
+        </label>
+      )}
 
       {/* Detected Fields Summary */}
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">

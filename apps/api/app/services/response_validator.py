@@ -94,7 +94,8 @@ _STOP_TOKENS = {
 _SAFE_RESPONSE_PATTERNS = (
     re.compile(r"^\s*(?:hi|hello|hey|good (?:morning|afternoon|evening))\b", re.IGNORECASE),
     re.compile(r"^\s*(?:thanks|thank you|you're welcome|you are welcome)\b", re.IGNORECASE),
-    re.compile(r"\b(?:i can|i'll|i will|let me|please|could you|can you)\s+(?:help|check|find|share|provide|confirm|tell|choose|try)\b", re.IGNORECASE),
+    re.compile(r"\b(?:i can|i'll|i will|let me|please|could you|can you)\s+(?:help|check|find|share|provide|confirm|tell|choose|try|ask|collect|gather|prepare|proceed|send|process|reach out|get back|follow up|need|have)\b", re.IGNORECASE),
+    re.compile(r"\bonce (?:i|we) have\b", re.IGNORECASE),
     re.compile(r"\b(?:how can i help|what would you like|share (?:the|a)|please (?:share|provide|confirm))\b", re.IGNORECASE),
     re.compile(r"\b(?:don't|do not|cannot|can[’']t|couldn't|couldn[’']t|unable to)\s+(?:verify|confirm|answer|safely give|access)\b", re.IGNORECASE),
     re.compile(r"\b(?:don[’']t have|do not have|not enough|insufficient)\s+(?:enough )?(?:verified )?(?:information|evidence)\b", re.IGNORECASE),
@@ -148,8 +149,19 @@ def _anchors(value: str) -> set[str]:
         anchors.add(f"number:{number.replace(',', '')}")
     for token in _SKU_PATTERN.findall(text):
         anchors.add(f"sku:{token.lower()}")
+    # A spelled-out number word ("one", "two"...) is only a real factual
+    # anchor when it quantifies a countable unit (e.g. "five year warranty",
+    # "two variants") - idiomatic usage ("send it in one message", "give me
+    # a moment") is not a claim about the product/brand and must not require
+    # evidence just because it contains a number word.
     for word, number in _NUMBER_WORDS.items():
-        if re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE):
+        if re.search(
+            rf"\b{re.escape(word)}\b\s+(?:year|years|month|months|day|days|"
+            rf"week|weeks|unit|units|item|items|variant|variants|piece|pieces|"
+            rf"time|times|percent|%)\b",
+            text,
+            re.IGNORECASE,
+        ):
             anchors.add(f"number:{number}")
     if re.search(r"\b(?:in[ -]stock|available now)\b", text, re.IGNORECASE):
         anchors.add("availability:in_stock")
@@ -200,9 +212,14 @@ def _tool_evidence(tool_results: Any, runtime_metadata: Optional[Dict[str, Any]]
     """Collect textual and structured evidence without returning identifiers or diagnostics."""
     records: list[str] = []
     for tool_result in (tool_results or {}).values() if isinstance(tool_results, dict) else []:
-        if getattr(tool_result, "success", True) is False:
-            continue
-        data = getattr(tool_result, "data", None)
+        # A failed tool call (e.g. a multi-turn data-collection tool like
+        # submit_inquiry reporting "missing required fields") still carries
+        # trustworthy, tool-reported structured state in `metadata` — that is
+        # not a hallucination risk and must not be discarded. Only the
+        # free-form `data`/error text on a failure is untrustworthy as
+        # evidence, since it's often just an error message.
+        tool_succeeded = getattr(tool_result, "success", True) is not False
+        data = getattr(tool_result, "data", None) if tool_succeeded else None
         if isinstance(data, dict):
             text = _structured_text(data)
             if text:
@@ -220,7 +237,7 @@ def _tool_evidence(tool_results: Any, runtime_metadata: Optional[Dict[str, Any]]
         metadata = getattr(tool_result, "metadata", None)
         if not isinstance(metadata, dict):
             continue
-        for key in ("products", "dealers", "validated_products", "active_product_focus"):
+        for key in ("products", "dealers", "validated_products", "active_product_focus", "missing_input", "invalid_fields"):
             values = metadata.get(key)
             if isinstance(values, list):
                 for item in values:
@@ -234,8 +251,12 @@ def _tool_evidence(tool_results: Any, runtime_metadata: Optional[Dict[str, Any]]
                     text = _citation_text(item)
                     if text:
                         records.append(text)
-        for key in ("response_summary", "summary"):
-            text = _actual_text(metadata.get(key))
+        for key in ("response_summary", "summary", "resolved_inputs"):
+            value = metadata.get(key)
+            if isinstance(value, dict):
+                text = _structured_text(value)
+            else:
+                text = _actual_text(value)
             if text:
                 records.append(text)
 
@@ -262,8 +283,15 @@ def _tool_evidence(tool_results: Any, runtime_metadata: Optional[Dict[str, Any]]
 def _split_claims(response: str) -> Iterable[str]:
     for claim in re.split(r"(?<=[!?])\s+|(?<=\.)\s+(?=[A-Z#*\-])|\n+", response or ""):
         claim = claim.strip(" \t-*#")
+        # Strip a leading numbered/lettered list marker ("1.", "2)", "a.")
+        # left over from splitting "1. **Your name**" — it is not itself a
+        # claim, the label after it is.
+        claim = re.sub(r"^\(?\d{1,3}[.)]\s*|^\(?[a-zA-Z][.)]\s*", "", claim)
         if claim:
             yield claim
+
+
+_QUOTED_EXAMPLE_PATTERN = re.compile(r'^[\s\-]*[“"\'](.+)[”"\']\s*$')
 
 
 def _is_safe_nonfactual(claim: str) -> bool:
@@ -271,11 +299,29 @@ def _is_safe_nonfactual(claim: str) -> bool:
         return True
     if claim.rstrip().endswith("?"):
         return True
+    # A line ending in ":" is introducing a following list/summary (e.g.
+    # "Got it — here's the inquiry I have:"), not itself a standalone
+    # factual assertion - the actual data is in the bullet lines after it,
+    # which are each validated separately.
+    if claim.rstrip().endswith(":"):
+        return True
+    # A claim that is entirely wrapped in quotes is illustrative example
+    # phrasing the assistant is suggesting the user could type (e.g. bullet
+    # examples under "for example:"), not a first-person factual assertion —
+    # even if the example text happens to echo a number the user already
+    # gave, it is not something that needs independent evidence.
+    if _QUOTED_EXAMPLE_PATTERN.match(claim.strip()):
+        return True
     return any(pattern.search(claim) for pattern in _SAFE_RESPONSE_PATTERNS)
 
 
 def _is_factual_claim(claim: str) -> bool:
     if _is_safe_nonfactual(claim):
+        return False
+    # A bare list/number marker (e.g. "1." left over after splitting a
+    # markdown numbered list like "1. **Your name**") has an anchor but no
+    # actual words, so it must never be treated as a standalone factual claim.
+    if not _meaningful_tokens(claim):
         return False
     if _anchors(claim):
         return True
@@ -516,19 +562,24 @@ class ResponseValidator:
                     if price_num < min_price * 0.5 or price_num > max_price * 1.5:
                         issues.append(f"WARNING: Suspicious price '{price_str}' outside catalog range")
         
-        # Check for vague product descriptions without SKU
+        # Check for vague product descriptions without SKU. This must never
+        # fire when real catalog products were actually retrieved and are
+        # already shown to the user as product cards: a natural-language
+        # answer ("Here are some BP monitors...") is not "vague" just because
+        # it doesn't spell out SKU codes inline — the cards are the grounding.
         vague_patterns = [
             r'our\s+\w+\s+product',
             r'this\s+\w+\s+model',
             r'available\s+\w+\s+options',
         ]
-        
-        for pattern in vague_patterns:
-            if re.search(pattern, response.lower()):
-                # Only flag if no SKUs mentioned at all
-                if not potential_skus:
-                    issues.append("WARNING: Vague product reference without specific SKU")
-                    break
+
+        if not catalog_products:
+            for pattern in vague_patterns:
+                if re.search(pattern, response.lower()):
+                    # Only flag if no SKUs mentioned at all
+                    if not potential_skus:
+                        issues.append("WARNING: Vague product reference without specific SKU")
+                        break
         
         return issues
     

@@ -90,9 +90,21 @@ export default function DocumentUploadWizard({
     let missingFields: string[] = [];
     
     if (contentType === 'product') {
-      const requiredFields = ['sku', 'name', 'price', 'currency', 'category'];
-      missingFields = requiredFields.filter(field => !firstItem[field]);
-      
+      // price/currency are only required if the item actually has a price.
+      // Inquiry-based catalogs (no fixed pricing) intentionally omit both —
+      // those products render "Send Inquiry" in the widget instead of a price.
+      const alwaysRequiredFields = ['sku', 'name', 'category'];
+      missingFields = alwaysRequiredFields.filter(field => !firstItem[field]);
+
+      const hasPrice = firstItem.price !== undefined && firstItem.price !== null;
+      const hasCurrency = firstItem.currency !== undefined && firstItem.currency !== null && firstItem.currency !== '';
+      if (hasPrice && !hasCurrency) {
+        missingFields.push('currency');
+      }
+      if (hasCurrency && !hasPrice) {
+        missingFields.push('price');
+      }
+
       // Check if optional fields need defaults
       if (firstItem.in_stock === undefined) {
         console.warn('[Upload] in_stock missing, will default to true');
@@ -158,10 +170,16 @@ export default function DocumentUploadWizard({
     } catch (error: any) {
       console.error('Upload failed:', error);
       
-      // Extract detailed error message from backend
+      // Extract detailed error message from backend.
+      // Note: apiClient's response interceptor wraps raw Axios errors into an
+      // ApiError (see api/errorHandler.ts) *before* this catch block sees them,
+      // so error.response is usually undefined here — the real backend detail
+      // lives on error.details instead.
       let errorMessage = 'Upload failed';
-      
-      if (error.response?.data?.detail) {
+
+      if (error.details) {
+        errorMessage = error.details;
+      } else if (error.response?.data?.detail) {
         // Backend returned detailed error (e.g., "Item 1: Missing required product fields: currency")
         errorMessage = error.response.data.detail;
       } else if (error.message) {

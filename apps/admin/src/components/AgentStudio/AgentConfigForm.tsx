@@ -785,6 +785,61 @@ export default function AgentConfigForm({
           </Field>
         </div>
       </div>
+
+      <div className="rounded-md border border-gray-200 bg-white p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">Inquiry Capture</h3>
+            <p className="mt-1 text-xs leading-5 text-gray-500">
+              When enabled, the agent collects Product Name, Name, Phone, Email, City, Country, and
+              Query conversationally (instead of a form link), confirms with the user, then emails
+              the inquiry to the recipient below. Best for catalogs with no fixed prices.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-3">
+          <Switch
+            checked={Boolean(data.inquiry_enabled)}
+            onChange={() => onChange('inquiry_enabled', !data.inquiry_enabled)}
+            label="Enable conversational inquiry capture"
+            description="Agent detects purchase intent (quote/pricing/buy/contact sales) and calls the submit_inquiry tool instead of pointing to a form."
+          />
+        </div>
+
+        {data.inquiry_enabled && (
+          <div className="mt-3 space-y-3">
+            <Field
+              label="Recipient email"
+              hint="Where completed inquiries are sent. Requires SMTP_* env vars to be configured on the API server."
+            >
+              <input
+                type="email"
+                value={data.inquiry_recipient_email || ''}
+                onChange={(event) => onChange('inquiry_recipient_email', event.target.value)}
+                className={inputClass}
+                placeholder="owner@yourbrand.com"
+              />
+            </Field>
+
+            <Switch
+              checked={data.inquiry_confirm_before_send !== false}
+              onChange={() => onChange('inquiry_confirm_before_send', data.inquiry_confirm_before_send === false)}
+              label="Confirm before sending"
+              description="Agent shows a summary of the captured details and waits for explicit confirmation before submitting."
+            />
+
+            <Field label="Success message" hint="Shown to the user after the inquiry is sent.">
+              <input
+                value={data.inquiry_success_message || ''}
+                onChange={(event) => onChange('inquiry_success_message', event.target.value)}
+                className={inputClass}
+                placeholder="Your inquiry has been sent to our team. They'll reach out shortly."
+              />
+            </Field>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

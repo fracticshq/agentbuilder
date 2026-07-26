@@ -365,6 +365,9 @@ class CatalogSearchTool(RetrievalTool):
         return self._display_price(product.get("price"), currency)
 
     def _display_price(self, price: Any, currency: Any) -> str:
+        if price is None or price == "":
+            # Inquiry-based catalog: no fixed price, direct customers to inquire.
+            return "Contact for pricing (send inquiry)"
         try:
             numeric_price = float(price)
             display_price = numeric_price / 100

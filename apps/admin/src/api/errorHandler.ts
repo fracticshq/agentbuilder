@@ -36,7 +36,20 @@ export function handleApiError(error: unknown): ApiError {
 
     // Server returned an error response
     const status = axiosError.response?.status || 500;
-    const detail = axiosError.response?.data?.detail || axiosError.response?.data?.message;
+    const rawDetail = axiosError.response?.data?.detail || axiosError.response?.data?.message;
+    // FastAPI/Pydantic validation errors (422) return detail as an array of
+    // {loc, msg, type} objects, not a plain string — flatten those into a
+    // readable message instead of losing the real error.
+    const detail = Array.isArray(rawDetail)
+      ? rawDetail
+          .map((item: any) => {
+            if (typeof item === 'string') return item;
+            const field = Array.isArray(item?.loc) ? item.loc.join('.') : item?.loc;
+            return field ? `${field}: ${item?.msg}` : item?.msg;
+          })
+          .filter(Boolean)
+          .join('; ')
+      : rawDetail;
 
     switch (status) {
       case 400:

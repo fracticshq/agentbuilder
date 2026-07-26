@@ -183,6 +183,10 @@ Rules:
 - If required inputs are missing, set intent=collect_input and missing_inputs.
 - If the user gave required details but no question and question_required=true, ask what they want to ask.
 - If the agent has enough information and tools are needed, set intent=tool_use with a tool_plan.
+- If a tool in the available tools list (e.g. submit_inquiry) is clearly relevant to what the
+  user is asking for — even if some fields it needs are still missing — prefer intent=tool_use
+  with that tool in tool_plan over guessing intent=collect_input yourself. That tool reports
+  exactly which of its own fields are missing; do not invent missing_inputs for it.
 - For ordered recipes, include the prerequisite step first.
 - If a place/date/time is phrased naturally or unlabeled, still extract it.
 - Unlabeled comma/period-separated birth details (e.g. "16 July 1987, 15:26, Delhi India")
@@ -252,7 +256,11 @@ Rules:
         if intent == "greeting":
             action = "greeting"
             public_response = public_response or "Hi, I’m here. Tell me what you’d like help with."
-        elif intent == "collect_input" and missing:
+        elif intent == "collect_input" and missing and not tool_plan:
+            # Only short-circuit here when no tool is queued. If a tool_plan is
+            # present (e.g. submit_inquiry), let it run — the tool has its own,
+            # more accurate missing-field detection and must not be pre-empted
+            # by this generic guess.
             action = "ask_missing_input"
             public_response = public_response or fallback_plan.response_text
         elif intent in {"clarify", "handoff"}:
@@ -265,6 +273,17 @@ Rules:
         activities = [self._normalize_activity(item) for item in activities if isinstance(item, dict)]
         if not activities:
             activities = self._default_activities(intent, public_response, missing)
+
+        # Never let a short-circuited turn (greeting/ask_question/ask_missing_input/
+        # clarify/handoff) send a blank message to the user. If the LLM planner and
+        # the deterministic fallback both produced nothing, ask a safe generic
+        # follow-up instead of silence.
+        if action in {"greeting", "ask_question", "ask_missing_input", "clarify", "handoff"} and not public_response:
+            if missing:
+                missing_labels = ", ".join(item.get("label") or item.get("id") for item in missing if item.get("id"))
+                public_response = f"Could you share your {missing_labels}?" if missing_labels else "Could you share a bit more detail so I can help?"
+            else:
+                public_response = "Could you share a bit more detail so I can help with that?"
 
         response_text = public_response or ""
         return AgentTurnPlan(
