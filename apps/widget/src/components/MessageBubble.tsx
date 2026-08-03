@@ -6,6 +6,7 @@ import type { Message, ProductData, KundaliChartData } from '../types';
 import { ProductCard } from './ProductCard';
 import { DealerCard } from './DealerCard';
 import { KundaliChart } from './KundaliChart';
+import { InquiryFormModal } from './InquiryFormModal';
 
 interface MessageBubbleProps {
   message: Message;
@@ -22,6 +23,16 @@ interface MessageBubbleProps {
   /** Sends a chat message as if the user typed it (used by the product
    * card's "Send Inquiry for Price" CTA). */
   onSendMessage?: (text: string) => void;
+  /** Show inquiry / quote buttons on product cards */
+  showInquiry?: boolean;
+  /** V2: opens the inline inquiry form for a product */
+  onOpenInquiryForm?: (productName: string, productSku?: string) => void;
+  /** Conversation id — passed to the inline form for submission */
+  conversationId?: string;
+  /** Called when the inline form submits successfully */
+  onInquirySuccess?: (message: string) => void;
+  /** Called when the inline form is skipped/closed */
+  onInquirySkip?: () => void;
 }
 
 // Initialize markdown-it instance
@@ -172,8 +183,37 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   apiUrl,
   agentId,
   onSendMessage,
+  showInquiry,
+  onOpenInquiryForm,
+  conversationId,
+  onInquirySuccess,
+  onInquirySkip,
 }) => {
   const isUser = message.role === 'user';
+
+  // ── Inline inquiry form — renders as a chat bubble ────────────────
+  const inlineMeta = message.metadata as Record<string, unknown> | undefined;
+  if (!isUser && inlineMeta?.inline_inquiry_form && agentId && apiUrl) {
+    return (
+      <div className="message-bubble assistant message-bubble-wrapper">
+        <div className="message-content assistant-message"
+          style={{ padding: 0, background: 'transparent', boxShadow: 'none', border: 'none' }}
+        >
+          <InquiryFormModal
+            isOpen={true}
+            inline={true}
+            productName={typeof inlineMeta.product_name === 'string' ? inlineMeta.product_name : ''}
+            productSku={typeof inlineMeta.product_sku === 'string' ? inlineMeta.product_sku : undefined}
+            agentId={agentId}
+            conversationId={conversationId}
+            apiUrl={apiUrl}
+            onSuccess={onInquirySuccess ?? (() => {})}
+            onSkip={onInquirySkip ?? (() => {})}
+          />
+        </div>
+      </div>
+    );
+  }
   const [extractedProducts, setExtractedProducts] = useState<ProductData[]>([]);
   const [hydrationState, setHydrationState] = useState<'idle' | 'loading' | 'ready' | 'empty' | 'error'>('idle');
   const [isHovered, setIsHovered] = useState(false);
@@ -330,7 +370,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                 <ProductCard
                   key={getProductKey(product)}
                   product={product}
-                  onSendInquiry={onSendMessage}
+                  onSendInquiry={showInquiry && !onOpenInquiryForm ? onSendMessage : undefined}
+                  onOpenInquiryForm={showInquiry && onOpenInquiryForm ? onOpenInquiryForm : undefined}
                 />
               ))}
             </div>

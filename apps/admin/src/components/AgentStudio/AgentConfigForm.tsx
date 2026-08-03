@@ -786,28 +786,19 @@ export default function AgentConfigForm({
         </div>
       </div>
 
-      <div className="rounded-md border border-gray-200 bg-white p-4">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h3 className="text-sm font-semibold text-gray-900">Inquiry Capture</h3>
-            <p className="mt-1 text-xs leading-5 text-gray-500">
-              When enabled, the agent collects Product Name, Name, Phone, Email, City, Country, and
-              Query conversationally (instead of a form link), confirms with the user, then emails
-              the inquiry to the recipient below. Best for catalogs with no fixed prices.
-            </p>
+      {data.inquiry_enabled && (
+        <div className="rounded-md border border-gray-200 bg-white p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">Lead Capture Settings</h3>
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                Configure where captured inquiries are sent via email.
+              </p>
+            </div>
+            <span className="shrink-0 rounded bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
+              Active
+            </span>
           </div>
-        </div>
-
-        <div className="mt-3">
-          <Switch
-            checked={Boolean(data.inquiry_enabled)}
-            onChange={() => onChange('inquiry_enabled', !data.inquiry_enabled)}
-            label="Enable conversational inquiry capture"
-            description="Agent detects purchase intent (quote/pricing/buy/contact sales) and calls the submit_inquiry tool instead of pointing to a form."
-          />
-        </div>
-
-        {data.inquiry_enabled && (
           <div className="mt-3 space-y-3">
             <Field
               label="Recipient email"
@@ -838,8 +829,8 @@ export default function AgentConfigForm({
               />
             </Field>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,0 +1,379 @@
+/* ── Inquiry Form Modal — Glassmorphism ──────────────────────────────── */
+
+.inq-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  padding: 16px;
+  animation: inq-fade-in 0.22s ease;
+}
+
+@keyframes inq-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.inq-modal {
+  /* glassmorphism card */
+  background: rgba(15, 20, 30, 0.72);
+  backdrop-filter: blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 20px;
+  box-shadow:
+    0 8px 40px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255,255,255,0.04) inset;
+  width: 100%;
+  max-width: 480px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 28px 28px 24px;
+  color: #fff;
+  position: relative;
+  animation: inq-slide-up 0.26s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes inq-slide-up {
+  from { opacity: 0; transform: translateY(28px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)   scale(1); }
+}
+
+/* scrollbar */
+.inq-modal::-webkit-scrollbar { width: 4px; }
+.inq-modal::-webkit-scrollbar-track { background: transparent; }
+.inq-modal::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+
+.inq-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.inq-title {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: #fff;
+  margin: 0;
+  line-height: 1.3;
+}
+
+.inq-product-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.45);
+  margin: 4px 0 20px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.inq-close-btn {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  padding: 0;
+  line-height: 1;
+  font-size: 18px;
+}
+.inq-close-btn:hover {
+  background: rgba(255,255,255,0.12);
+  color: #fff;
+}
+
+/* ── Form layout ────────────────────────────────────────────────────── */
+
+.inq-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.inq-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.inq-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 14px;
+}
+
+.inq-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.5);
+}
+
+.inq-required {
+  color: #f87171;
+  margin-left: 2px;
+}
+
+/* ── Inputs ─────────────────────────────────────────────────────────── */
+
+.inq-input,
+.inq-select,
+.inq-textarea {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  color: #fff;
+  font-size: 14px;
+  padding: 10px 12px;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+}
+
+.inq-input::placeholder,
+.inq-textarea::placeholder {
+  color: rgba(255,255,255,0.25);
+}
+
+.inq-input:focus,
+.inq-select:focus,
+.inq-textarea:focus {
+  border-color: rgba(99, 179, 237, 0.55);
+  background: rgba(255, 255, 255, 0.09);
+  box-shadow: 0 0 0 3px rgba(99, 179, 237, 0.12);
+}
+
+/* valid state — green glow */
+.inq-input.valid,
+.inq-select.valid,
+.inq-textarea.valid {
+  border-color: rgba(52, 211, 153, 0.5);
+}
+
+/* error state — red glow */
+.inq-input.error,
+.inq-select.error,
+.inq-textarea.error {
+  border-color: rgba(248, 113, 113, 0.6);
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.10);
+}
+
+.inq-error-msg {
+  font-size: 11px;
+  color: #fca5a5;
+  margin-top: 2px;
+}
+
+/* select arrow override */
+.inq-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='rgba(255,255,255,0.4)' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 32px;
+  cursor: pointer;
+}
+
+.inq-select option {
+  background: #1a2235;
+  color: #fff;
+}
+
+/* textarea */
+.inq-textarea {
+  resize: vertical;
+  min-height: 72px;
+  max-height: 160px;
+  line-height: 1.5;
+}
+
+/* ── Divider ────────────────────────────────────────────────────────── */
+
+.inq-divider {
+  height: 1px;
+  background: rgba(255,255,255,0.07);
+  margin: 6px 0 18px;
+}
+
+/* ── Footer buttons ─────────────────────────────────────────────────── */
+
+.inq-footer {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.inq-skip-btn {
+  padding: 10px 18px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: transparent;
+  color: rgba(255,255,255,0.55);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  font-family: inherit;
+}
+.inq-skip-btn:hover {
+  background: rgba(255,255,255,0.07);
+  color: rgba(255,255,255,0.85);
+  border-color: rgba(255,255,255,0.2);
+}
+
+.inq-submit-btn {
+  padding: 10px 22px;
+  border-radius: 10px;
+  border: none;
+  background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.35);
+  transition: opacity 0.15s, transform 0.1s, box-shadow 0.15s;
+  font-family: inherit;
+  min-width: 100px;
+}
+.inq-submit-btn:hover:not(:disabled) {
+  opacity: 0.9;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(59, 130, 246, 0.45);
+}
+.inq-submit-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+.inq-submit-btn:disabled {
+  background: rgba(59, 130, 246, 0.35);
+  cursor: not-allowed;
+  box-shadow: none;
+  opacity: 0.6;
+}
+
+/* loading spinner inside submit */
+.inq-spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255,255,255,0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: inq-spin 0.7s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+@keyframes inq-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Success state ──────────────────────────────────────────────────── */
+
+.inq-success {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 20px 0 10px;
+  gap: 14px;
+}
+
+.inq-success-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: rgba(52, 211, 153, 0.15);
+  border: 1.5px solid rgba(52, 211, 153, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  animation: inq-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes inq-pop {
+  from { transform: scale(0.5); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
+
+.inq-success-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+  margin: 0;
+}
+
+.inq-success-msg {
+  font-size: 13.5px;
+  color: rgba(255,255,255,0.55);
+  line-height: 1.5;
+  margin: 0;
+  max-width: 300px;
+}
+
+.inq-success-close {
+  padding: 9px 22px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.07);
+  color: rgba(255,255,255,0.75);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-family: inherit;
+}
+.inq-success-close:hover {
+  background: rgba(255,255,255,0.13);
+  color: #fff;
+}
+
+/* ── Responsive ─────────────────────────────────────────────────────── */
+@media (max-width: 480px) {
+  .inq-modal {
+    padding: 22px 18px 20px;
+    border-radius: 16px;
+    max-width: 100%;
+  }
+  .inq-row {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+}
+
+/* ── Inline-in-chat mode ─────────────────────────────────────────── */
+
+/* When rendered as a chat bubble, remove the max-width cap and the
+   slide-up animation delay so it looks native in the message stream. */
+.inq-modal.inq-inline {
+  max-width: 100%;
+  border-radius: 14px;
+  margin: 0;
+  animation: none;
+  background: rgba(15, 22, 35, 0.82);
+}

@@ -562,7 +562,38 @@ export default function AgentCapabilityRail({ data, onChange, agentId }: AgentSt
           </Section>
 
           <Section icon={<BeakerIcon className="h-4 w-4 text-gray-500" />} title="Skills">
-            {filteredSkills.length === 0 ? (
+            {/* Inquiry-based lead capture — built-in, no CRM required */}
+            {(!query || ['lead', 'capture', 'email', 'inquiry', 'conversational'].some(kw => kw.includes(query))) && (
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => onChange('inquiry_enabled', !data.inquiry_enabled)}
+                onKeyDown={(e) => e.key === 'Enter' && onChange('inquiry_enabled', !data.inquiry_enabled)}
+                className={`block w-full cursor-pointer rounded-md border px-3 py-3 text-left transition ${
+                  data.inquiry_enabled
+                    ? 'border-primary-600 bg-primary-50 text-gray-900'
+                    : 'border-gray-200 bg-white text-gray-900 hover:border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold">Lead Capture</p>
+                    <p className={`mt-0.5 text-xs font-medium ${data.inquiry_enabled ? 'text-primary-600' : 'text-gray-400'}`}>
+                      Via Email · No CRM
+                    </p>
+                  </div>
+                  <span className={`shrink-0 rounded px-2 py-0.5 text-[11px] font-medium ${
+                    data.inquiry_enabled
+                      ? 'bg-primary-100 text-primary-700'
+                      : 'bg-gray-100 text-gray-600'
+                  }`}>
+                    {data.inquiry_enabled ? 'Selected' : 'Available'}
+                  </span>
+                </div>
+              </div>
+            )}
+            {/* Registry skills (including the CRM-based Lead Capture skill) */}
+            {filteredSkills.length === 0 && query ? (
               <div className="rounded-md border border-dashed border-gray-200 p-4 text-sm text-gray-500">No skills found.</div>
             ) : filteredSkills.map((skill) => (
               <RegistryRow

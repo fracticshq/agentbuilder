@@ -189,6 +189,13 @@
       const previewInput = document.getElementById('agent-preview-input');
       const currentAgentId = new URLSearchParams(window.location.search).get('agent_id');
       if (currentAgentId && previewInput) previewInput.value = currentAgentId;
+      // Hide the demo container entirely when an agent_id is in the URL so the
+      // page's form cannot intercept keyboard events (Enter) typed into the
+      // widget chat input rendered on top of it.
+      if (currentAgentId) {
+        const demoContainer = document.querySelector('.demo-container');
+        if (demoContainer) demoContainer.style.display = 'none';
+      }
       previewForm?.addEventListener('submit', function (event) {
         event.preventDefault();
         const agentId = previewInput?.value?.trim();

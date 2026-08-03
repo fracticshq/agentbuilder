@@ -114,7 +114,7 @@ export default function JsonFieldMapper({
         price: ['amount', 'cost', 'product_price', 'productPrice', 'retail_price', 'retailPrice', 'retail_price_cents'],
         currency: ['curr', 'currency_code', 'currencyCode', 'price_currency', 'priceCurrency'],
         category: ['cat', 'product_category', 'productCategory', 'product_type', 'productType', 'item_category', 'type'],
-        image_url: ['image', 'img', 'imageUrl', 'product_image', 'productImage', 'thumbnail'],
+        image_url: ['image', 'img', 'imageUrl', 'product_image', 'productImage', 'thumbnail', 'featured_media', 'featured_image', 'jetpack_featured_media_url'],
         product_url: ['url', 'link', 'productUrl', 'product_link'],
         in_stock: ['stock', 'inStock', 'stock_available', 'available', 'availability'],
         features: ['tags', 'attributes', 'specs', 'specifications'],
@@ -144,12 +144,49 @@ export default function JsonFieldMapper({
   // and numeric IDs (e.g. WooCommerce SKUs like 3269) instead of strings. Unwrap
   // those automatically so mapped string fields don't end up as objects/numbers,
   // which the backend schema rejects with a 422.
-  const extractScalarValue = (field: string, rawValue: any): any => {
+  //
+  // WordPress REST API stores product images as a numeric `featured_media` ID
+  // rather than a URL. The actual URL lives in `_embedded['wp:featuredmedia'][0].source_url`
+  // (when the export uses ?_embed) or in `yoast_head_json.og_image[0].url`.
+  // `extractScalarValue` resolves the numeric ID to a URL automatically when
+  // either of those companion fields is present in the same row.
+  const resolveWordPressImageUrl = (rawValue: any, rowItem: any): string | null => {
+    // Try _embedded['wp:featuredmedia'][0].source_url
+    const embedded = rowItem?._embedded;
+    if (embedded && typeof embedded === 'object') {
+      const featuredMedia = embedded['wp:featuredmedia'];
+      if (Array.isArray(featuredMedia) && featuredMedia.length > 0) {
+        const url = featuredMedia[0]?.source_url || featuredMedia[0]?.guid?.rendered;
+        if (typeof url === 'string' && url.startsWith('http')) return url;
+      }
+    }
+    // Try yoast_head_json.og_image[0].url
+    const yoast = rowItem?.yoast_head_json;
+    if (yoast && typeof yoast === 'object') {
+      const ogImage = yoast.og_image;
+      if (Array.isArray(ogImage) && ogImage.length > 0) {
+        const url = ogImage[0]?.url;
+        if (typeof url === 'string' && url.startsWith('http')) return url;
+      }
+    }
+    // Try faux_featured_media_url, jetpack_featured_media_url (some WP setups)
+    const jpUrl = rowItem?.jetpack_featured_media_url;
+    if (typeof jpUrl === 'string' && jpUrl.startsWith('http')) return jpUrl;
+    return null;
+  };
+
+  const extractScalarValue = (field: string, rawValue: any, rowItem?: any): any => {
     const allFields = { ...requiredFields, ...optionalFields };
     const expectedType = (allFields as any)[field]?.type;
 
     if (expectedType !== 'string' || rawValue === null || rawValue === undefined) {
       return rawValue;
+    }
+
+    // WordPress `featured_media` is a numeric attachment ID — resolve to a URL.
+    if (field === 'image_url' && typeof rawValue === 'number') {
+      const resolved = rowItem ? resolveWordPressImageUrl(rawValue, rowItem) : null;
+      return resolved ?? String(rawValue); // fallback: keep ID as string (better than null)
     }
 
     if (typeof rawValue === 'number') {
@@ -230,7 +267,7 @@ export default function JsonFieldMapper({
           if (mappingConfig.mode === 'json') {
             // Map from JSON field
             if (mappingConfig.value in item) {
-              newItem[reqField] = extractScalarValue(reqField, item[mappingConfig.value]);
+              newItem[reqField] = extractScalarValue(reqField, item[mappingConfig.value], item);
             }
           } else if (mappingConfig.mode === 'fixed') {
             // Use fixed value for all items (with type parsing)
@@ -246,7 +283,7 @@ export default function JsonFieldMapper({
 
           if (mappingConfig.mode === 'json') {
             if (mappingConfig.value in item) {
-              newItem[optField] = extractScalarValue(optField, item[mappingConfig.value]);
+              newItem[optField] = extractScalarValue(optField, item[mappingConfig.value], item);
             }
           } else if (mappingConfig.mode === 'fixed') {
             newItem[optField] = parseFixedValue(optField, mappingConfig.value);
@@ -310,7 +347,66 @@ export default function JsonFieldMapper({
     }));
   };
 
-  const handleConfirm = () => {
+  // Some WordPress REST exports only carry `_links['wp:featuredmedia'][0].href`
+  // (the media API endpoint URL) with no embedded data. Fetch each URL to get
+  // `source_url` and patch `image_url` in the already-mapped items before they
+  // are submitted. Requests are de-duplicated and run in parallel. Items without
+  // a numeric image_url (already resolved or not a WP export) are skipped.
+  const resolveMediaLinks = async (items: any[], rawItems: any[]): Promise<any[]> => {
+    // Build a map: numeric ID → media endpoint URL, from _links in the raw row
+    const idToHref = new Map<number, string>();
+    rawItems.forEach(raw => {
+      const mediaId = typeof raw?.featured_media === 'number' ? raw.featured_media : null;
+      if (!mediaId) return;
+      const href = raw?._links?.['wp:featuredmedia']?.[0]?.href;
+      if (href) idToHref.set(mediaId, href);
+    });
+
+    if (idToHref.size === 0) return items;
+
+    // Only process items whose image_url is still a bare numeric string (unresolved)
+    const unresolvedIds = new Set<number>();
+    items.forEach(item => {
+      const val = item?.image_url;
+      if (typeof val === 'string' && /^\d+$/.test(val)) {
+        const id = parseInt(val, 10);
+        if (idToHref.has(id)) unresolvedIds.add(id);
+      }
+    });
+
+    if (unresolvedIds.size === 0) return items;
+
+    // Fetch all media endpoints in parallel; silently ignore failures
+    const idToUrl = new Map<number, string>();
+    await Promise.allSettled(
+      Array.from(unresolvedIds).map(async (id) => {
+        const href = idToHref.get(id)!;
+        try {
+          const res = await fetch(href);
+          if (res.ok) {
+            const json = await res.json();
+            const url: string | undefined = json?.source_url || json?.guid?.rendered;
+            if (url && url.startsWith('http')) idToUrl.set(id, url);
+          }
+        } catch {
+          // Network error or CORS — leave field as-is; product uploads still succeed
+        }
+      })
+    );
+
+    if (idToUrl.size === 0) return items;
+
+    return items.map(item => {
+      const val = item?.image_url;
+      if (typeof val === 'string' && /^\d+$/.test(val)) {
+        const resolved = idToUrl.get(parseInt(val, 10));
+        if (resolved) return { ...item, image_url: resolved };
+      }
+      return item;
+    });
+  };
+
+  const handleConfirm = async () => {
     if (errors.length > 0) return;
 
     isDev && console.log('[JsonFieldMapper] handleConfirm - Starting mapping with config:', mapping);
@@ -325,7 +421,7 @@ export default function JsonFieldMapper({
 
         if (config.mode === 'json') {
           if (config.value in item) {
-            newItem[field] = extractScalarValue(field, item[config.value]);
+            newItem[field] = extractScalarValue(field, item[config.value], item);
           }
         } else if (config.mode === 'fixed') {
           // Parse fixed values to correct types using helper
@@ -351,7 +447,8 @@ export default function JsonFieldMapper({
     isDev && console.log('[JsonFieldMapper] Total mapped items:', mappedData.length);
     isDev && console.log('[JsonFieldMapper] Sample mapped data:', mappedData.slice(0, 2));
 
-    onMappingComplete(mappedData);
+    const resolvedData = await resolveMediaLinks(mappedData, jsonData);
+    onMappingComplete(resolvedData);
   };
 
   const getFieldColor = (field: string) => {

@@ -24,6 +24,12 @@ from tools.types import BaseTool, ToolResult
 
 REQUIRED_FIELDS = ["product_name", "name", "phone", "email", "city", "country", "query"]
 
+# Fields that must be collected from the user (product_name is auto-filled from
+# context — never asked). Split into two batches so the agent asks 2 questions
+# first, then the remaining 4, rather than dumping everything at once.
+_BATCH_1 = ["name", "phone"]           # always asked first
+_BATCH_2 = ["email", "city", "country", "query"]   # asked only after batch 1 is done
+
 FIELD_LABELS = {
     "product_name": "Product Name",
     "name": "Name",
@@ -133,18 +139,35 @@ class InquiryTool(BaseTool):
     async def run(self, payload: Optional[dict[str, Any]] = None, confirm: bool = False, **kwargs) -> ToolResult:
         merged = self._merged_payload(payload or {})
 
-        missing = [field for field in REQUIRED_FIELDS if not str(merged.get(field) or "").strip()]
-        if missing:
-            missing_labels = [FIELD_LABELS[field] for field in missing]
+        # Compute ALL truly missing fields (used for the final completeness check).
+        all_missing = [f for f in REQUIRED_FIELDS if not str(merged.get(f) or "").strip()]
+
+        if all_missing:
+            # If only product_name is missing auto-fill failed — surface it so
+            # the agent can ask. Otherwise surface only the current batch so the
+            # agent asks 2 questions at a time, never all at once.
+            if all_missing == ["product_name"]:
+                batch_missing = ["product_name"]
+            else:
+                batch1_done = all(str(merged.get(f) or "").strip() for f in _BATCH_1)
+                if not batch1_done:
+                    batch_missing = [f for f in _BATCH_1 if not str(merged.get(f) or "").strip()]
+                else:
+                    batch_missing = [f for f in _BATCH_2 if not str(merged.get(f) or "").strip()]
+
+            missing_labels = [FIELD_LABELS[f] for f in batch_missing]
+            # Use an imperative error so the LLM writer prompt's instruction
+            # ("ask the user for exactly those fields") fires reliably instead
+            # of the model summarising what it already has.
+            ask_str = ", ".join(f"**{lbl}**" for lbl in missing_labels)
+            error_msg = f"Still need from user: {ask_str}. Ask for these now."
             return ToolResult(
                 success=False,
                 data=None,
-                error=f"Missing required fields: {', '.join(missing_labels)}",
+                error=error_msg,
                 metadata={
                     "tool_id": "submit_inquiry",
-                    "missing_input": missing,
-                    # Persist whatever we already have so the next turn doesn't
-                    # need to re-ask for fields the user already provided.
+                    "missing_input": batch_missing,
                     "resolved_inputs": {k: v for k, v in merged.items() if k in REQUIRED_FIELDS and v},
                 },
             )

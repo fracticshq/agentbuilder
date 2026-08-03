@@ -954,117 +954,68 @@ class MessageService:
     def _adapt_turn_plan_for_inquiry(
         self, turn_plan: AgentTurnPlan, message: str, pending_state: dict[str, Any]
     ) -> AgentTurnPlan:
-        """Keep an in-flight inquiry on the submit_inquiry tool every turn.
+        """V2: opens the inline inquiry form based on intent.
 
-        The LLM planner independently decides each turn whether to call
-        submit_inquiry again, and it is not reliable about continuing an
-        in-flight multi-turn inquiry: it sometimes just acknowledges the
-        user's free-text reply ("Thanks, I've noted your email...") without
-        calling the tool, silently dropping the collected fields and never
-        reaching confirmation. Once an inquiry is in flight, this
-        deterministically keeps the tool in the plan every turn - mirroring
-        the existing Lal Kitab chart-first override - until it is submitted
-        or the user explicitly cancels.
+        The V1 conversational batch collection (InquiryTool, submit_inquiry,
+        pending state, field batching) is fully disabled. The inquiry form
+        (POST /api/v1/inquiry/submit) handles all contact-field collection.
+
+        This method only:
+        1. Lets through LLM-decided open_inquiry_form actions.
+        2. Regex fallback for typed inquiry triggers the LLM may miss.
+        3. Handles cancel phrases.
+        4. Returns turn_plan unchanged for everything else (normal turns).
         """
-        if self.tool_registry is None or not self.tool_registry.get("submit_inquiry"):
+        if self.tool_registry is None:
             return turn_plan
-        has_in_flight_inquiry = bool(
-            pending_state
-            and (pending_state.get("resolved_inputs") or pending_state.get("awaiting_confirmation"))
-        )
-        if not has_in_flight_inquiry:
-            # No inquiry in progress yet: only step in on an explicit,
-            # unambiguous purchase-intent trigger (e.g. the product card's
-            # "Send Inquiry for Price" click, or the user typing "send
-            # inquiry"/"request a quote"). The LLM planner is not reliable
-            # about including submit_inquiry in tool_plan on its own for this
-            # first turn, so this deterministically starts the tool instead
-            # of leaving it to chance.
-            if not INQUIRY_TRIGGER_PATTERN.search(message or ""):
-                return turn_plan
-            # The planner sometimes extracts the trigger message itself
-            # (e.g. "Send inquiry for price") into resolved_inputs.query,
-            # which then flows into every submit_inquiry call as if the
-            # user's actual requirement/question was already given - the
-            # tool never asks for it. A "query" that is just the trigger
-            # phrase restated is not a real requirement, so drop it here.
-            bogus_query = turn_plan.resolved_inputs.get("query") if turn_plan.resolved_inputs else None
-            if bogus_query and INQUIRY_TRIGGER_PATTERN.search(str(bogus_query)):
-                turn_plan.resolved_inputs.pop("query", None)
-            already_calling_inquiry = any(
-                str(step.get("tool_id") or "") == "submit_inquiry" for step in (turn_plan.tool_plan or [])
+        # LLM planner already decided to open the form — let it through
+        if turn_plan.action == "open_inquiry_form":
+            return turn_plan
+        # Regex fallback: typed triggers the LLM may have missed
+        if INQUIRY_TRIGGER_PATTERN.search(message or "") and turn_plan.action != "open_inquiry_form":
+            if not isinstance(turn_plan.resolved_inputs, dict):
+                turn_plan.resolved_inputs = {}
+            # Only extract product name for explicit product-mention verbs,
+            # not for generic support/contact/pricing phrases
+            _product_match = re.match(
+                r"(?i)^.*?(?:send\s+(?:an?\s+)?inquir(?:y|ies)|request\s+a?\s*quote"
+                r"|inquir(?:e|y)\s+for|want\s+a?\s*quot(?:e|ation)\s+for|quotation\s+for)"
+                r"(?:\s+for\s+(?:price\s+of|the\s+price\s+of|the|a))?\s*(.+)$",
+                (message or "").strip(),
             )
-            if not already_calling_inquiry:
-                turn_plan.tool_plan = [
-                    {
-                        "tool_id": "submit_inquiry",
-                        "reason": "Explicit inquiry/quote request detected",
-                        "input": {"payload": {}},
-                        "depends_on": None,
-                    },
-                    *(turn_plan.tool_plan or []),
-                ]
-            if turn_plan.action in {"ask_missing_input", "clarify", "greeting", "ask_question"}:
-                turn_plan.action = "ready"
-                turn_plan.intent = "tool_use"
-                turn_plan.public_response = None
-                turn_plan.response_text = ""
+            _pname = _product_match.group(1).strip() if _product_match else ""
+            if _pname and re.match(
+                r"^(price|pricing|this|a quote|quotation|inquiry|customer support"
+                r"|support|an agent|a human|someone|the team|sales)$",
+                _pname,
+                re.IGNORECASE,
+            ):
+                _pname = ""
+            if _pname:
+                turn_plan.resolved_inputs["product_name"] = _pname
+            _open_msg = (
+                f"Opening the quote form for **{_pname}** — please fill in your details."
+                if _pname
+                else "Opening the quote form — please fill in your details."
+            )
+            turn_plan.tool_plan = []
+            turn_plan.action = "open_inquiry_form"
+            turn_plan.intent = "open_inquiry_form"
+            turn_plan.public_response = _open_msg
+            turn_plan.response_text = _open_msg
             return turn_plan
-
+        # Cancel phrase — short-circuit
         if INQUIRY_CANCEL_PATTERN.search(message or ""):
             turn_plan.tool_plan = []
             turn_plan.action = "clarify"
             turn_plan.intent = "clarify"
-            cancel_message = "No problem, I've cancelled that inquiry. Let me know if you'd like to start a new one."
-            turn_plan.public_response = cancel_message
-            turn_plan.response_text = cancel_message
-            turn_plan.context_decision = {
-                **(turn_plan.context_decision or {}),
-                "reason": "inquiry_cancelled",
-            }
+            cancel_msg = "No problem! Let me know if you need anything else."
+            turn_plan.public_response = cancel_msg
+            turn_plan.response_text = cancel_msg
+            turn_plan.context_decision = {**(turn_plan.context_decision or {}), "reason": "inquiry_cancelled"}
             turn_plan.raw_plan = {**(turn_plan.raw_plan or {}), "_inquiry_cancelled": True}
             return turn_plan
-
-        # Once the tool is awaiting confirmation, an affirmative reply must
-        # set confirm=true so the tool actually sends the inquiry instead of
-        # re-showing the same summary forever.
-        should_confirm = bool(
-            pending_state.get("awaiting_confirmation") and INQUIRY_AFFIRM_PATTERN.search(message or "")
-        )
-        already_calling_inquiry = False
-        for step in turn_plan.tool_plan or []:
-            if str(step.get("tool_id") or "") == "submit_inquiry":
-                already_calling_inquiry = True
-                if should_confirm:
-                    step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
-                    step["input"] = {**step_input, "confirm": True}
-        if not already_calling_inquiry:
-            step_input: dict[str, Any] = {"payload": {}}
-            if should_confirm:
-                step_input["confirm"] = True
-            turn_plan.tool_plan = [
-                {
-                    "tool_id": "submit_inquiry",
-                    "reason": "Continuing the in-flight inquiry",
-                    "input": step_input,
-                    "depends_on": None,
-                },
-                *(turn_plan.tool_plan or []),
-            ]
-        # The planner's own missing-field guess (or any other short-circuit
-        # action) must never pre-empt the tool: submit_inquiry has its own,
-        # more accurate missing-field detection, and skipping the tool call
-        # here would silently drop the just-collected field and truncate the
-        # response (this previously caused a bare "Got it — <value> noted."
-        # reply on the turn that completed the last required field, instead
-        # of running the tool and showing the confirmation summary).
-        if turn_plan.action in {"ask_missing_input", "clarify", "ask_question", "greeting", "handoff"}:
-            turn_plan.action = "ready"
-            turn_plan.intent = "tool_use"
-            turn_plan.public_response = None
-            turn_plan.response_text = ""
         return turn_plan
-
     def _apply_remembered_connector_inputs(self, remembered_inputs: dict) -> None:
         """Push conversation-remembered inputs onto registered connector tools so
         follow-up tool calls auto-fill required fields (universal: any connector)."""
@@ -2019,18 +1970,9 @@ Rules:
                 self.tool_registry.register(connector_tool)
                 registered_tools.append(connector_tool.name)
 
-        inquiry_config = config.get("inquiry") or {}
-        if inquiry_config.get("enabled"):
-            inquiry_tool = InquiryTool(
-                brand_slug=self.brand_id,
-                brand_id=(self.agent_record or {}).get("brand_id"),
-                agent_id=self.agent_id,
-                conversation_id=None,  # set per-turn via _configure_inquiry_tool_for_turn
-                agent_config=config,
-                submit_callback=self._submit_inquiry,
-            )
-            self.tool_registry.register(inquiry_tool)
-            registered_tools.append(inquiry_tool.name)
+        # V2: InquiryTool (V1 conversational batch collection) is disabled.
+        # The inquiry form (POST /api/v1/inquiry/submit) handles all field collection.
+        # inquiry_config = config.get("inquiry") or {}  # kept for reference only
 
         if registered_skills or registered_tools:
             logger.info(

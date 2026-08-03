@@ -121,6 +121,7 @@ function App({ config }: AppProps) {
   const [humanTakeoverEnabled, setHumanTakeoverEnabled] = React.useState(false);
   const [showSources, setShowSources] = React.useState(config?.showSources ?? false);
   const [showProductCards, setShowProductCards] = React.useState(config?.showProductCards ?? true);
+  const [showInquiry, setShowInquiry] = React.useState(false);
   // 'basic' = the lightweight cycling indicator; 'advanced' = the live step
   // timeline. Admin-configurable per agent; defaults to 'basic'.
   const [activityMode, setActivityMode] = React.useState<'basic' | 'advanced'>('basic');
@@ -168,6 +169,8 @@ function App({ config }: AppProps) {
         const takeoverEnabled = config?.enableHumanTakeover ?? widgetChannel.human_takeover ?? features.human_takeover === true;
         const shouldShowSources = config?.showSources ?? widgetChannel.show_sources ?? features.show_sources === true;
         const shouldShowProductCards = config?.showProductCards ?? widgetChannel.show_product_cards ?? features.show_product_cards !== false;
+        const inquiryConfig = agent.configuration?.inquiry || {};
+        const shouldShowInquiry = Boolean(inquiryConfig.enabled);
         const resolvedActivityMode =
           (widgetChannel.activity_mode ?? features.activity_mode) === 'advanced' ? 'advanced' : 'basic';
         const resolvedActivityPersistence =
@@ -176,6 +179,7 @@ function App({ config }: AppProps) {
         setHumanTakeoverEnabled(takeoverEnabled);
         setShowSources(shouldShowSources);
         setShowProductCards(shouldShowProductCards);
+        setShowInquiry(shouldShowInquiry);
         setActivityMode(resolvedActivityMode);
         setActivityPersistence(resolvedActivityPersistence);
         if (!brandId) return;
@@ -369,7 +373,7 @@ function App({ config }: AppProps) {
 
   const handleToggleWidget = () => setIsOpen(!isOpen);
 
-  const handleSendMessage = async (text: string) => {
+  const handleSendMessage = async (text: string, opts?: { inquiryJustCompleted?: boolean }) => {
     if (!agentId) {
       addMessage({
         id: Date.now().toString(),
@@ -439,7 +443,7 @@ function App({ config }: AppProps) {
 
       const client = useWebSocket ? wsClient : apiClient;
       const response = await client.sendMessage(
-        { content: text, context, userId: currentUserId },
+        { content: text, context, userId: currentUserId, inquiryJustCompleted: opts?.inquiryJustCompleted },
         currentConvId,
         agentId,
         (chunk) => {
@@ -500,8 +504,24 @@ function App({ config }: AppProps) {
     }
   };
 
-  const handleRegenerate = (messageId: string) => {
-    const msgIndex = messages.findIndex(m => m.id === messageId);
+  // V2 inquiry: after form submission the success message is shown as an
+  // assistant bubble directly by ChatWindow. The next real user message
+  // (anything the user types after that) must carry inquiry_just_completed=true
+  // so the backend skips the inquiry adapter for that one turn.
+  const handleSendMessageWithReset = (text: string) => {
+    // Show the success message as an assistant bubble directly — no LLM call.
+    // Include inquiry_pending.submitted so the next user message is treated
+    // as a clean turn (not part of an ongoing inquiry flow).
+    addMessage({
+      id: Date.now().toString(),
+      content: text,
+      role: 'assistant',
+      timestamp: new Date(),
+      metadata: { inquiry_pending: { submitted: true } },
+    });
+  };
+
+  const handleRegenerate = (messageId: string) => {    const msgIndex = messages.findIndex(m => m.id === messageId);
     if (msgIndex < 0) return;
     // Find the preceding user message
     let userMsg: string | null = null;
@@ -537,10 +557,13 @@ function App({ config }: AppProps) {
             onFeedback={setMessageFeedback}
             showSources={showSources}
             showProductCards={showProductCards}
+            showInquiry={showInquiry}
             isAgentConfigured={Boolean(agentId)}
             unavailableMessage={unavailableMessage || undefined}
             apiUrl={configuredApiBase}
             agentId={agentId}
+            conversationId={conversationId}
+            onSendMessageWithReset={handleSendMessageWithReset}
           />
         </div>
       )}

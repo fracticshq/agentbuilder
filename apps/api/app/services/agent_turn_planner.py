@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
@@ -13,7 +13,7 @@ from .conversation_policy import ConversationTurnPlan, make_activity, plan_conve
 logger = structlog.get_logger(__name__)
 
 
-VALID_INTENTS = {"greeting", "collect_input", "answer", "tool_use", "clarify", "handoff"}
+VALID_INTENTS = {"greeting", "collect_input", "answer", "tool_use", "clarify", "handoff", "open_inquiry_form"}
 
 
 @dataclass
@@ -43,7 +43,7 @@ class AgentTurnPlan:
 
     @property
     def should_short_circuit(self) -> bool:
-        return self.action in {"greeting", "ask_question", "ask_missing_input", "clarify", "handoff"}
+        return self.action in {"greeting", "ask_question", "ask_missing_input", "clarify", "handoff", "open_inquiry_form"}
 
 
 class AgentTurnPlanner:
@@ -144,7 +144,7 @@ User message:
 
 Return ONLY strict JSON with this shape:
 {{
-  "intent": "greeting | collect_input | answer | tool_use | clarify | handoff",
+  "intent": "greeting | collect_input | answer | tool_use | clarify | handoff | open_inquiry_form",
   "resolved_inputs": {{}},
   "missing_inputs": [],
   "question": "string or null",
@@ -180,26 +180,34 @@ Return ONLY strict JSON with this shape:
 
 Rules:
 - For greetings, set intent=greeting, no tools, and public_response as a natural greeting.
+- If the user explicitly wants a quote, pricing details, wants to talk to a human/support,
+  wants someone to contact them, or asks for a bulk/custom order, set intent=open_inquiry_form.
+  The widget will open a lead-capture form — do NOT try to collect fields yourself.
+  This includes: "request a quote", "I want pricing", "contact me", "bulk order",
+  "talk to someone", "call me back", "need a quote", "how much for 50 units",
+  "customer support", "need support", "talk to support", "speak to an agent",
+  "contact sales", "I want to buy", "price breakdown", "wholesale pricing",
+  "send inquiry", "I need help from a person", "connect me with your team".
 - If required inputs are missing, set intent=collect_input and missing_inputs.
 - If the user gave required details but no question and question_required=true, ask what they want to ask.
 - If the agent has enough information and tools are needed, set intent=tool_use with a tool_plan.
 - If a tool in the available tools list (e.g. submit_inquiry) is clearly relevant to what the
-  user is asking for — even if some fields it needs are still missing — prefer intent=tool_use
+  user is asking for â€” even if some fields it needs are still missing â€” prefer intent=tool_use
   with that tool in tool_plan over guessing intent=collect_input yourself. That tool reports
   exactly which of its own fields are missing; do not invent missing_inputs for it.
 - For ordered recipes, include the prerequisite step first.
 - If a place/date/time is phrased naturally or unlabeled, still extract it.
 - Unlabeled comma/period-separated birth details (e.g. "16 July 1987, 15:26, Delhi India")
-  mean birth_date, birth_time, birth_place — extract all three (date as YYYY-MM-DD,
+  mean birth_date, birth_time, birth_place â€” extract all three (date as YYYY-MM-DD,
   time as HH:MM:SS, place as the text the user gave).
 - Messages often lead with the person's NAME ("Sandeep Amar, DOB 25/01/1975, 11 AM,
   New Delhi. How is my health in 2026"): extract it as resolved_inputs.name. A person's
-  name is NEVER the birth place, and the trailing question is NEVER the birth place —
+  name is NEVER the birth place, and the trailing question is NEVER the birth place â€”
   put the question in "question".
 - Never ask the user for latitude, longitude, or timezone. A birthplace name is enough;
   the runtime geocodes it automatically. Ask a clarifying question only when a detail is
   genuinely ambiguous (e.g. "03/04/1990" could be 3 April or 4 March, or a city name that
-  exists in several countries with no country given) — otherwise proceed.
+  exists in several countries with no country given) â€” otherwise proceed.
 - Never put astrology connector endpoints (lalkitab_* or geocode_*) in tool_plan; the
   chart-first astrology runtime resolves the birthplace, builds the chart first, and then
   calls the relevant secondary endpoints automatically. Signal the need through
@@ -255,10 +263,14 @@ Rules:
         action = "ready"
         if intent == "greeting":
             action = "greeting"
-            public_response = public_response or "Hi, I’m here. Tell me what you’d like help with."
+            public_response = public_response or "Hi, Iâ€™m here. Tell me what youâ€™d like help with."
+        elif intent == "open_inquiry_form":
+            # Signal the widget to open the form modal - no LLM tool call needed.
+            action = "open_inquiry_form"
+            public_response = public_response or "I will open a quick form so our team can get back to you."
         elif intent == "collect_input" and missing and not tool_plan:
             # Only short-circuit here when no tool is queued. If a tool_plan is
-            # present (e.g. submit_inquiry), let it run — the tool has its own,
+            # present (e.g. submit_inquiry), let it run â€” the tool has its own,
             # more accurate missing-field detection and must not be pre-empted
             # by this generic guess.
             action = "ask_missing_input"

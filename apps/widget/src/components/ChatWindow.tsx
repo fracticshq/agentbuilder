@@ -3,6 +3,7 @@ import type { Message, BrandThemeTokens, ActivityState } from '../types';
 import { MessageBubble } from './MessageBubble';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { ActivityTimeline } from './ActivityTimeline';
+import { InquiryFormModal } from './InquiryFormModal';
 import { EMPTY_ACTIVITY } from '../utils/activityTimeline';
 import { useWidgetStore } from '../stores/widgetStore';
 import { NOVA_LOGO } from '../utils/brandTheme';
@@ -26,10 +27,13 @@ interface ChatWindowProps {
   onFeedback?: (id: string, feedback: 'up' | 'down' | null) => void;
   showSources?: boolean;
   showProductCards?: boolean;
+  showInquiry?: boolean;
   isAgentConfigured?: boolean;
   unavailableMessage?: string;
   apiUrl?: string;
   agentId?: string | null;
+  conversationId?: string | null;
+  onSendMessageWithReset?: (text: string) => void;
 }
 
 // ── Icon components ────────────────────────────────────────────
@@ -150,21 +154,81 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   onFeedback,
   showSources = false,
   showProductCards = true,
+  showInquiry = false,
   isAgentConfigured = true,
   unavailableMessage,
   apiUrl,
   agentId,
+  conversationId,
+  onSendMessageWithReset,
 }) => {
-  const { brandTheme } = useWidgetStore();
+  const { brandTheme, addMessage, removeMessage } = useWidgetStore();
   const [inputValue, setInputValue] = React.useState('');
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
+
+  // ── Inline inquiry form ───────────────────────────────────────────
+  const inlineFormMsgId = React.useRef<string | null>(null);
+
+  const handleOpenInquiryForm = React.useCallback((productName: string, productSku?: string) => {
+    addMessage({
+      id: `inq_user_${Date.now()}`,
+      role: 'user',
+      content: `Request a quote for ${productName}`,
+      timestamp: new Date(),
+    });
+    setTimeout(() => {
+      if (inlineFormMsgId.current) removeMessage(inlineFormMsgId.current);
+      const id = `inq_form_${Date.now()}`;
+      inlineFormMsgId.current = id;
+      addMessage({
+        id,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date(),
+        metadata: { inline_inquiry_form: true, product_name: productName, product_sku: productSku || '' },
+      });
+    }, 600);
+  }, [addMessage, removeMessage]);
+
+  const handleInquirySuccess = React.useCallback((message: string) => {
+    if (inlineFormMsgId.current) { removeMessage(inlineFormMsgId.current); inlineFormMsgId.current = null; }
+    if (onSendMessageWithReset) {
+      onSendMessageWithReset(message);
+    } else {
+      addMessage({
+        id: `inq_ok_${Date.now()}`,
+        role: 'assistant',
+        content: message,
+        timestamp: new Date(),
+        // Mark inquiry as submitted so _load_inquiry_pending_state clears the
+        // flow on the next user message, allowing normal product searches again.
+        metadata: { inquiry_pending: { submitted: true } },
+      });
+    }
+  }, [addMessage, removeMessage, onSendMessageWithReset]);
+
+  const handleInquirySkip = React.useCallback(() => {
+    if (inlineFormMsgId.current) { removeMessage(inlineFormMsgId.current); inlineFormMsgId.current = null; }
+    addMessage({ id: `inq_skip_${Date.now()}`, role: 'assistant', content: "No problem! Let me know if you need anything else.", timestamp: new Date() });
+  }, [addMessage, removeMessage]);
+
+  // Open form when API signals open_inquiry_form in metadata
+  const lastMsg = React.useMemo(() => messages[messages.length - 1], [messages]);
+  React.useEffect(() => {
+    if (!lastMsg || lastMsg.role !== 'assistant') return;
+    const meta = lastMsg.metadata as Record<string, unknown> | undefined;
+    if (meta?.open_inquiry_form && showInquiry) {
+      const pName = typeof meta.product_name === 'string' ? meta.product_name : '';
+      handleOpenInquiryForm(pName);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastMsg?.id]);
 
   const tk = brandTheme?.tokens;
   const mode = brandTheme?.mode ?? 'dark';
   const isLanding = messages.length === 0 && !isTyping;
 
   // Only show the thinking indicator while the assistant hasn't started streaming content yet
-  const lastMsg = messages[messages.length - 1];
   const showThinkingIndicator = isTyping && (!lastMsg || lastMsg.role !== 'assistant' || !lastMsg.content);
 
   const categories = brandTheme?.cyclingCategories ?? [];
@@ -424,9 +488,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     onFeedback={onFeedback}
                     showSources={showSources}
                     showProductCards={showProductCards}
+                    showInquiry={showInquiry}
                     apiUrl={apiUrl}
                     agentId={agentId}
+                    conversationId={conversationId ?? undefined}
                     onSendMessage={onSendMessage}
+                    onOpenInquiryForm={showInquiry ? handleOpenInquiryForm : undefined}
+                    onInquirySuccess={handleInquirySuccess}
+                    onInquirySkip={handleInquirySkip}
                   />
                   {showPlaceChips && (
                     <div className="activity-disambiguation" style={{ margin: '2px 16px 8px' }}>

@@ -7,9 +7,11 @@ interface ProductCardProps {
   /** Called instead of opening a link when the CTA is an inquiry request
    * (no fixed price). Receives the ready-to-send chat message text. */
   onSendInquiry?: (message: string) => void;
+  /** V2: opens the glassmorphism inquiry form modal for this product */
+  onOpenInquiryForm?: (productName: string, productSku?: string) => void;
 }
 
-export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails, onSendInquiry }) => {
+export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails, onSendInquiry, onOpenInquiryForm }) => {
   const [imageError, setImageError] = useState(false);
   const [variantsExpanded, setVariantsExpanded] = useState(false);
   const variants = useMemo(() => product.variants || [], [product.variants]);
@@ -87,9 +89,10 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
 
   const isInquiryProduct = (displayProduct.price_minor ?? displayProduct.price) === undefined
     || (displayProduct.price_minor ?? displayProduct.price) === null;
-  // The CTA button's destination depends on whether this product has a price:
-  // - Inquiry-based (no price): always go to the dedicated inquiry/quote form.
-  // - Priced: go to the product's own page (official site).
+  // Show "Send Inquiry" button when:
+  // 1. onSendInquiry is provided (inquiry_enabled=true on the agent) — for ALL products regardless of price
+  // 2. OR the product has no fixed price (inquiry-based catalog)
+  const showInquiryButton = Boolean(onSendInquiry);
   const ctaUrl = isInquiryProduct
     ? (displayProduct.inquiry_url || displayProduct.variant_url || displayProduct.product_url || displayProduct.url)
     : (displayProduct.variant_url || displayProduct.product_url || displayProduct.url);
@@ -109,14 +112,15 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
 
     // Inquiry-based products (no fixed price): kick off the conversational
     // inquiry flow directly in chat instead of opening a separate form/page.
-    if (isInquiryProduct && onSendInquiry) {
+    // Also triggers when inquiry_enabled=true on the agent (showInquiryButton).
+    if (showInquiryButton && onSendInquiry) {
       if (typeof window !== 'undefined' && window.agentAnalytics) {
         window.agentAnalytics.track('product_send_inquiry_click', {
           sku: displayProduct.sku || 'unknown',
           name: displayProduct.name,
         });
       }
-      onSendInquiry(`Send inquiry for price of ${displayProduct.name}`);
+      onSendInquiry(`Send inquiry for ${displayProduct.name}`);
       return;
     }
 
@@ -222,13 +226,49 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, onViewDetails
         
         <div className="product-price-row">
           {!isVariantProduct && <span className="product-price">{formatProductPrice()}</span>}
-          {(ctaUrl || (isInquiryProduct && onSendInquiry)) && (
-            <button 
+          {ctaUrl && (
+            <button
               className="view-details-btn"
-              onClick={handleViewDetails}
-              aria-label={isInquiryProduct ? 'Send an inquiry for this product' : 'Learn more about this product'}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (typeof window !== 'undefined' && window.agentAnalytics) {
+                  window.agentAnalytics.track('product_view_details', {
+                    sku: displayProduct.sku || 'unknown',
+                    name: displayProduct.name,
+                    variant_id: displayProduct.variant_id,
+                  });
+                }
+                if (onViewDetails) {
+                  onViewDetails(displayProduct);
+                } else {
+                  window.open(ctaUrl, '_blank', 'noopener,noreferrer');
+                }
+              }}
+              aria-label="Learn more about this product"
             >
-              {isInquiryProduct ? 'Send Inquiry for Price →' : 'Learn More →'}
+              Learn More →
+            </button>
+          )}
+          {(onOpenInquiryForm || onSendInquiry) && (
+            <button
+              className="view-details-btn inquiry-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (typeof window !== 'undefined' && window.agentAnalytics) {
+                  window.agentAnalytics.track('product_request_quote_click', {
+                    sku: displayProduct.sku || 'unknown',
+                    name: displayProduct.name,
+                  });
+                }
+                if (onOpenInquiryForm) {
+                  onOpenInquiryForm(displayProduct.name, displayProduct.sku);
+                } else if (onSendInquiry) {
+                  onSendInquiry(`Request a quote for ${displayProduct.name}`);
+                }
+              }}
+              aria-label="Request a quote for this product"
+            >
+              Request a Quote →
             </button>
           )}
         </div>
