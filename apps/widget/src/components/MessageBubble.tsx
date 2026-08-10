@@ -134,7 +134,6 @@ const formatProductPrice = (price?: number, currency?: string): string => {
 // Fetch product details from API
 const fetchProductDetails = async (skus: string[], agentId: string, apiUrl?: string): Promise<ProductData[]> => {
   try {
-    console.log('[MessageBubble] Fetching products for SKUs:', skus, 'agentId:', agentId);
     const sessionKey = `agent_widget_session_v1_${encodeURIComponent(window.location.origin)}_${agentId}`;
     let sessionToken: string | undefined;
     try {
@@ -162,7 +161,6 @@ const fetchProductDetails = async (skus: string[], agentId: string, apiUrl?: str
     }
     
     const data = await response.json();
-    console.log('[MessageBubble] Received products:', data);
     return data.products || [];
   } catch (error) {
     console.error('[MessageBubble] Error fetching products:', error);
@@ -170,7 +168,7 @@ const fetchProductDetails = async (skus: string[], agentId: string, apiUrl?: str
   }
 };
 
-export const MessageBubble: React.FC<MessageBubbleProps> = ({
+const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
   message,
   userMsgBg = '#2563eb',
   userMsgColor = '#ffffff',
@@ -243,7 +241,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     setHydrationState('loading');
     fetchProductDetails(productSkus, resolvedAgentId, apiUrl)
       .then(products => {
-        console.log('[MessageBubble] Fetched products:', products);
         setExtractedProducts(products);
         setHydrationState(products.length ? 'ready' : 'empty');
       })
@@ -310,17 +307,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     }
     return null;
   };
-  
-  console.log('[MessageBubble] Rendering message:', {
-    id: message.id,
-    role: message.role,
-    contentLength: message.content.length,
-    content: message.content.substring(0, 50) + (message.content.length > 50 ? '...' : ''),
-    hasProducts: allProducts.length > 0,
-    productsCount: allProducts.length,
-    hasDealers: !!message.dealers && message.dealers.length > 0,
-    dealersCount: message.dealers?.length || 0,
-  });
   
   const handleFeedback = (feedback: 'up' | 'down') => {
     const next = message.feedback === feedback ? null : feedback;
@@ -504,3 +490,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     </div>
   );
 };
+
+// Memoized: ChatWindow re-renders on unrelated state (e.g. the cycling
+// placeholder text ticking every ~2.2s via useCyclingText), which otherwise
+// re-renders every message bubble in the list on each tick. React.memo skips
+// that unless this bubble's own props actually changed.
+export const MessageBubble = React.memo(MessageBubbleComponent);

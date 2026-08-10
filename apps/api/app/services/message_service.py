@@ -32,6 +32,7 @@ from llm.factory import LLMFactory, create_provider_from_env
 from tools.registry import ToolRegistry
 from tools.builtin.retrieval_tool import CatalogSearchTool, RetrievalTool
 from tools.builtin.inquiry_tool import InquiryTool
+from tools.builtin.open_inquiry_form_tool import OpenInquiryFormTool
 from tools.types import ToolResult
 from agent_runtime.orchestrator import Orchestrator, AgentResult
 from agent_runtime.orchestrator_shopify import ShopifyOrchestrator
@@ -722,12 +723,44 @@ class MessageService:
         ("birth_place", "birth_place"),
     )
 
+    def _lalkitab_requires_birth_profile_form(self, config: dict[str, Any] | None) -> bool:
+        """Whether this Lal Kitab agent uses the mandatory pre-chat form flow.
+
+        Default ON for every astrology_lalkitab agent — the form-first flow
+        (birth-details form -> full chart/report -> chat about your own
+        chart) is the standard Lal Kitab experience. Set
+        configuration.lalkitab.require_birth_profile_form = false explicitly
+        to opt a specific agent OUT and keep the legacy chat-based birth
+        detail collection instead.
+        """
+        config = config if isinstance(config, dict) else {}
+        if not is_lalkitab_agent(config):
+            return False
+        lalkitab_cfg = config.get("lalkitab") if isinstance(config.get("lalkitab"), dict) else {}
+        flag = lalkitab_cfg.get("require_birth_profile_form")
+        return True if flag is None else bool(flag)
+
+    async def _load_confirmed_lalkitab_profile(
+        self, *, conversation_id: str, user_id: str, agent_id: str
+    ) -> dict[str, Any] | None:
+        """Read the confirmed birth profile persisted by POST /lalkitab/profile."""
+        try:
+            return await conversation_scope_store.get_birth_profile(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
+        except ConversationScopeStoreError:
+            logger.warning("lalkitab_confirmed_profile_read_failed", conversation_id=conversation_id)
+            return None
+
     async def _prepare_lalkitab_turn(
         self,
         turn_plan: AgentTurnPlan,
         message: str,
         policy_state: dict[str, Any],
         llm_provider: Any | None = None,
+        confirmed_profile: dict[str, Any] | None = None,
     ) -> tuple[AgentTurnPlan, dict[str, Any] | None]:
         """LLM-first understanding for Lal Kitab turns.
 
@@ -736,6 +769,11 @@ class MessageService:
         to correct the planner's view of the turn, so a person's name or the
         question can never be treated as the birth place. Returns the adapted
         plan plus the profile for the chart-first runtime.
+
+        confirmed_profile, when present (form-first flow, see
+        _lalkitab_requires_birth_profile_form), seeds the birth details so the
+        extractor only needs to separate the user's actual question from the
+        message — it never needs to re-derive date/time/place from chat text.
         """
         if not is_lalkitab_agent(self.agent_config or {}):
             return turn_plan, None
@@ -744,6 +782,10 @@ class MessageService:
             **(policy_state.get("resolved_inputs") if isinstance(policy_state.get("resolved_inputs"), dict) else {}),
             **(turn_plan.resolved_inputs or {}),
         }
+        if confirmed_profile:
+            for key in ("name", "birth_date", "birth_time", "birth_place"):
+                if confirmed_profile.get(key):
+                    prior_profile[key] = confirmed_profile[key]
         try:
             profile = await extract_birth_profile(
                 message,
@@ -968,10 +1010,18 @@ class MessageService:
         """
         if self.tool_registry is None:
             return turn_plan
+        # The open_inquiry_form tool only exists in this agent's registry when
+        # configuration.inquiry.enabled == true (see
+        # _register_configured_capabilities). If it isn't registered, the
+        # whole inquiry feature must be inert for this agent — no LLM tool
+        # call path, and no regex fallback either.
+        if self.tool_registry.get("open_inquiry_form") is None:
+            return turn_plan
         # LLM planner already decided to open the form — let it through
         if turn_plan.action == "open_inquiry_form":
             return turn_plan
-        # Regex fallback: typed triggers the LLM may have missed
+        # Regex fallback: typed triggers the LLM may have missed (e.g. it
+        # chose intent=answer instead of calling the open_inquiry_form tool)
         if INQUIRY_TRIGGER_PATTERN.search(message or "") and turn_plan.action != "open_inquiry_form":
             if not isinstance(turn_plan.resolved_inputs, dict):
                 turn_plan.resolved_inputs = {}
@@ -984,6 +1034,12 @@ class MessageService:
                 (message or "").strip(),
             )
             _pname = _product_match.group(1).strip() if _product_match else ""
+            # The optional "for the/a/price of" group above only matches as a
+            # whole — if the text after the trigger verb is bare "for <product>"
+            # (no "the"/"a"/"price of"), that group fails entirely and the
+            # leading "for " leaks into the capture (e.g. "for Marshall Acton
+            # III"). Strip any leftover leading preposition unconditionally.
+            _pname = re.sub(r"^(?:for|about|regarding)\s+", "", _pname, flags=re.IGNORECASE).strip()
             if _pname and re.match(
                 r"^(price|pricing|this|a quote|quotation|inquiry|customer support"
                 r"|support|an agent|a human|someone|the team|sales)$",
@@ -1739,7 +1795,17 @@ Answer the user directly.
             tool_name = getattr(tool, "name", tool_id)
             tool_input = step.get("input") if isinstance(step.get("input"), dict) else {}
             payload = tool_input.get("payload") if isinstance(tool_input.get("payload"), dict) else {}
-            payload = {**resolved_inputs, **payload}
+            # open_inquiry_form is a stateless, single-turn signal (unlike
+            # submit_inquiry/connector tools, which intentionally remember
+            # fields across turns via resolved_inputs). Carrying forward a
+            # product_name resolved 2+ turns ago (e.g. from an earlier,
+            # different product's inquiry) would silently mislabel a fresh
+            # "bulk order" / "talk to a human" request with the wrong
+            # product. Only this turn's own tool-call arguments apply.
+            if tool_id == "open_inquiry_form":
+                payload = dict(payload)
+            else:
+                payload = {**resolved_inputs, **payload}
             run_kwargs = dict(tool_input)
             if "query" not in run_kwargs:
                 run_kwargs["query"] = turn_plan.question or message
@@ -1805,6 +1871,39 @@ Answer the user directly.
                 resolved_inputs.update({k: v for k, v in metadata["resolved_inputs"].items() if v not in (None, "")})
         return tool_results, events
 
+    def _open_inquiry_form_short_circuit(self, tool_results: dict[str, ToolResult]) -> AgentResult | None:
+        """If the planner called open_inquiry_form this turn, short-circuit
+        straight to the widget-facing answer instead of paying for an LLM
+        writer call — the tool result already tells us exactly what to say
+        and what metadata the widget needs to render the inline form."""
+        for result in (tool_results or {}).values():
+            meta = getattr(result, "metadata", None) or {}
+            if result.success and meta.get("open_inquiry_form"):
+                product_name = str(meta.get("product_name") or "").strip()
+                answer = (
+                    f"Opening the quote form for **{product_name}** — please fill in your details."
+                    if product_name
+                    else "Opening the quote form — please fill in your details."
+                )
+                return AgentResult(
+                    answer=answer,
+                    metadata={
+                        "tool_results": dict(tool_results or {}),
+                        "steps_executed": len(tool_results or {}),
+                        "validation_passed": True,
+                        "validation_confidence": 1.0,
+                        "open_inquiry_form": True,
+                        "product_name": product_name,
+                        # Fixed acknowledgement template, not a generated
+                        # factual claim — a product name containing a digit
+                        # (e.g. "Dali Sonik 3") would otherwise be treated as
+                        # an unsupported numeric anchor by the claim-evidence
+                        # guard downstream (_apply_post_response_guardrails).
+                        "_trusted_safety_template": True,
+                    },
+                )
+        return None
+
     async def _generate_planner_agent_result(
         self,
         *,
@@ -1815,6 +1914,9 @@ Answer the user directly.
         rag_tool_result: ToolResult | None = None,
     ) -> AgentResult:
         """Synthesize a public answer from the LLM-first plan and executed evidence."""
+        short_circuit = self._open_inquiry_form_short_circuit(tool_results)
+        if short_circuit is not None:
+            return short_circuit
         all_tool_results = dict(tool_results or {})
         if rag_tool_result:
             all_tool_results["knowledge_search"] = rag_tool_result
@@ -1973,6 +2075,17 @@ Rules:
         # V2: InquiryTool (V1 conversational batch collection) is disabled.
         # The inquiry form (POST /api/v1/inquiry/submit) handles all field collection.
         # inquiry_config = config.get("inquiry") or {}  # kept for reference only
+
+        # Skill-based tool calling: the LLM planner opens the inquiry form by
+        # explicitly calling this tool (structured tool_plan entry), same as
+        # any other registered tool/connector. This tool takes no contact
+        # fields and never touches PII — it only signals intent. It is
+        # registered ONLY when this agent has inquiry.enabled == true; if the
+        # flag is off, the tool does not exist in this agent's registry and
+        # the LLM has no way to call it, so the whole feature is inert.
+        if bool((config.get("inquiry") or {}).get("enabled")):
+            self.tool_registry.register(OpenInquiryFormTool())
+            registered_tools.append("open_inquiry_form")
 
         if registered_skills or registered_tools:
             logger.info(
@@ -2329,6 +2442,27 @@ Rules:
                     decision=guardrail_decision,
                 )
 
+            confirmed_lalkitab_profile: dict[str, Any] | None = None
+            if self._lalkitab_requires_birth_profile_form(self.agent_config):
+                confirmed_lalkitab_profile = await self._load_confirmed_lalkitab_profile(
+                    conversation_id=conversation_id, user_id=user_id, agent_id=agent_id
+                )
+                if not confirmed_lalkitab_profile:
+                    gate_message = (
+                        "Please complete the birth details form to generate your horoscope "
+                        "before we continue — I need your confirmed chart to answer safely."
+                    )
+                    duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
+                    return MessageResponse(
+                        message=gate_message,
+                        conversation_id=conversation_id,
+                        citations=[],
+                        metadata={"requires_lalkitab_birth_profile_form": True},
+                        context_used=0,
+                        confidence_score=1.0,
+                        processing_time_ms=duration_ms,
+                    )
+
             runtime_message = guardrail_decision.get("safe_query") or request.message
             capability_scope = guardrail_decision.get("capability_scope")
             user_metadata = {
@@ -2368,7 +2502,11 @@ Rules:
                 fallback_plan=fallback_turn_plan,
             )
             turn_plan, lalkitab_profile = await self._prepare_lalkitab_turn(
-                turn_plan, runtime_message, policy_state, llm_provider=planner_provider
+                turn_plan,
+                runtime_message,
+                policy_state,
+                llm_provider=planner_provider,
+                confirmed_profile=confirmed_lalkitab_profile,
             )
             inquiry_pending_state = (
                 await self._load_inquiry_pending_state(conversation_id) if short_term_enabled else {}
@@ -2388,6 +2526,19 @@ Rules:
                 }
                 if (turn_plan.raw_plan or {}).get("_inquiry_cancelled"):
                     metadata["inquiry_pending"] = {"cancelled": True}
+                if turn_plan.action == "open_inquiry_form":
+                    metadata["open_inquiry_form"] = True
+                    _product_name = turn_plan.resolved_inputs.get("product_name") if isinstance(turn_plan.resolved_inputs, dict) else None
+                    if _product_name:
+                        metadata["product_name"] = _product_name
+                    # This is a fixed, server-owned acknowledgement template
+                    # ("Opening the quote form for <product>..."), not a
+                    # generated factual claim. Any digit in the product name
+                    # (e.g. "Dali Sonik 3", "Denon Home 150") would otherwise
+                    # be treated as an unsupported numeric anchor by the
+                    # claim-evidence guard below and get replaced with the
+                    # generic low-confidence message.
+                    metadata["_trusted_safety_template"] = True
                 response_text, metadata = self._apply_post_response_guardrails(response_text, metadata)
                 if short_term_enabled:
                     await self.short_term.add_message(
@@ -2422,6 +2573,7 @@ Rules:
                     message=response_text,
                     conversation_id=conversation_id,
                     citations=[],
+                    metadata=metadata,
                     context_used=0,
                     confidence_score=min(1.0, max(0.0, float(metadata.get("validation_confidence", 1.0)))),
                     processing_time_ms=duration_ms,
@@ -2481,7 +2633,7 @@ Rules:
                     self.agent_config or {},
                     runtime_message,
                     pending_state=lalkitab_pending,
-                    birth_profile=lalkitab_profile,
+                    birth_profile=lalkitab_profile or confirmed_lalkitab_profile,
                 )
 
             if lalkitab_plan.handled and (
@@ -2539,7 +2691,7 @@ Rules:
                     lalkitab_plan=lalkitab_plan,
                     rag_context=rag_context,
                     rag_tool_result=rag_tool_result,
-                    birth_profile=lalkitab_profile,
+                    birth_profile=lalkitab_profile or confirmed_lalkitab_profile,
                 )
 
             # 4. RUN SOTA ORCHESTRATOR LOOP
@@ -2657,6 +2809,12 @@ Rules:
                 response_metadata = {
                     **(response_metadata or {}),
                     "kundali_chart": _sanitize_for_json(agent_metadata["kundali_chart"]),
+                }
+            if agent_metadata.get("open_inquiry_form"):
+                response_metadata = {
+                    **(response_metadata or {}),
+                    "open_inquiry_form": True,
+                    "product_name": agent_metadata.get("product_name") or "",
                 }
             strapi_assistant_metadata = {
                 "products": unique_products,
@@ -2912,6 +3070,38 @@ Rules:
                 )
                 return
 
+            confirmed_lalkitab_profile: dict[str, Any] | None = None
+            if self._lalkitab_requires_birth_profile_form(self.agent_config):
+                confirmed_lalkitab_profile = await self._load_confirmed_lalkitab_profile(
+                    conversation_id=conversation_id, user_id=user_id, agent_id=agent_id
+                )
+                if not confirmed_lalkitab_profile:
+                    gate_message = (
+                        "Please complete the birth details form to generate your horoscope "
+                        "before we continue — I need your confirmed chart to answer safely."
+                    )
+                    yield StreamingMessageResponse(
+                        type="content",
+                        content=gate_message,
+                        conversation_id=conversation_id,
+                    )
+                    yield StreamingMessageResponse(
+                        type="final_answer",
+                        content=gate_message,
+                        conversation_id=conversation_id,
+                        metadata={"requires_lalkitab_birth_profile_form": True},
+                    )
+                    yield StreamingMessageResponse(
+                        type="metadata",
+                        content="",
+                        conversation_id=conversation_id,
+                        citations=[],
+                        context_used=0,
+                        confidence_score=1.0,
+                        metadata={"requires_lalkitab_birth_profile_form": True},
+                    )
+                    return
+
             runtime_message = guardrail_decision.get("safe_query") or request.message
             capability_scope = guardrail_decision.get("capability_scope")
             user_metadata = {
@@ -2950,7 +3140,11 @@ Rules:
                 fallback_plan=fallback_turn_plan,
             )
             turn_plan, lalkitab_profile = await self._prepare_lalkitab_turn(
-                turn_plan, runtime_message, policy_state, llm_provider=planner_provider
+                turn_plan,
+                runtime_message,
+                policy_state,
+                llm_provider=planner_provider,
+                confirmed_profile=confirmed_lalkitab_profile,
             )
             inquiry_pending_state = (
                 await self._load_inquiry_pending_state(conversation_id) if short_term_enabled else {}
@@ -2970,6 +3164,17 @@ Rules:
                 }
                 if (turn_plan.raw_plan or {}).get("_inquiry_cancelled"):
                     short_circuit_metadata["inquiry_pending"] = {"cancelled": True}
+                _inquiry_form_metadata: dict[str, Any] = {}
+                if turn_plan.action == "open_inquiry_form":
+                    _inquiry_form_metadata["open_inquiry_form"] = True
+                    _product_name = turn_plan.resolved_inputs.get("product_name") if isinstance(turn_plan.resolved_inputs, dict) else None
+                    if _product_name:
+                        _inquiry_form_metadata["product_name"] = _product_name
+                    short_circuit_metadata.update(_inquiry_form_metadata)
+                    # Fixed acknowledgement template, not a generated factual
+                    # claim — see the sync-path comment above for why this
+                    # must bypass the claim-evidence guard.
+                    short_circuit_metadata["_trusted_safety_template"] = True
                 response_text, short_circuit_metadata = self._apply_post_response_guardrails(
                     turn_plan.response_text,
                     short_circuit_metadata,
@@ -2987,6 +3192,7 @@ Rules:
                         "resolved_inputs": _sanitize_for_json(turn_plan.resolved_inputs),
                         "pending_inputs": turn_plan.pending_inputs,
                         "context_decision": turn_plan.context_decision,
+                        **_inquiry_form_metadata,
                     },
                 )
                 if short_term_enabled:
@@ -3023,6 +3229,7 @@ Rules:
                         "resolved_inputs": _sanitize_for_json(turn_plan.resolved_inputs),
                         "pending_inputs": turn_plan.pending_inputs,
                         "context_decision": turn_plan.context_decision,
+                        **_inquiry_form_metadata,
                     },
                 )
                 yield StreamingMessageResponse(
@@ -3057,7 +3264,7 @@ Rules:
                     self.agent_config or {},
                     runtime_message,
                     pending_state=lalkitab_pending,
-                    birth_profile=lalkitab_profile,
+                    birth_profile=lalkitab_profile or confirmed_lalkitab_profile,
                 )
 
             # Surface real runtime activity (geocoding, connector calls) as it happens.
@@ -3278,7 +3485,7 @@ Rules:
                     lalkitab_plan=lalkitab_plan,
                     rag_context=rag_context,
                     rag_tool_result=rag_tool_result,
-                    birth_profile=lalkitab_profile,
+                    birth_profile=lalkitab_profile or confirmed_lalkitab_profile,
                 )
             elif isinstance(self.orchestrator, ShopifyOrchestrator):
                 # Define a queue to capture status updates from the orchestrator
@@ -3507,6 +3714,9 @@ Rules:
                 # Structured chart payload the widget renders as the visual
                 # kundali artifact above the reading.
                 final_answer_metadata["kundali_chart"] = _sanitize_for_json(agent_metadata["kundali_chart"])
+            if agent_metadata.get("open_inquiry_form"):
+                final_answer_metadata["open_inquiry_form"] = True
+                final_answer_metadata["product_name"] = agent_metadata.get("product_name") or ""
             yield StreamingMessageResponse(
                 type="final_answer",
                 content=full_response,
@@ -3711,6 +3921,9 @@ Rules:
             }
             if retrieval_health:
                 stream_response_metadata["retrieval"] = retrieval_health
+            if agent_metadata.get("open_inquiry_form"):
+                stream_response_metadata["open_inquiry_form"] = True
+                stream_response_metadata["product_name"] = agent_metadata.get("product_name") or ""
 
             yield StreamingMessageResponse(
                 type="metadata",

@@ -984,6 +984,22 @@ async def build_lalkitab_runtime_context(
         result.tool_results[tool.name] = tool_result
         metadata = tool_result.metadata or {}
         payload_valid = tool_result.success and is_valid_lalkitab_context_payload(tool_result.data)
+        if not payload_valid:
+            # Vedika is a third-party API that has already failed for several
+            # distinct reasons this integration (missing/malformed auth
+            # header, rate limiting) with no other visible signal — the
+            # widget/endpoint only ever sees a generic "could not calculate a
+            # verified chart" message. Log the real reason (safe: connector
+            # error text/HTTP status only, never birth details or the API
+            # key) so a recurrence can be diagnosed without another live
+            # paid API call.
+            logger.warning(
+                "lalkitab_connector_result_unavailable",
+                endpoint_id=endpoint_id,
+                tool_success=tool_result.success,
+                tool_error=tool_result.error,
+                latency_ms=metadata.get("latency_ms"),
+            )
         event_type = "connector_result" if payload_valid else "connector_error"
         result.events.append(
             {

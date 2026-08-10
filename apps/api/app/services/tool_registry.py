@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 from urllib.parse import urlparse
+import asyncio
 import ipaddress
 import json
 import re
@@ -467,7 +468,18 @@ def _connector_auth_headers(auth: dict[str, Any] | None) -> dict[str, str]:
         if parsed:
             return parsed
         if isinstance(raw_header, str) and raw_header.strip():
-            return {"Authorization": f"Bearer {raw_header.strip()}"}
+            value = raw_header.strip()
+            # The admin UI's "Auth header" field stores only the header
+            # VALUE (e.g. "Bearer vk_live_xxx" or a bare token), never the
+            # "Header-Name: value" pair — _parse_auth_header() above only
+            # matches the latter. Do not blindly prefix "Bearer " here: if
+            # the saved value already carries its own auth scheme (Bearer,
+            # Basic, Token, ApiKey, ...), doing so double-wraps it into an
+            # invalid "Bearer Bearer vk_live_xxx" header that every provider
+            # rejects as unauthorized.
+            if re.match(r"^[A-Za-z][A-Za-z0-9._-]*\s+\S", value):
+                return {"Authorization": value}
+            return {"Authorization": f"Bearer {value}"}
     return {}
 
 
@@ -855,6 +867,17 @@ class ContextConnectorTool(BaseTool):
                             response = await client.get(url, params=request_payload if self.endpoint.get("payload_mode") == "flat_body" else payload, headers=headers)
                         else:
                             response = await client.request(method, url, json=request_payload, headers=headers)
+                        if response.status_code == 429 and attempt < retry_count:
+                            # Provider rate limit — retrying immediately would
+                            # just hit 429 again. Honor Retry-After when the
+                            # provider sends one, otherwise back off briefly.
+                            retry_after = response.headers.get("retry-after")
+                            try:
+                                delay = min(max(float(retry_after), 0.5), 10.0) if retry_after else 1.5 * (attempt + 1)
+                            except ValueError:
+                                delay = 1.5 * (attempt + 1)
+                            await asyncio.sleep(delay)
+                            continue
                         response.raise_for_status()
                         content_type = response.headers.get("content-type", "")
                         raw_text = response.text

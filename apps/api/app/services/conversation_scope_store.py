@@ -224,6 +224,78 @@ class ConversationScopeStore:
             raise ConversationScopeStoreError("Conversation scope storage is unavailable") from exc
         return bool(document)
 
+    async def set_birth_profile(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        agent_id: str,
+        birth_profile: dict[str, Any],
+    ) -> None:
+        """Persist a confirmed Lal Kitab birth profile for this conversation.
+
+        This is the durable record a form-first astrology flow gates chat on:
+        once confirmed, later turns never need to re-extract birth details
+        from free text. Scoped to the same (conversation_id, user_id,
+        agent_id) identity as the rest of this store, so it inherits the same
+        TTL/erasure model as everything else here — no separate retention
+        policy to maintain.
+        """
+        collection = self._collection()
+        now = self._utc_now()
+        try:
+            result = await collection.update_one(
+                {
+                    "_id": conversation_id,
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "privacy.status": {"$ne": "erased"},
+                },
+                {
+                    "$set": {
+                        "lalkitab_birth_profile": {
+                            **birth_profile,
+                            "confirmed": True,
+                            "confirmed_at": now,
+                        },
+                    },
+                },
+            )
+        except Exception as exc:
+            logger.warning("conversation_scope_birth_profile_write_failed", error_type=type(exc).__name__)
+            raise ConversationScopeStoreError("Conversation scope storage is unavailable") from exc
+        if not getattr(result, "matched_count", 0):
+            raise ConversationScopeAuthorizationError("Widget session is not authorized for this conversation")
+
+    async def get_birth_profile(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        agent_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the confirmed birth profile for this conversation, if any."""
+        collection = self._collection()
+        try:
+            document = await collection.find_one(
+                {
+                    "_id": conversation_id,
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "privacy.status": {"$ne": "erased"},
+                },
+                {"lalkitab_birth_profile": 1},
+            )
+        except Exception as exc:
+            logger.warning("conversation_scope_birth_profile_read_failed", error_type=type(exc).__name__)
+            raise ConversationScopeStoreError("Conversation scope storage is unavailable") from exc
+        if not isinstance(document, dict):
+            return None
+        profile = document.get("lalkitab_birth_profile")
+        if not isinstance(profile, dict) or not profile.get("confirmed"):
+            return None
+        return profile
+
     async def require_active_widget_scope(
         self,
         *,

@@ -34,6 +34,10 @@ interface ChatWindowProps {
   agentId?: string | null;
   conversationId?: string | null;
   onSendMessageWithReset?: (text: string) => void;
+  /** Optional content rendered as a left-hand column alongside the chat
+   * (e.g. the Lal Kitab kundali chart) so chart and chat share one panel
+   * instead of being separate screens. */
+  sideChart?: React.ReactNode;
 }
 
 // ── Icon components ────────────────────────────────────────────
@@ -161,6 +165,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   agentId,
   conversationId,
   onSendMessageWithReset,
+  sideChart,
 }) => {
   const { brandTheme, addMessage, removeMessage } = useWidgetStore();
   const [inputValue, setInputValue] = React.useState('');
@@ -169,6 +174,22 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   // ── Inline inquiry form ───────────────────────────────────────────
   const inlineFormMsgId = React.useRef<string | null>(null);
 
+  const showInquiryFormCard = React.useCallback((productName: string, productSku?: string) => {
+    if (inlineFormMsgId.current) removeMessage(inlineFormMsgId.current);
+    const id = `inq_form_${Date.now()}`;
+    inlineFormMsgId.current = id;
+    addMessage({
+      id,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date(),
+      metadata: { inline_inquiry_form: true, product_name: productName, product_sku: productSku || '' },
+    });
+  }, [addMessage, removeMessage]);
+
+  // Product-card "Request a Quote" button: there's no existing chat message
+  // representing the click, so insert a synthetic user bubble first, then
+  // show the form after a short delay (bubble appears, then form).
   const handleOpenInquiryForm = React.useCallback((productName: string, productSku?: string) => {
     addMessage({
       id: `inq_user_${Date.now()}`,
@@ -176,19 +197,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       content: `Request a quote for ${productName}`,
       timestamp: new Date(),
     });
-    setTimeout(() => {
-      if (inlineFormMsgId.current) removeMessage(inlineFormMsgId.current);
-      const id = `inq_form_${Date.now()}`;
-      inlineFormMsgId.current = id;
-      addMessage({
-        id,
-        role: 'assistant',
-        content: '',
-        timestamp: new Date(),
-        metadata: { inline_inquiry_form: true, product_name: productName, product_sku: productSku || '' },
-      });
-    }, 600);
-  }, [addMessage, removeMessage]);
+    setTimeout(() => showInquiryFormCard(productName, productSku), 600);
+  }, [addMessage, showInquiryFormCard]);
+
+  // API-triggered (typed message / LLM tool call) path: the user's own
+  // typed message is already visible in the chat, so do NOT insert another
+  // synthetic "Request a quote for..." bubble — just show the form directly
+  // under the assistant's "Opening the quote form..." acknowledgement.
+  const handleOpenInquiryFormFromApi = React.useCallback((productName: string, productSku?: string) => {
+    showInquiryFormCard(productName, productSku);
+  }, [showInquiryFormCard]);
 
   const handleInquirySuccess = React.useCallback((message: string) => {
     if (inlineFormMsgId.current) { removeMessage(inlineFormMsgId.current); inlineFormMsgId.current = null; }
@@ -212,20 +230,32 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     addMessage({ id: `inq_skip_${Date.now()}`, role: 'assistant', content: "No problem! Let me know if you need anything else.", timestamp: new Date() });
   }, [addMessage, removeMessage]);
 
-  // Open form when API signals open_inquiry_form in metadata
+  // Open form when API signals open_inquiry_form in metadata.
+  // The assistant message is added as an empty placeholder first (same id)
+  // and only gets its metadata (incl. open_inquiry_form) filled in later via
+  // updateMessage once the API responds — so this must re-check whenever the
+  // metadata flag itself changes, not just when a new message id appears.
   const lastMsg = React.useMemo(() => messages[messages.length - 1], [messages]);
+  const lastMsgOpenInquiryFlag = lastMsg?.role === 'assistant'
+    ? Boolean((lastMsg.metadata as Record<string, unknown> | undefined)?.open_inquiry_form)
+    : false;
+  const handledInquiryFormMsgId = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!lastMsg || lastMsg.role !== 'assistant') return;
     const meta = lastMsg.metadata as Record<string, unknown> | undefined;
-    if (meta?.open_inquiry_form && showInquiry) {
+    if (meta?.open_inquiry_form && showInquiry && handledInquiryFormMsgId.current !== lastMsg.id) {
+      handledInquiryFormMsgId.current = lastMsg.id;
       const pName = typeof meta.product_name === 'string' ? meta.product_name : '';
-      handleOpenInquiryForm(pName);
+      handleOpenInquiryFormFromApi(pName);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lastMsg?.id]);
+  }, [lastMsg?.id, lastMsgOpenInquiryFlag]);
 
   const tk = brandTheme?.tokens;
-  const mode = brandTheme?.mode ?? 'dark';
+  // Default to the light cream palette (not dark) while brand theme is
+  // still loading, so there's no dark/green flash before tokens arrive —
+  // every brand should land on the same neutral light look by default.
+  const mode = brandTheme?.mode ?? 'light';
   const isLanding = messages.length === 0 && !isTyping;
 
   // Only show the thinking indicator while the assistant hasn't started streaming content yet
@@ -296,9 +326,42 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   return (
     <div
-      className={`chat-panel ${isExpanded ? 'expanded' : ''} ${isMobile ? 'mobile' : ''}`}
-      style={{ background: panelBg }}
+      className={`chat-panel ${isExpanded ? 'expanded' : ''} ${isMobile ? 'mobile' : ''} ${sideChart ? 'with-side-chart' : ''}`}
+      style={{
+        background: panelBg,
+        // CSS Grid with two equal fr tracks gives a hard, deterministic
+        // 50/50 split that can't be squeezed by flex-shrink/content sizing
+        // the way flex-basis percentages can — the chart column and chat
+        // column always end up exactly half the panel width each.
+        display: sideChart ? 'grid' : 'flex',
+        gridTemplateColumns: sideChart ? '35% 65%' : undefined,
+        flexDirection: sideChart ? undefined : 'column',
+      }}
     >
+      {sideChart && (
+        <div
+          className="chat-side-chart-col"
+          style={{
+            minWidth: 0,
+            height: '100%',
+            overflowY: 'auto',
+            borderRight: `1px solid ${tk?.dividerColor ?? (mode === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)')}`,
+            padding: '16px',
+            boxSizing: 'border-box',
+            position: 'relative',
+            zIndex: 6,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+          }}
+        >
+          {sideChart}
+        </div>
+      )}
+      <div
+        className="chat-panel-main"
+        style={{ display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, height: '100%', position: 'relative', overflow: 'hidden', overflowY: 'auto' }}
+      >
       {/* Background orb */}
       <div className="chat-panel-orb" style={{ background: orbBg }} />
 
@@ -552,6 +615,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           </div>
         </>
       )}
+      </div>
     </div>
   );
 };

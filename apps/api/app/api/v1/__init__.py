@@ -4,7 +4,7 @@ API v1 Router
 
 from fastapi import APIRouter, Depends
 from . import agent_api
-from .endpoints import messages, ingestion, status, knowledge, activity, catalog, public, inquiry
+from .endpoints import messages, ingestion, status, knowledge, activity, catalog, public, inquiry, lalkitab_profile
 from .admin import router as admin_router
 from .auth import auth_router
 from ...security.rate_limiter import rate_limit_dependency
@@ -23,6 +23,7 @@ api_router.include_router(activity.router, prefix="/activity", tags=["activity"]
 api_router.include_router(catalog.router, prefix="/catalog", tags=["catalog"])
 api_router.include_router(public.router, prefix="/public", tags=["public"])
 api_router.include_router(inquiry.router, prefix="/inquiry", tags=["inquiry"])
+api_router.include_router(lalkitab_profile.router, prefix="/lalkitab", tags=["lalkitab"])
 api_router.include_router(agent_api.router, prefix="/agent-api", tags=["agent-api"])
 
 # Include admin routers

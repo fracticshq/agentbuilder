@@ -170,6 +170,18 @@ def _anchors(value: str) -> set[str]:
     return anchors
 
 
+# Product/commerce price fields are stored in minor currency units (e.g.
+# paisa/cents) throughout this codebase (see ProductCard/ProductVariant
+# price_minor contract), but the LLM writer always displays prices in major
+# units (e.g. "INR 52,900" for price_minor=5290000). Without also emitting the
+# major-unit value as evidence text, every priced-product answer would fail
+# the claim-evidence numeric-anchor check purely due to unit mismatch, not an
+# actual hallucination.
+_MINOR_UNIT_PRICE_FIELDS = {
+    "price_minor", "price_min", "price_max", "price", "cost", "amount",
+}
+
+
 def _structured_text(value: Any, *, depth: int = 0) -> str:
     """Flatten structured evidence while retaining field names as factual context."""
     if depth > 5 or value is None:
@@ -180,6 +192,17 @@ def _structured_text(value: Any, *, depth: int = 0) -> str:
             safe_key = str(key).replace("_", " ").replace("-", " ")
             if key in {"in_stock", "inStock", "available"} and isinstance(item, bool):
                 pieces.append("availability in stock" if item else "availability out of stock")
+            if (
+                key in _MINOR_UNIT_PRICE_FIELDS
+                and isinstance(item, (int, float))
+                and not isinstance(item, bool)
+            ):
+                # Emit both the raw minor-unit number and its major-unit
+                # (÷100) equivalent so a claim quoting either form matches.
+                major_value = item / 100
+                major_text = f"{major_value:.2f}".rstrip("0").rstrip(".")
+                pieces.append(f"{safe_key} {item} {major_text}")
+                continue
             nested = _structured_text(item, depth=depth + 1)
             if nested:
                 pieces.append(f"{safe_key} {nested}")
