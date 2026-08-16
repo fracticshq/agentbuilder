@@ -1,6 +1,6 @@
 {
   "info": {
-    "_postman_id": "31cc0bd0-63a1-f159-9843-50a95c11e218",
+    "_postman_id": "212618c5-b13d-a3fb-2206-ff793188ba57",
     "description": "Generated from docs/api/openapi.json. Do not edit manually.",
     "name": "Agent Builder Platform API (generated)",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
@@ -3439,7 +3439,7 @@
               },
               "raw": "{\n  \"agent_id\": \"value\",\n  \"birth_date\": \"value\",\n  \"birth_place\": \"value\",\n  \"birth_time\": \"value\",\n  \"language\": \"en\",\n  \"name\": \"value\"\n}"
             },
-            "description": "Build the full Lal Kitab chart + report once and persist it as this\nconversation's confirmed birth profile.",
+            "description": "Build the full Lal Kitab chart + report once and persist it as this\nconversation's confirmed birth profile.\n\nStatus codes are genuine here (not always 200): a real chart/connector\nfailure returns 502 so it is visibly red in the Network tab, not just a\n\"success\": false line inside an otherwise-fine-looking 200 response.\nOnly a safe, generic `error_code` + `request_id` ever reach the browser —\nnever a provider's raw error text, stack trace, or any connector secret;\nthe full diagnostic detail stays in the server's own structured logs,\ncorrelated by `request_id`.",
             "header": [
               {
                 "key": "Accept",

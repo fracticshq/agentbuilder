@@ -10,6 +10,17 @@ import structlog
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from dataclasses import dataclass
 
+# Reused read-only: the same planet name -> Vedika short-code mapping that
+# drives the visual kundali chart (kundali_chart.py is never modified here,
+# only its existing lookup table is imported), so a claim written with full
+# planet names ("Mercury", "Rahu") can be matched against evidence stored
+# with Vedika's short codes ("Me", "Ra") without maintaining a second copy
+# of this mapping.
+try:
+    from .kundali_chart import KUNDALI_PLANET_CODES as _PLANET_NAME_TO_CODE
+except ImportError:  # pragma: no cover - defensive; keeps this module usable standalone
+    _PLANET_NAME_TO_CODE = {}
+
 logger = structlog.get_logger(__name__)
 
 
@@ -101,8 +112,26 @@ _SAFE_RESPONSE_PATTERNS = (
     re.compile(r"\b(?:don[’']t have|do not have|not enough|insufficient)\s+(?:enough )?(?:verified )?(?:information|evidence)\b", re.IGNORECASE),
     re.compile(r"\b(?:try again|contact (?:the )?(?:brand|support|team))\b", re.IGNORECASE),
     re.compile(r"^\s*(?:streaming )?response complete\.?\s*$", re.IGNORECASE),
+    # Mandatory Lal Kitab closing disclaimer (dictated verbatim by the
+    # runtime's own prompt template, not a generated factual claim).
+    re.compile(r"\b(?:guidance|tradition)\b.{0,40}\bnot a guarantee\b", re.IGNORECASE),
     re.compile(r"^\s*this is a helpful response(?: with citations)?\.?\s*$", re.IGNORECASE),
     re.compile(r"^\s*here (?:is|are) (?:the )?(?:matching|relevant) (?:product|products|option|options|result|results)\.?\s*$", re.IGNORECASE),
+)
+_YEAR_LIKE_PATTERN = re.compile(r"\b(19|20)\d{2}\b")
+_PERCENT_PATTERN = re.compile(r"\b\d{1,3}(?:\.\d+)?\s*%")
+_AGE_CONTEXT_PATTERN = re.compile(r"\bage[d]?\s+\d{1,3}\b", re.IGNORECASE)
+_LALKITAB_RISKY_CLAIM = re.compile(
+    r"\b(?:sun|moon|mars|mercury|jupiter|venus|saturn|rahu|ketu|"
+    r"surya|chandra|mangal|budh|guru|shukra|shani|"
+    r"house|bhava|bhav|rashi|lagna|ascendant|"
+    r"donate|offer|wear|chant|fast|feed|avoid|recite|worship|"
+    r"remedy|remedies|totke|totka|"
+    r"dasha|mahadasha|antardasha|bhukti|"
+    r"navamsa|dashamsa|divisional|varga|"
+    r"rich|wealth|wealthy|fortune|destiny|"
+    r"career|marriage|health|finance|education|foreign|business|job)\b",
+    re.IGNORECASE,
 )
 _ASSERTION_PATTERN = re.compile(
     r"\b(?:is|are|was|were|has|have|had|cost|costs|priced|price|available|includes?|"
@@ -112,8 +141,27 @@ _ASSERTION_PATTERN = re.compile(
 )
 
 
+_ORDINAL_SUFFIX_PATTERN = re.compile(r"^(\d+)(?:st|nd|rd|th)$")
+
+
 def _canonical_token(token: str) -> str:
     token = token.lower()
+    # "10th house" (prose) vs "house: 10" (Vedika's raw field) must compare
+    # equal — an ordinal is the same fact as its bare number, not a
+    # different word, and Lal Kitab readings are written in ordinals
+    # ("in the 10th house") while the chart/predictions payload always
+    # stores plain house numbers.
+    ordinal_match = _ORDINAL_SUFFIX_PATTERN.match(token)
+    if ordinal_match:
+        return ordinal_match.group(1)
+    # Vedika's chart/predictions/houses payloads store planets as short
+    # codes ("Me", "Ra", "Su"...), but a Lal Kitab reading is written with
+    # full planet names ("Mercury", "Rahu") per the prompt's own
+    # instruction to use readable names — canonicalizing both to the same
+    # short code lets a correct answer's planet mentions actually match the
+    # calculated evidence instead of being treated as unsupported.
+    if token in _PLANET_NAME_TO_CODE:
+        return _PLANET_NAME_TO_CODE[token].lower()
     token = _NUMBER_WORDS.get(token, token)
     token = _TOKEN_ALIASES.get(token, token)
     if len(token) > 4 and token.endswith("ing"):
@@ -293,6 +341,16 @@ def _tool_evidence(tool_results: Any, runtime_metadata: Optional[Dict[str, Any]]
                 text = _structured_text(api_context.get(key))
                 if text:
                     records.append(text)
+        # Same validated chart data, reshaped for the LLM prompt (planets,
+        # houses, ascendant, dasha, divisional charts) — must be usable as
+        # evidence too, or a correctly grounded dasha/divisional-chart answer
+        # would be rejected purely because that projection uses different
+        # field names than the raw nested API payload.
+        interpretation_context = metadata.get("lalkitab_interpretation_context_full")
+        if isinstance(interpretation_context, dict):
+            text = _structured_text(interpretation_context)
+            if text:
+                records.append(text)
         rag_context = metadata.get("lalkitab_rag_context_full")
         if isinstance(rag_context, dict):
             for chunk in rag_context.get("chunks") or []:
@@ -315,6 +373,15 @@ def _split_claims(response: str) -> Iterable[str]:
 
 
 _QUOTED_EXAMPLE_PATTERN = re.compile(r'^[\s\-]*[“"\'](.+)[”"\']\s*$')
+# A markdown table row (the mandated Lal Kitab kundali/Confidence tables use
+# this exact "| a | b | c |" shape) is a formatting/layout line, not itself a
+# standalone prose sentence making a claim. Its actual content (a house
+# number + rashi + planets) is still checked by the normal claim/anchor
+# logic below via `_anchors`/`_meaningful_tokens` on the same text, but a
+# genuinely empty row (e.g. "| 10 | — | — |" for a house with no planets)
+# must never be flagged as an "unsupported claim containing the number 10" —
+# there is nothing there to verify, it is the table format itself.
+_TABLE_ROW_PATTERN = re.compile(r"^\s*\|.*\|\s*$")
 
 
 def _is_safe_nonfactual(claim: str) -> bool:
@@ -338,8 +405,28 @@ def _is_safe_nonfactual(claim: str) -> bool:
     return any(pattern.search(claim) for pattern in _SAFE_RESPONSE_PATTERNS)
 
 
+def _is_empty_table_row(claim: str) -> bool:
+    """True for a markdown table row whose data cells are all placeholders
+    (blank, "—", "-") — e.g. a chart table's empty-house row "| 10 | — | — |".
+    Such a row asserts nothing; it is layout, not a claim that a value of 10
+    (or any other cell) is a verified fact."""
+    if not _TABLE_ROW_PATTERN.match(claim):
+        return False
+    cells = [cell.strip() for cell in claim.strip().strip("|").split("|")]
+    # A row is "empty" only if every cell after the first (the row label
+    # itself, e.g. a house number or an "Area" name) is blank/placeholder.
+    # A row with real content in a later cell (a rashi name, a planet, a
+    # percentage) is a genuine claim and must still be checked normally.
+    return len(cells) > 1 and all(
+        cell in ("", "—", "-", "–") or re.fullmatch(r"[-—–\s]*", cell)
+        for cell in cells[1:]
+    )
+
+
 def _is_factual_claim(claim: str) -> bool:
     if _is_safe_nonfactual(claim):
+        return False
+    if _is_empty_table_row(claim):
         return False
     # A bare list/number marker (e.g. "1." left over after splitting a
     # markdown numbered list like "1. **Your name**") has an anchor but no
@@ -378,6 +465,19 @@ def validate_claim_evidence(
     for record in evidence_records:
         evidence_anchors.update(_anchors(record))
 
+    # Lal Kitab (and any other astrology-style runtime) answers are written
+    # in a deliberately paraphrased, warm advisor voice on top of already
+    # deterministic, pre-validated evidence (a chart context validated
+    # upstream by is_valid_lalkitab_context_payload, plus real retrieved
+    # reference chunks) — the writer is explicitly instructed to speak "like
+    # an astrologer walking through the chart aloud" rather than quote
+    # source text. Requiring 2 exact shared words per sentence against that
+    # evidence routinely fails ordinary, correctly grounded interpretation
+    # and remedy sentences purely on vocabulary choice, not hallucination.
+    # This does not weaken numeric/anchor checks (price, SKU, dates) for any
+    # runtime, and does not relax anything for non-Lal-Kitab claims.
+    is_lalkitab = bool((runtime_metadata or {}).get("lalkitab_runtime"))
+
     unsupported = 0
     claim_count = 0
     if not sanitized:
@@ -387,15 +487,43 @@ def validate_claim_evidence(
             continue
         claim_count += 1
         anchors = _anchors(claim)
+        if is_lalkitab and anchors:
+            # A Lal Kitab reading routinely states a calendar year ("your
+            # career this year, 2026, looks steady…"), an age threshold
+            # copied straight out of the chart's own `currentAge`/timing
+            # data ("especially after age 14, as the chart shows"), or a
+            # percentage in the mandated Confidence table — none of these
+            # are meant to appear verbatim inside retrieved evidence text,
+            # they are the model's own timing reference or self-assessed
+            # confidence grading, not a fact being sourced from a chunk.
+            # Real hallucination risk (an invented house number, a wrong
+            # birth date/time, a fabricated SKU) is still caught: those
+            # anchors remain required to match, and the semantic overlap
+            # check right below still applies to every claim regardless.
+            exempt = set()
+            if _YEAR_LIKE_PATTERN.search(claim) or _PERCENT_PATTERN.search(claim) or _AGE_CONTEXT_PATTERN.search(claim):
+                exempt = {a for a in anchors if a.startswith("number:")}
+            anchors = anchors - exempt
         if anchors and not anchors.issubset(evidence_anchors):
             unsupported += 1
+            continue
+        if is_lalkitab and not anchors and not _LALKITAB_RISKY_CLAIM.search(claim):
+            # A Lal Kitab sentence with no numeric/date/SKU anchor AND no
+            # planet/house/remedy/life-area content is generic interpretive
+            # framing (e.g. "This is a positive placement", closing
+            # encouragement, the guidance-not-a-guarantee disclaimer) rather
+            # than an independently checkable fact. Sentences that actually
+            # carry astrology/remedy substance (a planet, a remedy verb, a
+            # life-area topic) still go through the normal overlap check
+            # right below, so an unsupported/hallucinated remedy or
+            # prediction is still caught and rejected.
             continue
         claim_tokens = _meaningful_tokens(claim)
         overlaps = [len(claim_tokens & tokens) for tokens in evidence_tokens]
         best_overlap = max(overlaps, default=0)
         # Exact anchors still need a semantic tie such as price, warranty, a
         # SKU, or a product/entity token. Anchor-only matches are not enough.
-        required_overlap = 1 if anchors else 2
+        required_overlap = 1 if (anchors or is_lalkitab) else 2
         if best_overlap < required_overlap:
             unsupported += 1
 

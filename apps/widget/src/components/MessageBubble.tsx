@@ -33,6 +33,10 @@ interface MessageBubbleProps {
   onInquirySuccess?: (message: string) => void;
   /** Called when the inline form is skipped/closed */
   onInquirySkip?: () => void;
+  /** When a Lal Kitab kundali chart is already shown in a dedicated side
+   * panel (see ChatWindow's `sideChart` slot), the same chart must not also
+   * be re-rendered inline inside each chat reply — one visual chart, not two. */
+  hideKundaliChart?: boolean;
 }
 
 // Initialize markdown-it instance
@@ -186,6 +190,7 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
   conversationId,
   onInquirySuccess,
   onInquirySkip,
+  hideKundaliChart = false,
 }) => {
   const isUser = message.role === 'user';
 
@@ -326,8 +331,10 @@ const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
           : { background: assistantMsgBg, color: assistantMsgColor }
         }
       >
-        {/* Lal Kitab kundali — visual chart artifact, always ahead of the reading */}
-        {!isUser && kundaliChart && <KundaliChart data={kundaliChart} />}
+        {/* Lal Kitab kundali — visual chart artifact, ahead of the reading.
+            Skipped when the same chart is already shown in the dedicated
+            side panel (ChatWindow's sideChart slot) so it isn't duplicated. */}
+        {!isUser && !hideKundaliChart && kundaliChart && <KundaliChart data={kundaliChart} />}
 
         {isUser ? (
           <p className="message-text">{message.content}</p>

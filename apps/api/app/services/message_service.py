@@ -60,6 +60,15 @@ from .lalkitab_runtime import (
     extract_kundali_chart_summary,
     is_lalkitab_agent,
     is_valid_lalkitab_context_payload,
+    message_contains_birth_details,
+    message_requires_lalkitab_api,
+)
+from .lalkitab_interpretation import (
+    build_lalkitab_interpretation_context,
+    is_lalkitab_astrology_intent_message,
+    is_lalkitab_meta_or_greeting_message,
+    is_lalkitab_probe_forced_by_existing_chart,
+    strip_unchanged_birth_fields,
 )
 from .conversation_policy import (
     activity_stream_response_kwargs,
@@ -832,6 +841,34 @@ class MessageService:
 
         return self._adapt_turn_plan_for_lalkitab(turn_plan), profile
 
+    def _lalkitab_probe_message(self, message: str, cached_chart_context: Any = None) -> str:
+        """Text handed to build_lalkitab_runtime_context for its own
+        keyword-based intent detection only (never used for the actual
+        answer, endpoint payloads, or anything shown to the user).
+
+        lalkitab_runtime.py's astrology-intent keyword list is kept
+        unchanged there deliberately, but any fixed keyword list is
+        inherently incomplete against natural phrasing ("dasha", "married"
+        vs "marriage", "job" vs "career"...). A message that keyword list
+        doesn't recognize is treated as not handled and falls through to
+        the generic Orchestrator, which calls raw Vedika tools directly and
+        skips the safe chart-first ordering/caching/RAG steps that runtime
+        provides — this is what caused fewer/incorrect steps to run for
+        some questions. Once a validated chart already exists for this
+        conversation and the message isn't a meta/greeting question, it
+        should be routed to the dedicated runtime regardless of vocabulary;
+        appending a recognized hint only in that gap fixes the routing
+        without touching lalkitab_runtime.py or changing what the user
+        actually asked.
+        """
+        if message_requires_lalkitab_api(message) or message_contains_birth_details(message):
+            return message
+        if is_lalkitab_astrology_intent_message(message) or is_lalkitab_probe_forced_by_existing_chart(
+            message, cached_chart_context,
+        ):
+            return f"{message} (lal kitab chart prediction)"
+        return message
+
     def _adapt_turn_plan_for_lalkitab(self, turn_plan: AgentTurnPlan) -> AgentTurnPlan:
         """Keep Lal Kitab turns on the chart-first runtime.
 
@@ -1345,6 +1382,14 @@ Updated memory:"""
             "   House | Rashi | Planets, listing all 12 houses in order, built ONLY from the\n"
             "   calculated chart context. Write \"—\" for empty houses. Never guess a placement."
         )
+        # A clean, explicit projection of the SAME validated chart_context
+        # (planets, houses, ascendant, dasha, divisional charts) the visual
+        # kundali chart is built from — see lalkitab_interpretation.py. This
+        # is not a second calculation path; it only reshapes data already
+        # calculated once by the Vedika connector in lalkitab_runtime.py so
+        # the LLM can look up an answer directly instead of re-deriving it
+        # from the raw nested payload.
+        interpretation_context = build_lalkitab_interpretation_context(api_context)
         prompt = f"""
 {self.system_prompt}
 
@@ -1353,11 +1398,20 @@ warm, seasoned Lal Kitab astrologer sitting across the table — human, direct, 
 affectionate ("beta", "child"), never clinical or system-like.
 
 Rules:
-- Use the calculated context internally for chart/calculation facts.
+- The "Chart Interpretation Context" below is the SAME calculated chart already
+  validated for this user — planets, houses, ascendant, dasha, and divisional charts
+  are all read directly from it. If the value the user asked about (Moon's house,
+  current dasha, a planet's sign, career/health/marriage-relevant houses, etc.) is
+  present there, answer it directly and confidently. Do not say you lack verified
+  information when the requested value is present in that context.
+- Never invent a placement, house, dasha period, remedy, prediction, totke, lucky
+  factor, or divisional-chart value that is not present in the calculated context.
+  If a specific requested value is genuinely absent from it (e.g. no dasha data was
+  returned), say plainly that it was not part of the calculated data, rather than
+  guessing — but never claim "no verified information" about the chart as a whole
+  when other parts of it are available.
 - Use the knowledge context internally for interpretation policy, tone, explanations, FAQs, and Lal Kitab reference context.
 {confirmation_rule}
-- Never invent chart placements, debts, remedies, predictions, totke, lucky factors, houses, or varshphal data.
-- If calculated context is incomplete, ask for the missing detail or say that you cannot verify that part.
 - Speak like a human advisor helping the user, not like a system explaining its architecture.
 {source_rule}
 - Do not claim certainty beyond the provided sources.
@@ -1375,7 +1429,7 @@ before any interpretation, prediction, or remedy):
    house governs and what the placement means), like an astrologer walking through
    the chart aloud.
 4. **The real matter** — directly address the user's question using the chart and any
-   prediction/houses/debts evidence. Name the strengths first, then the weak spot,
+   prediction/houses/debts/dasha evidence. Name the strengths first, then the weak spot,
    plainly and kindly.
 5. **Lal Kitab remedies** — a short numbered list, only from remedy/totke evidence;
    practical conduct corrections, not just rituals.
@@ -1394,7 +1448,11 @@ User Query:
 Conversation (rolling memory + recent turns):
 {json.dumps(chat_history, default=str, indent=2)}
 
-Calculated API Context:
+Chart Interpretation Context (planets, houses, ascendant, dasha, divisional charts —
+derived from the same validated calculated chart used for the visual kundali diagram):
+{json.dumps(_sanitize_for_json(interpretation_context), default=str, indent=2)}
+
+Calculated API Context (raw):
 {json.dumps(_sanitize_for_json(api_context), default=str, indent=2)}
 
 Knowledge Context:
@@ -1420,6 +1478,13 @@ Answer the user directly.
                 "used_cached_context": bool(getattr(lalkitab_plan, "used_cached_context", False)),
                 "lalkitab_api_context_full": _sanitize_for_json(api_context),
                 "lalkitab_rag_context_full": _sanitize_for_json(rag_context),
+                # Same projection injected into the prompt above, kept here so
+                # the claim-evidence guard's evidence pool always matches
+                # exactly what the LLM was actually shown (dasha/divisional
+                # data lives in secondary_endpoint_results, already part of
+                # lalkitab_api_context_full, but this keeps the mapping
+                # explicit and stable if that raw shape ever changes).
+                "lalkitab_interpretation_context_full": _sanitize_for_json(interpretation_context),
                 "rag_context": {
                     "chunks_count": len(rag_context.get("chunks") or []),
                     "sources": rag_context.get("sources") or [],
@@ -2629,11 +2694,50 @@ Rules:
                     **lalkitab_pending,
                     **self._lalkitab_pending_from_policy(policy_state, turn_plan),
                 }
+                # The chart persisted by POST /lalkitab/profile already
+                # contains a validated api_context. Short-term memory only
+                # has it after the first assistant turn, so without this the
+                # first chat turn(s) after the form has no previous chart to
+                # reuse and recalculates from Vedika again — seed it here so
+                # the already-generated chart is reused from turn one.
+                if not lalkitab_pending.get("api_context") and isinstance(
+                    (confirmed_lalkitab_profile or {}).get("api_context"), dict
+                ):
+                    lalkitab_pending["api_context"] = confirmed_lalkitab_profile["api_context"]
+                # A confirmed birth profile is carried into every later turn
+                # (so follow-up astrology questions never repeat birth
+                # details), but a bare greeting or "what can you do"-style
+                # capability question must still get a normal conversational
+                # answer rather than being routed into chart synthesis just
+                # because a profile happens to be attached to the session.
+                lalkitab_birth_profile = (
+                    None
+                    if is_lalkitab_meta_or_greeting_message(runtime_message)
+                    else (lalkitab_profile or confirmed_lalkitab_profile)
+                )
+                # The confirmed profile's birth_date/time/place are carried
+                # forward on every turn by design (so follow-ups never need
+                # to repeat them) — but build_lalkitab_runtime_context reads
+                # their mere presence as "new birth details, recalculate."
+                # Strip whatever is unchanged from the already-cached chart
+                # so an ordinary follow-up question reuses that chart
+                # instead of re-querying Vedika (and hitting its rate limit)
+                # on every single turn.
+                lalkitab_birth_profile = strip_unchanged_birth_fields(
+                    lalkitab_birth_profile,
+                    lalkitab_pending.get("normalized_birth_input"),
+                )
                 lalkitab_plan = await build_lalkitab_runtime_context(
                     self.agent_config or {},
-                    runtime_message,
+                    # Intent-detection only (see _lalkitab_probe_message) —
+                    # the real, unmodified runtime_message is still used
+                    # everywhere else below for the actual answer.
+                    self._lalkitab_probe_message(
+                        runtime_message,
+                        (lalkitab_pending.get("api_context") or {}).get("chart_context"),
+                    ),
                     pending_state=lalkitab_pending,
-                    birth_profile=lalkitab_profile or confirmed_lalkitab_profile,
+                    birth_profile=lalkitab_birth_profile,
                 )
 
             if lalkitab_plan.handled and (
@@ -3260,11 +3364,47 @@ Rules:
                     **lalkitab_pending,
                     **self._lalkitab_pending_from_policy(policy_state, turn_plan),
                 }
+                # The chart persisted by POST /lalkitab/profile already
+                # contains a validated api_context. Short-term memory only
+                # has it after the first assistant turn, so without this the
+                # first chat turn(s) after the form has no previous chart to
+                # reuse and recalculates from Vedika again — seed it here so
+                # the already-generated chart is reused from turn one.
+                if not lalkitab_pending.get("api_context") and isinstance(
+                    (confirmed_lalkitab_profile or {}).get("api_context"), dict
+                ):
+                    lalkitab_pending["api_context"] = confirmed_lalkitab_profile["api_context"]
+                # A confirmed birth profile is carried into every later turn
+                # (so follow-up astrology questions never repeat birth
+                # details), but a bare greeting or "what can you do"-style
+                # capability question must still get a normal conversational
+                # answer rather than being routed into chart synthesis just
+                # because a profile happens to be attached to the session.
+                lalkitab_birth_profile = (
+                    None
+                    if is_lalkitab_meta_or_greeting_message(runtime_message)
+                    else (lalkitab_profile or confirmed_lalkitab_profile)
+                )
+                # See the matching comment in the sync send_message path:
+                # strip birth_date/time/place that merely restate the
+                # already-cached chart's own values, so an ordinary
+                # follow-up reuses that chart instead of re-querying Vedika
+                # (and hitting its rate limit) on every single turn.
+                lalkitab_birth_profile = strip_unchanged_birth_fields(
+                    lalkitab_birth_profile,
+                    lalkitab_pending.get("normalized_birth_input"),
+                )
                 lalkitab_plan = await build_lalkitab_runtime_context(
                     self.agent_config or {},
-                    runtime_message,
+                    # Intent-detection only (see _lalkitab_probe_message) —
+                    # the real, unmodified runtime_message is still used
+                    # everywhere else below for the actual answer.
+                    self._lalkitab_probe_message(
+                        runtime_message,
+                        (lalkitab_pending.get("api_context") or {}).get("chart_context"),
+                    ),
                     pending_state=lalkitab_pending,
-                    birth_profile=lalkitab_profile or confirmed_lalkitab_profile,
+                    birth_profile=lalkitab_birth_profile,
                 )
 
             # Surface real runtime activity (geocoding, connector calls) as it happens.

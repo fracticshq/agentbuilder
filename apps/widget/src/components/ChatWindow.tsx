@@ -38,6 +38,16 @@ interface ChatWindowProps {
    * (e.g. the Lal Kitab kundali chart) so chart and chat share one panel
    * instead of being separate screens. */
   sideChart?: React.ReactNode;
+  /** Fallback greeting title used only when the brand has no hero_title
+   * configured of its own — lets a specific flow (e.g. Lal Kitab) show a
+   * good default greeting without changing behavior for any other brand,
+   * which keeps using its own configured/default hero text untouched. */
+  defaultHeroTitle?: string;
+  /** Fallback greeting subtitle, same rules as defaultHeroTitle. */
+  defaultHeroSubtitle?: string;
+  /** Fallback clickable suggestion chips shown under the greeting, used
+   * only when the brand has no suggestion_chips of its own configured. */
+  defaultSuggestionChips?: string[];
 }
 
 // ── Icon components ────────────────────────────────────────────
@@ -166,6 +176,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   conversationId,
   onSendMessageWithReset,
   sideChart,
+  defaultHeroTitle,
+  defaultHeroSubtitle,
+  defaultSuggestionChips,
 }) => {
   const { brandTheme, addMessage, removeMessage } = useWidgetStore();
   const [inputValue, setInputValue] = React.useState('');
@@ -421,12 +434,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               )}
             </div>
             <div className="chat-hero-title" style={{ color: titleColor }}>
-              {brandTheme?.heroTitle ?? 'NOVA Preview'}
+              {brandTheme?.heroTitle ?? defaultHeroTitle ?? 'NOVA Preview'}
             </div>
             {hasCycling ? (
               <>
                 <div className="chat-hero-subtitle" style={{ color: subtitleColor }}>
-                  {brandTheme?.heroSubtitle ?? 'Ask me anything about'}
+                  {brandTheme?.heroSubtitle ?? defaultHeroSubtitle ?? 'Ask me anything about'}
                 </div>
                 <div className="chat-hero-cycling-row">
                   <span
@@ -445,16 +458,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             ) : (
               <div className="chat-hero-subtitle" style={{ color: subtitleColor }}>
                 {unavailableMessage || (isAgentConfigured
-                  ? (brandTheme?.heroSubtitle ?? 'Ask me anything')
+                  ? (brandTheme?.heroSubtitle ?? defaultHeroSubtitle ?? 'Ask me anything')
                   : 'Add ?agent_id=your-agent-id&open=1 to activate a specific agent.')}
               </div>
             )}
           </div>
 
           <div className="chat-bottom">
-            {brandTheme && brandTheme.suggestionChips.length > 0 && (
+            {(brandTheme?.suggestionChips?.length ? brandTheme.suggestionChips : defaultSuggestionChips ?? []).length > 0 && (
               <div className="chat-chips-row">
-                {brandTheme.suggestionChips.map(chip => (
+                {(brandTheme?.suggestionChips?.length ? brandTheme.suggestionChips : defaultSuggestionChips ?? []).map(chip => (
                   <button
                     key={chip}
                     className="chat-chip"
@@ -559,6 +572,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     onOpenInquiryForm={showInquiry ? handleOpenInquiryForm : undefined}
                     onInquirySuccess={handleInquirySuccess}
                     onInquirySkip={handleInquirySkip}
+                    hideKundaliChart={Boolean(sideChart)}
                   />
                   {showPlaceChips && (
                     <div className="activity-disambiguation" style={{ margin: '2px 16px 8px' }}>

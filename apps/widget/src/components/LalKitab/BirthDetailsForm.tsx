@@ -102,20 +102,56 @@ export const BirthDetailsForm: React.FC<BirthDetailsFormProps> = ({
       });
 
       const data = await res.json();
+      // A genuine failure (chart/connector unavailable, invalid session,
+      // etc.) now comes back as a real non-200 status with FastAPI's
+      // HTTPException wrapping the payload under `detail` — the awaiting
+      // place-choice / missing-input flow states are still normal 200s with
+      // the payload at the top level, so both shapes are checked here.
+      const payload = !res.ok && data && typeof data.detail === 'object' && data.detail !== null
+        ? data.detail
+        : data;
 
-      if (!res.ok || !data.success) {
-        if (data.awaiting_place_choice && Array.isArray(data.place_candidates)) {
-          setPlaceCandidates(data.place_candidates);
-          setError(data.message || 'Please confirm which place you were born in.');
+      if (!res.ok || !payload.success) {
+        if (payload.awaiting_place_choice && Array.isArray(payload.place_candidates)) {
+          setPlaceCandidates(payload.place_candidates);
+          setError(payload.message || 'Please confirm which place you were born in.');
         } else {
-          setError(data.message || data.detail || 'Could not generate your horoscope. Please check your details and try again.');
+          // The real upstream status (e.g. Vedika returning 429) is a safe,
+          // non-sensitive integer the server now exposes deliberately — show
+          // it inline so the actual cause (rate limited vs a genuine outage)
+          // is visible without opening dev tools or server logs.
+          const upstreamHint = payload.upstream_status_code === 429
+            ? ' (the astrology provider is rate-limited right now — please wait a bit and try again)'
+            : payload.upstream_status_code
+              ? ` (astrology provider returned HTTP ${payload.upstream_status_code})`
+              : '';
+          setError(
+            (payload.message || payload.detail || 'Could not generate your horoscope. Please check your details and try again.')
+            + upstreamHint,
+          );
+        }
+        if (!res.ok) {
+          // Visible in the console for debugging, without ever logging a
+          // provider error, API key, or other connector secret — only the
+          // safe error_code + upstream_status_code + request_id the server
+          // intentionally exposes.
+          console.error(
+            '[LalKitab] Birth profile request failed',
+            {
+              status: res.status,
+              errorCode: payload.error_code,
+              upstreamStatusCode: payload.upstream_status_code,
+              requestId: payload.request_id,
+            },
+          );
         }
         setSubmitting(false);
         return;
       }
 
       onGenerated({ kundaliChart: data.kundali_chart, apiContext: data.api_context });
-    } catch {
+    } catch (err) {
+      console.error('[LalKitab] Birth profile network error', err);
       setError('Network error. Please check your connection and try again.');
       setSubmitting(false);
     }

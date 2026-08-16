@@ -642,6 +642,18 @@ function App({ config }: AppProps) {
                 ? <LalKitabSideChart kundaliChart={lalkitabChart as never} reportText={lalkitabReportText} />
                 : undefined
             }
+            // Lal Kitab-only greeting defaults, used only when this brand
+            // hasn't configured its own hero/chips text (see ChatWindow's
+            // fallback order: brandTheme value first, then these defaults).
+            // Every other agent/brand is completely unaffected.
+            defaultHeroTitle={lalkitabFormRequired ? "Hi, I'm your Lal Kitab guide" : undefined}
+            defaultHeroSubtitle={lalkitabFormRequired ? 'How can I help you today?' : undefined}
+            defaultSuggestionChips={lalkitabFormRequired ? [
+              'Where is my Moon?',
+              'How is my career?',
+              'Tell me about my life',
+              'What is my current dasha?',
+            ] : undefined}
           />
         </div>
       )}
