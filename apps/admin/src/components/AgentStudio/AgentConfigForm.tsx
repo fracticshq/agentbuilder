@@ -785,6 +785,52 @@ export default function AgentConfigForm({
           </Field>
         </div>
       </div>
+
+      {data.inquiry_enabled && (
+        <div className="rounded-md border border-gray-200 bg-white p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">Lead Capture Settings</h3>
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                Configure where captured inquiries are sent via email.
+              </p>
+            </div>
+            <span className="shrink-0 rounded bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
+              Active
+            </span>
+          </div>
+          <div className="mt-3 space-y-3">
+            <Field
+              label="Recipient email"
+              hint="Where completed inquiries are sent. Requires SMTP_* env vars to be configured on the API server."
+            >
+              <input
+                type="email"
+                value={data.inquiry_recipient_email || ''}
+                onChange={(event) => onChange('inquiry_recipient_email', event.target.value)}
+                className={inputClass}
+                placeholder="owner@yourbrand.com"
+              />
+            </Field>
+
+            <Switch
+              checked={data.inquiry_confirm_before_send !== false}
+              onChange={() => onChange('inquiry_confirm_before_send', data.inquiry_confirm_before_send === false)}
+              label="Confirm before sending"
+              description="Agent shows a summary of the captured details and waits for explicit confirmation before submitting."
+            />
+
+            <Field label="Success message" hint="Shown to the user after the inquiry is sent.">
+              <input
+                value={data.inquiry_success_message || ''}
+                onChange={(event) => onChange('inquiry_success_message', event.target.value)}
+                className={inputClass}
+                placeholder="Your inquiry has been sent to our team. They'll reach out shortly."
+              />
+            </Field>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -3,6 +3,7 @@ import type { Message, BrandThemeTokens, ActivityState } from '../types';
 import { MessageBubble } from './MessageBubble';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { ActivityTimeline } from './ActivityTimeline';
+import { InquiryFormModal } from './InquiryFormModal';
 import { EMPTY_ACTIVITY } from '../utils/activityTimeline';
 import { useWidgetStore } from '../stores/widgetStore';
 import { NOVA_LOGO } from '../utils/brandTheme';
@@ -26,10 +27,27 @@ interface ChatWindowProps {
   onFeedback?: (id: string, feedback: 'up' | 'down' | null) => void;
   showSources?: boolean;
   showProductCards?: boolean;
+  showInquiry?: boolean;
   isAgentConfigured?: boolean;
   unavailableMessage?: string;
   apiUrl?: string;
   agentId?: string | null;
+  conversationId?: string | null;
+  onSendMessageWithReset?: (text: string) => void;
+  /** Optional content rendered as a left-hand column alongside the chat
+   * (e.g. the Lal Kitab kundali chart) so chart and chat share one panel
+   * instead of being separate screens. */
+  sideChart?: React.ReactNode;
+  /** Fallback greeting title used only when the brand has no hero_title
+   * configured of its own — lets a specific flow (e.g. Lal Kitab) show a
+   * good default greeting without changing behavior for any other brand,
+   * which keeps using its own configured/default hero text untouched. */
+  defaultHeroTitle?: string;
+  /** Fallback greeting subtitle, same rules as defaultHeroTitle. */
+  defaultHeroSubtitle?: string;
+  /** Fallback clickable suggestion chips shown under the greeting, used
+   * only when the brand has no suggestion_chips of its own configured. */
+  defaultSuggestionChips?: string[];
 }
 
 // ── Icon components ────────────────────────────────────────────
@@ -150,21 +168,110 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   onFeedback,
   showSources = false,
   showProductCards = true,
+  showInquiry = false,
   isAgentConfigured = true,
   unavailableMessage,
   apiUrl,
   agentId,
+  conversationId,
+  onSendMessageWithReset,
+  sideChart,
+  defaultHeroTitle,
+  defaultHeroSubtitle,
+  defaultSuggestionChips,
 }) => {
-  const { brandTheme } = useWidgetStore();
+  const { brandTheme, addMessage, removeMessage } = useWidgetStore();
   const [inputValue, setInputValue] = React.useState('');
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
 
+  // ── Inline inquiry form ───────────────────────────────────────────
+  const inlineFormMsgId = React.useRef<string | null>(null);
+
+  const showInquiryFormCard = React.useCallback((productName: string, productSku?: string) => {
+    if (inlineFormMsgId.current) removeMessage(inlineFormMsgId.current);
+    const id = `inq_form_${Date.now()}`;
+    inlineFormMsgId.current = id;
+    addMessage({
+      id,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date(),
+      metadata: { inline_inquiry_form: true, product_name: productName, product_sku: productSku || '' },
+    });
+  }, [addMessage, removeMessage]);
+
+  // Product-card "Request a Quote" button: there's no existing chat message
+  // representing the click, so insert a synthetic user bubble first, then
+  // show the form after a short delay (bubble appears, then form).
+  const handleOpenInquiryForm = React.useCallback((productName: string, productSku?: string) => {
+    addMessage({
+      id: `inq_user_${Date.now()}`,
+      role: 'user',
+      content: `Request a quote for ${productName}`,
+      timestamp: new Date(),
+    });
+    setTimeout(() => showInquiryFormCard(productName, productSku), 600);
+  }, [addMessage, showInquiryFormCard]);
+
+  // API-triggered (typed message / LLM tool call) path: the user's own
+  // typed message is already visible in the chat, so do NOT insert another
+  // synthetic "Request a quote for..." bubble — just show the form directly
+  // under the assistant's "Opening the quote form..." acknowledgement.
+  const handleOpenInquiryFormFromApi = React.useCallback((productName: string, productSku?: string) => {
+    showInquiryFormCard(productName, productSku);
+  }, [showInquiryFormCard]);
+
+  const handleInquirySuccess = React.useCallback((message: string) => {
+    if (inlineFormMsgId.current) { removeMessage(inlineFormMsgId.current); inlineFormMsgId.current = null; }
+    if (onSendMessageWithReset) {
+      onSendMessageWithReset(message);
+    } else {
+      addMessage({
+        id: `inq_ok_${Date.now()}`,
+        role: 'assistant',
+        content: message,
+        timestamp: new Date(),
+        // Mark inquiry as submitted so _load_inquiry_pending_state clears the
+        // flow on the next user message, allowing normal product searches again.
+        metadata: { inquiry_pending: { submitted: true } },
+      });
+    }
+  }, [addMessage, removeMessage, onSendMessageWithReset]);
+
+  const handleInquirySkip = React.useCallback(() => {
+    if (inlineFormMsgId.current) { removeMessage(inlineFormMsgId.current); inlineFormMsgId.current = null; }
+    addMessage({ id: `inq_skip_${Date.now()}`, role: 'assistant', content: "No problem! Let me know if you need anything else.", timestamp: new Date() });
+  }, [addMessage, removeMessage]);
+
+  // Open form when API signals open_inquiry_form in metadata.
+  // The assistant message is added as an empty placeholder first (same id)
+  // and only gets its metadata (incl. open_inquiry_form) filled in later via
+  // updateMessage once the API responds — so this must re-check whenever the
+  // metadata flag itself changes, not just when a new message id appears.
+  const lastMsg = React.useMemo(() => messages[messages.length - 1], [messages]);
+  const lastMsgOpenInquiryFlag = lastMsg?.role === 'assistant'
+    ? Boolean((lastMsg.metadata as Record<string, unknown> | undefined)?.open_inquiry_form)
+    : false;
+  const handledInquiryFormMsgId = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!lastMsg || lastMsg.role !== 'assistant') return;
+    const meta = lastMsg.metadata as Record<string, unknown> | undefined;
+    if (meta?.open_inquiry_form && showInquiry && handledInquiryFormMsgId.current !== lastMsg.id) {
+      handledInquiryFormMsgId.current = lastMsg.id;
+      const pName = typeof meta.product_name === 'string' ? meta.product_name : '';
+      handleOpenInquiryFormFromApi(pName);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastMsg?.id, lastMsgOpenInquiryFlag]);
+
   const tk = brandTheme?.tokens;
-  const mode = brandTheme?.mode ?? 'dark';
+  // Default to the light cream palette (not dark) while brand theme is
+  // still loading, so there's no dark/green flash before tokens arrive —
+  // every brand should land on the same neutral light look by default.
+  const mode = brandTheme?.mode ?? 'light';
   const isLanding = messages.length === 0 && !isTyping;
 
   // Only show the thinking indicator while the assistant hasn't started streaming content yet
-  const lastMsg = messages[messages.length - 1];
   const showThinkingIndicator = isTyping && (!lastMsg || lastMsg.role !== 'assistant' || !lastMsg.content);
 
   const categories = brandTheme?.cyclingCategories ?? [];
@@ -232,9 +339,42 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   return (
     <div
-      className={`chat-panel ${isExpanded ? 'expanded' : ''} ${isMobile ? 'mobile' : ''}`}
-      style={{ background: panelBg }}
+      className={`chat-panel ${isExpanded ? 'expanded' : ''} ${isMobile ? 'mobile' : ''} ${sideChart ? 'with-side-chart' : ''}`}
+      style={{
+        background: panelBg,
+        // CSS Grid with two equal fr tracks gives a hard, deterministic
+        // 50/50 split that can't be squeezed by flex-shrink/content sizing
+        // the way flex-basis percentages can — the chart column and chat
+        // column always end up exactly half the panel width each.
+        display: sideChart ? 'grid' : 'flex',
+        gridTemplateColumns: sideChart ? '35% 65%' : undefined,
+        flexDirection: sideChart ? undefined : 'column',
+      }}
     >
+      {sideChart && (
+        <div
+          className="chat-side-chart-col"
+          style={{
+            minWidth: 0,
+            height: '100%',
+            overflowY: 'auto',
+            borderRight: `1px solid ${tk?.dividerColor ?? (mode === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)')}`,
+            padding: '16px',
+            boxSizing: 'border-box',
+            position: 'relative',
+            zIndex: 6,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+          }}
+        >
+          {sideChart}
+        </div>
+      )}
+      <div
+        className="chat-panel-main"
+        style={{ display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, height: '100%', position: 'relative', overflow: 'hidden', overflowY: 'auto' }}
+      >
       {/* Background orb */}
       <div className="chat-panel-orb" style={{ background: orbBg }} />
 
@@ -294,12 +434,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               )}
             </div>
             <div className="chat-hero-title" style={{ color: titleColor }}>
-              {brandTheme?.heroTitle ?? 'NOVA Preview'}
+              {brandTheme?.heroTitle ?? defaultHeroTitle ?? 'NOVA Preview'}
             </div>
             {hasCycling ? (
               <>
                 <div className="chat-hero-subtitle" style={{ color: subtitleColor }}>
-                  {brandTheme?.heroSubtitle ?? 'Ask me anything about'}
+                  {brandTheme?.heroSubtitle ?? defaultHeroSubtitle ?? 'Ask me anything about'}
                 </div>
                 <div className="chat-hero-cycling-row">
                   <span
@@ -318,16 +458,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             ) : (
               <div className="chat-hero-subtitle" style={{ color: subtitleColor }}>
                 {unavailableMessage || (isAgentConfigured
-                  ? (brandTheme?.heroSubtitle ?? 'Ask me anything')
+                  ? (brandTheme?.heroSubtitle ?? defaultHeroSubtitle ?? 'Ask me anything')
                   : 'Add ?agent_id=your-agent-id&open=1 to activate a specific agent.')}
               </div>
             )}
           </div>
 
           <div className="chat-bottom">
-            {brandTheme && brandTheme.suggestionChips.length > 0 && (
+            {(brandTheme?.suggestionChips?.length ? brandTheme.suggestionChips : defaultSuggestionChips ?? []).length > 0 && (
               <div className="chat-chips-row">
-                {brandTheme.suggestionChips.map(chip => (
+                {(brandTheme?.suggestionChips?.length ? brandTheme.suggestionChips : defaultSuggestionChips ?? []).map(chip => (
                   <button
                     key={chip}
                     className="chat-chip"
@@ -424,8 +564,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     onFeedback={onFeedback}
                     showSources={showSources}
                     showProductCards={showProductCards}
+                    showInquiry={showInquiry}
                     apiUrl={apiUrl}
                     agentId={agentId}
+                    conversationId={conversationId ?? undefined}
+                    onSendMessage={onSendMessage}
+                    onOpenInquiryForm={showInquiry ? handleOpenInquiryForm : undefined}
+                    onInquirySuccess={handleInquirySuccess}
+                    onInquirySkip={handleInquirySkip}
+                    hideKundaliChart={Boolean(sideChart)}
                   />
                   {showPlaceChips && (
                     <div className="activity-disambiguation" style={{ margin: '2px 16px 8px' }}>
@@ -482,6 +629,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           </div>
         </>
       )}
+      </div>
     </div>
   );
 };

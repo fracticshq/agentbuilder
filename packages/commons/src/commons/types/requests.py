@@ -26,6 +26,10 @@ class MessageRequest(BaseModel):
     page_context: Optional[PageContext] = None
     filters: Optional[Dict[str, Any]] = None
     stream: bool = False
+    # Set to True by the widget immediately after a V2 inquiry form submission
+    # so the backend skips _adapt_turn_plan_for_inquiry and treats the turn
+    # as a clean product-search / normal conversation turn.
+    inquiry_just_completed: bool = False
 
 
 class IngestionRequest(BaseModel):

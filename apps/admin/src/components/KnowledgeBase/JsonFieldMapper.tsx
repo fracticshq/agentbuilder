@@ -36,6 +36,10 @@ export default function JsonFieldMapper({
   const [mapping, setMapping] = useState<FieldMapping>({});
   const [previewData, setPreviewData] = useState<any[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
+  // Inquiry-based brands have no fixed catalog prices — customers must send an inquiry.
+  // When enabled, price/currency become skippable instead of hard-required.
+  const [inquiryBased, setInquiryBased] = useState(false);
+  const skippableWhenInquiryBased = ['price', 'currency'];
 
   // Required fields for each content type
   const requiredFields = contentType === 'product'
@@ -56,7 +60,8 @@ export default function JsonFieldMapper({
   const optionalFields = contentType === 'product'
     ? {
         image_url: { type: 'string', description: 'Product image URL' },
-        product_url: { type: 'string', description: 'Product page URL' },
+        product_url: { type: 'string', description: 'Official product page URL (title links here)' },
+        inquiry_url: { type: 'string', description: 'Inquiry/quote-request form URL — used by "Send Inquiry" button. Use Fixed Value for one shared form.' },
         in_stock: { type: 'boolean', description: 'Stock availability (true/false)' },
         features: { type: 'array', description: 'Array of feature strings' },
       }
@@ -109,7 +114,7 @@ export default function JsonFieldMapper({
         price: ['amount', 'cost', 'product_price', 'productPrice', 'retail_price', 'retailPrice', 'retail_price_cents'],
         currency: ['curr', 'currency_code', 'currencyCode', 'price_currency', 'priceCurrency'],
         category: ['cat', 'product_category', 'productCategory', 'product_type', 'productType', 'item_category', 'type'],
-        image_url: ['image', 'img', 'imageUrl', 'product_image', 'productImage', 'thumbnail'],
+        image_url: ['image', 'img', 'imageUrl', 'product_image', 'productImage', 'thumbnail', 'featured_media', 'featured_image', 'jetpack_featured_media_url'],
         product_url: ['url', 'link', 'productUrl', 'product_link'],
         in_stock: ['stock', 'inStock', 'stock_available', 'available', 'availability'],
         features: ['tags', 'attributes', 'specs', 'specifications'],
@@ -133,6 +138,82 @@ export default function JsonFieldMapper({
     setMapping(autoMapping);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jsonData]);
+
+  // Some JSON exports (notably WordPress/WooCommerce REST) store text fields as
+  // nested objects like { rendered: "...", raw: "..." } instead of plain strings,
+  // and numeric IDs (e.g. WooCommerce SKUs like 3269) instead of strings. Unwrap
+  // those automatically so mapped string fields don't end up as objects/numbers,
+  // which the backend schema rejects with a 422.
+  //
+  // WordPress REST API stores product images as a numeric `featured_media` ID
+  // rather than a URL. The actual URL lives in `_embedded['wp:featuredmedia'][0].source_url`
+  // (when the export uses ?_embed) or in `yoast_head_json.og_image[0].url`.
+  // `extractScalarValue` resolves the numeric ID to a URL automatically when
+  // either of those companion fields is present in the same row.
+  const resolveWordPressImageUrl = (rawValue: any, rowItem: any): string | null => {
+    // Try _embedded['wp:featuredmedia'][0].source_url
+    const embedded = rowItem?._embedded;
+    if (embedded && typeof embedded === 'object') {
+      const featuredMedia = embedded['wp:featuredmedia'];
+      if (Array.isArray(featuredMedia) && featuredMedia.length > 0) {
+        const url = featuredMedia[0]?.source_url || featuredMedia[0]?.guid?.rendered;
+        if (typeof url === 'string' && url.startsWith('http')) return url;
+      }
+    }
+    // Try yoast_head_json.og_image[0].url
+    const yoast = rowItem?.yoast_head_json;
+    if (yoast && typeof yoast === 'object') {
+      const ogImage = yoast.og_image;
+      if (Array.isArray(ogImage) && ogImage.length > 0) {
+        const url = ogImage[0]?.url;
+        if (typeof url === 'string' && url.startsWith('http')) return url;
+      }
+    }
+    // Try faux_featured_media_url, jetpack_featured_media_url (some WP setups)
+    const jpUrl = rowItem?.jetpack_featured_media_url;
+    if (typeof jpUrl === 'string' && jpUrl.startsWith('http')) return jpUrl;
+    return null;
+  };
+
+  const extractScalarValue = (field: string, rawValue: any, rowItem?: any): any => {
+    const allFields = { ...requiredFields, ...optionalFields };
+    const expectedType = (allFields as any)[field]?.type;
+
+    if (expectedType !== 'string' || rawValue === null || rawValue === undefined) {
+      return rawValue;
+    }
+
+    // WordPress `featured_media` is a numeric attachment ID — resolve to a URL.
+    if (field === 'image_url' && typeof rawValue === 'number') {
+      const resolved = rowItem ? resolveWordPressImageUrl(rawValue, rowItem) : null;
+      return resolved ?? String(rawValue); // fallback: keep ID as string (better than null)
+    }
+
+    if (typeof rawValue === 'number') {
+      return String(rawValue);
+    }
+
+    if (typeof rawValue === 'object' && !Array.isArray(rawValue)) {
+      // Common WordPress/WooCommerce shape: { rendered, raw }
+      if ('rendered' in rawValue) return rawValue.rendered;
+      if ('raw' in rawValue) return rawValue.raw;
+      if ('name' in rawValue) return rawValue.name;
+      if ('value' in rawValue) return rawValue.value;
+      // Fallback: stringify so it's at least a valid string, not an object
+      return JSON.stringify(rawValue);
+    }
+
+    if (Array.isArray(rawValue)) {
+      // e.g. category sometimes comes as [{name: "Faucets"}] or ["Faucets"]
+      const first = rawValue[0];
+      if (first && typeof first === 'object') {
+        return first.name || first.rendered || first.raw || JSON.stringify(first);
+      }
+      return first !== undefined ? String(first) : rawValue;
+    }
+
+    return rawValue;
+  };
 
   // Helper function to parse fixed values to correct types
   const parseFixedValue = (field: string, value: string): any => {
@@ -186,7 +267,7 @@ export default function JsonFieldMapper({
           if (mappingConfig.mode === 'json') {
             // Map from JSON field
             if (mappingConfig.value in item) {
-              newItem[reqField] = item[mappingConfig.value];
+              newItem[reqField] = extractScalarValue(reqField, item[mappingConfig.value], item);
             }
           } else if (mappingConfig.mode === 'fixed') {
             // Use fixed value for all items (with type parsing)
@@ -202,7 +283,7 @@ export default function JsonFieldMapper({
 
           if (mappingConfig.mode === 'json') {
             if (mappingConfig.value in item) {
-              newItem[optField] = item[mappingConfig.value];
+              newItem[optField] = extractScalarValue(optField, item[mappingConfig.value], item);
             }
           } else if (mappingConfig.mode === 'fixed') {
             newItem[optField] = parseFixedValue(optField, mappingConfig.value);
@@ -218,24 +299,31 @@ export default function JsonFieldMapper({
       setErrors([`Mapping error: ${error instanceof Error ? error.message : 'Unknown error'}`]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapping, jsonData]);
+  }, [mapping, jsonData, inquiryBased]);
 
   const validateMapping = (mappedData: any[]) => {
     const newErrors: string[] = [];
 
     // Check all required fields are mapped
     Object.keys(requiredFields).forEach(field => {
+      const isSkippable = inquiryBased && skippableWhenInquiryBased.includes(field);
       const config = mapping[field];
       if (!config || config.mode === 'empty') {
-        newErrors.push(`Required field "${field}" is not mapped`);
+        if (!isSkippable) {
+          newErrors.push(`Required field "${field}" is not mapped`);
+        }
       } else if (config.mode === 'fixed' && (!config.value || config.value.trim() === '')) {
-        newErrors.push(`Required field "${field}" has empty fixed value`);
+        if (!isSkippable) {
+          newErrors.push(`Required field "${field}" has empty fixed value`);
+        }
       }
     });
 
     // Validate first few items
     mappedData.slice(0, 10).forEach((item, idx) => {
       Object.keys(requiredFields).forEach(field => {
+        const isSkippable = inquiryBased && skippableWhenInquiryBased.includes(field);
+        if (isSkippable) return;
         if (!item[field] || item[field] === null || item[field] === '') {
           newErrors.push(`Item ${idx + 1}: Missing value for required field "${field}"`);
         }
@@ -259,7 +347,66 @@ export default function JsonFieldMapper({
     }));
   };
 
-  const handleConfirm = () => {
+  // Some WordPress REST exports only carry `_links['wp:featuredmedia'][0].href`
+  // (the media API endpoint URL) with no embedded data. Fetch each URL to get
+  // `source_url` and patch `image_url` in the already-mapped items before they
+  // are submitted. Requests are de-duplicated and run in parallel. Items without
+  // a numeric image_url (already resolved or not a WP export) are skipped.
+  const resolveMediaLinks = async (items: any[], rawItems: any[]): Promise<any[]> => {
+    // Build a map: numeric ID → media endpoint URL, from _links in the raw row
+    const idToHref = new Map<number, string>();
+    rawItems.forEach(raw => {
+      const mediaId = typeof raw?.featured_media === 'number' ? raw.featured_media : null;
+      if (!mediaId) return;
+      const href = raw?._links?.['wp:featuredmedia']?.[0]?.href;
+      if (href) idToHref.set(mediaId, href);
+    });
+
+    if (idToHref.size === 0) return items;
+
+    // Only process items whose image_url is still a bare numeric string (unresolved)
+    const unresolvedIds = new Set<number>();
+    items.forEach(item => {
+      const val = item?.image_url;
+      if (typeof val === 'string' && /^\d+$/.test(val)) {
+        const id = parseInt(val, 10);
+        if (idToHref.has(id)) unresolvedIds.add(id);
+      }
+    });
+
+    if (unresolvedIds.size === 0) return items;
+
+    // Fetch all media endpoints in parallel; silently ignore failures
+    const idToUrl = new Map<number, string>();
+    await Promise.allSettled(
+      Array.from(unresolvedIds).map(async (id) => {
+        const href = idToHref.get(id)!;
+        try {
+          const res = await fetch(href);
+          if (res.ok) {
+            const json = await res.json();
+            const url: string | undefined = json?.source_url || json?.guid?.rendered;
+            if (url && url.startsWith('http')) idToUrl.set(id, url);
+          }
+        } catch {
+          // Network error or CORS — leave field as-is; product uploads still succeed
+        }
+      })
+    );
+
+    if (idToUrl.size === 0) return items;
+
+    return items.map(item => {
+      const val = item?.image_url;
+      if (typeof val === 'string' && /^\d+$/.test(val)) {
+        const resolved = idToUrl.get(parseInt(val, 10));
+        if (resolved) return { ...item, image_url: resolved };
+      }
+      return item;
+    });
+  };
+
+  const handleConfirm = async () => {
     if (errors.length > 0) return;
 
     isDev && console.log('[JsonFieldMapper] handleConfirm - Starting mapping with config:', mapping);
@@ -274,7 +421,7 @@ export default function JsonFieldMapper({
 
         if (config.mode === 'json') {
           if (config.value in item) {
-            newItem[field] = item[config.value];
+            newItem[field] = extractScalarValue(field, item[config.value], item);
           }
         } else if (config.mode === 'fixed') {
           // Parse fixed values to correct types using helper
@@ -300,7 +447,8 @@ export default function JsonFieldMapper({
     isDev && console.log('[JsonFieldMapper] Total mapped items:', mappedData.length);
     isDev && console.log('[JsonFieldMapper] Sample mapped data:', mappedData.slice(0, 2));
 
-    onMappingComplete(mappedData);
+    const resolvedData = await resolveMediaLinks(mappedData, jsonData);
+    onMappingComplete(resolvedData);
   };
 
   const getFieldColor = (field: string) => {
@@ -312,6 +460,8 @@ export default function JsonFieldMapper({
   };
 
   const renderFieldMapping = (fieldName: string, fieldInfo: any, isRequired: boolean) => {
+    const skippable = inquiryBased && skippableWhenInquiryBased.includes(fieldName);
+    const showSkipButton = !isRequired || skippable;
     const config = mapping[fieldName] || { mode: 'empty', value: '' };
 
     return (
@@ -320,7 +470,8 @@ export default function JsonFieldMapper({
           {/* Required Field */}
           <div className="col-span-5">
             <label className="block text-sm font-medium text-gray-900 mb-1">
-              {fieldName} {isRequired && <span className="text-red-500">*</span>}
+              {fieldName} {isRequired && !skippable && <span className="text-red-500">*</span>}
+              {skippable && <span className="ml-2 text-xs font-normal text-amber-600">(inquiry-based — optional)</span>}
             </label>
             <p className="text-xs text-gray-600">{fieldInfo.description}</p>
             <p className="text-xs text-gray-500 mt-1">Type: {fieldInfo.type}</p>
@@ -355,7 +506,7 @@ export default function JsonFieldMapper({
               >
                 Use Fixed Value
               </button>
-              {!isRequired && (
+              {showSkipButton && (
                 <button
                   onClick={() => handleFieldMapping(fieldName, 'empty', '')}
                   className={`px-3 py-1 text-xs rounded ${
@@ -410,7 +561,7 @@ export default function JsonFieldMapper({
               </>
             )}
 
-            {config.mode === 'empty' && !isRequired && (
+            {config.mode === 'empty' && showSkipButton && (
               <p className="text-xs text-gray-500 italic">This field will be skipped</p>
             )}
           </div>
@@ -429,6 +580,36 @@ export default function JsonFieldMapper({
           Your JSON has different field names. Choose how to map each field below.
         </p>
       </div>
+
+      {contentType === 'product' && (
+        <label className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={inquiryBased}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              setInquiryBased(checked);
+              if (checked) {
+                setMapping(prev => ({
+                  ...prev,
+                  price: { mode: 'empty', value: '' },
+                  currency: { mode: 'empty', value: '' },
+                }));
+              }
+            }}
+            className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+          <span>
+            <span className="block text-sm font-medium text-amber-900">
+              This is an inquiry-based catalog (no fixed prices)
+            </span>
+            <span className="block text-xs text-amber-800 mt-1">
+              Skip mapping price and currency. Products will show "Send Inquiry" and the agent
+              will be told to direct customers to send an inquiry for pricing instead of stating a price.
+            </span>
+          </span>
+        </label>
+      )}
 
       {/* Detected Fields Summary */}
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">

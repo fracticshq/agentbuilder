@@ -166,6 +166,19 @@ def _is_product_query(query: str) -> bool:
     ))
 
 
+def _open_inquiry_form_result(results: Dict[Any, ToolResult]) -> Optional[Dict[str, Any]]:
+    """If a step's tool result signals open_inquiry_form, return its payload
+    so the caller can short-circuit straight to the widget-facing answer
+    instead of running it through generic synthesis + claim-evidence critic
+    validation (which has no notion of this tool's contract and would reject
+    the plain acknowledgement as an "unsupported claim")."""
+    for tool_result in results.values():
+        metadata = getattr(tool_result, "metadata", {}) or {}
+        if getattr(tool_result, "success", False) and isinstance(metadata, dict) and metadata.get("open_inquiry_form"):
+            return metadata
+    return None
+
+
 def _dedupe_products(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen: set[str] = set()
     unique: List[Dict[str, Any]] = []
@@ -373,6 +386,34 @@ Output JSON Format:
                         "step_id": step.id,
                         "tool_name": step.tool_name,
                     })
+
+        open_inquiry_form_payload = _open_inquiry_form_result(results)
+        if open_inquiry_form_payload:
+            product_name = str(open_inquiry_form_payload.get("product_name") or "").strip()
+            answer = (
+                f"Opening the quote form for **{product_name}** — please fill in your details."
+                if product_name
+                else "Opening the quote form — please fill in your details."
+            )
+            return AgentResult(
+                answer=answer,
+                metadata={
+                    "plan": plan.model_dump(),
+                    "steps_executed": len(results),
+                    "validation_passed": True,
+                    "validation_confidence": 1.0,
+                    "tool_results": results,
+                    "validated_product_ids": [],
+                    "open_inquiry_form": True,
+                    "product_name": product_name,
+                    # Fixed acknowledgement template, not a generated factual
+                    # claim — a product name containing a digit (e.g. "Dali
+                    # Sonik 3") would otherwise be treated as an unsupported
+                    # numeric anchor by the downstream claim-evidence guard.
+                    "_trusted_safety_template": True,
+                },
+                success=True,
+            )
 
         unavailable_retrieval = _unavailable_retrieval_without_alternative_grounding(results)
         if unavailable_retrieval:

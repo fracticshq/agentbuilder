@@ -114,7 +114,7 @@ class ProductData(BaseModel):
     """Structured product metadata."""
     sku: str = Field(..., description="Product SKU/ID (unique identifier)")
     name: str = Field(..., description="Product name/title")
-    price: int = Field(..., description="Price in smallest currency unit (e.g., paise, cents)")
+    price: Optional[int] = Field(None, description="Price in smallest currency unit (e.g., paise, cents). Omit for inquiry-based catalogs with no fixed pricing.")
     currency: Optional[str] = Field(None, description="Currency code (e.g., INR, USD)")
     currency_source: Optional[Literal["shopify_store", "presentment", "catalog", "configured_default", "missing"]] = None
     category: str = Field(..., description="Product category")
@@ -463,8 +463,8 @@ async def bulk_upload_json(
                     missing.append("sku")
                 if not item_dict.get("name"):
                     missing.append("name")
-                if item_dict.get("price") is None:
-                    missing.append("price")
+                # price is intentionally optional: inquiry-based catalogs have no
+                # fixed pricing and instead direct customers to send an inquiry.
                 if not item_dict.get("category"):
                     missing.append("category")
                 
@@ -1107,8 +1107,8 @@ def _product_card_from_data(product_data: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "sku": product_data.get("sku"),
         "name": product_data.get("parent_name") or product_data.get("name", "Unknown Product"),
-        "price": product_data.get("price", 0),
-        "price_minor": product_data.get("price_minor", product_data.get("price", 0)),
+        "price": product_data.get("price"),
+        "price_minor": product_data.get("price_minor", product_data.get("price")),
         "price_unit": "minor",
         "currency": product_data.get("currency"),
         "currency_source": product_data.get("currency_source", "missing"),

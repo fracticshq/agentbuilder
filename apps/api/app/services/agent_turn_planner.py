@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
@@ -43,7 +43,7 @@ class AgentTurnPlan:
 
     @property
     def should_short_circuit(self) -> bool:
-        return self.action in {"greeting", "ask_question", "ask_missing_input", "clarify", "handoff"}
+        return self.action in {"greeting", "ask_question", "ask_missing_input", "clarify", "handoff", "open_inquiry_form"}
 
 
 class AgentTurnPlanner:
@@ -183,19 +183,27 @@ Rules:
 - If required inputs are missing, set intent=collect_input and missing_inputs.
 - If the user gave required details but no question and question_required=true, ask what they want to ask.
 - If the agent has enough information and tools are needed, set intent=tool_use with a tool_plan.
+- If a tool in the available tools list (e.g. open_inquiry_form, submit_inquiry) is clearly
+  relevant to what the user is asking for â€” even if some fields it needs are still missing â€”
+  prefer intent=tool_use with that tool in tool_plan over guessing intent=collect_input
+  yourself. That tool reports exactly which of its own fields are missing; do not invent
+  missing_inputs for it. For open_inquiry_form specifically: read its own tool description
+  carefully to decide when it applies (quote/pricing/human-contact/bulk-pricing intent) versus
+  when normal product search/knowledge tools should run instead (product questions, browsing,
+  comparisons, specs, availability) â€” never call open_inquiry_form for those.
 - For ordered recipes, include the prerequisite step first.
 - If a place/date/time is phrased naturally or unlabeled, still extract it.
 - Unlabeled comma/period-separated birth details (e.g. "16 July 1987, 15:26, Delhi India")
-  mean birth_date, birth_time, birth_place — extract all three (date as YYYY-MM-DD,
+  mean birth_date, birth_time, birth_place â€” extract all three (date as YYYY-MM-DD,
   time as HH:MM:SS, place as the text the user gave).
 - Messages often lead with the person's NAME ("Sandeep Amar, DOB 25/01/1975, 11 AM,
   New Delhi. How is my health in 2026"): extract it as resolved_inputs.name. A person's
-  name is NEVER the birth place, and the trailing question is NEVER the birth place —
+  name is NEVER the birth place, and the trailing question is NEVER the birth place â€”
   put the question in "question".
 - Never ask the user for latitude, longitude, or timezone. A birthplace name is enough;
   the runtime geocodes it automatically. Ask a clarifying question only when a detail is
   genuinely ambiguous (e.g. "03/04/1990" could be 3 April or 4 March, or a city name that
-  exists in several countries with no country given) — otherwise proceed.
+  exists in several countries with no country given) â€” otherwise proceed.
 - Never put astrology connector endpoints (lalkitab_* or geocode_*) in tool_plan; the
   chart-first astrology runtime resolves the birthplace, builds the chart first, and then
   calls the relevant secondary endpoints automatically. Signal the need through
@@ -251,8 +259,12 @@ Rules:
         action = "ready"
         if intent == "greeting":
             action = "greeting"
-            public_response = public_response or "Hi, I’m here. Tell me what you’d like help with."
-        elif intent == "collect_input" and missing:
+            public_response = public_response or "Hi, Iâ€™m here. Tell me what youâ€™d like help with."
+        elif intent == "collect_input" and missing and not tool_plan:
+            # Only short-circuit here when no tool is queued. If a tool_plan is
+            # present (e.g. submit_inquiry), let it run â€” the tool has its own,
+            # more accurate missing-field detection and must not be pre-empted
+            # by this generic guess.
             action = "ask_missing_input"
             public_response = public_response or fallback_plan.response_text
         elif intent in {"clarify", "handoff"}:
@@ -265,6 +277,17 @@ Rules:
         activities = [self._normalize_activity(item) for item in activities if isinstance(item, dict)]
         if not activities:
             activities = self._default_activities(intent, public_response, missing)
+
+        # Never let a short-circuited turn (greeting/ask_question/ask_missing_input/
+        # clarify/handoff) send a blank message to the user. If the LLM planner and
+        # the deterministic fallback both produced nothing, ask a safe generic
+        # follow-up instead of silence.
+        if action in {"greeting", "ask_question", "ask_missing_input", "clarify", "handoff"} and not public_response:
+            if missing:
+                missing_labels = ", ".join(item.get("label") or item.get("id") for item in missing if item.get("id"))
+                public_response = f"Could you share your {missing_labels}?" if missing_labels else "Could you share a bit more detail so I can help?"
+            else:
+                public_response = "Could you share a bit more detail so I can help with that?"
 
         response_text = public_response or ""
         return AgentTurnPlan(

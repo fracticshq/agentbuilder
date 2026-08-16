@@ -159,6 +159,11 @@ export interface AgentStudioData {
   api_data_source_usage: string;
   context_connectors?: ContextConnector[];
   url_context_boost_enabled: boolean;
+  /** Conversational inquiry capture (send-inquiry workflow for no-fixed-price products). */
+  inquiry_enabled?: boolean;
+  inquiry_recipient_email?: string;
+  inquiry_confirm_before_send?: boolean;
+  inquiry_success_message?: string;
   /** Per-agent chat artifact settings keyed by artifact type id
    *  (e.g. { kundali_chart: { enabled: true } }). */
   artifacts_config?: Record<string, { enabled: boolean; options?: Record<string, any> }>;

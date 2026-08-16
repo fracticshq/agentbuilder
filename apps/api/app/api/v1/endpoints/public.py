@@ -113,6 +113,15 @@ def _public_agent_config(configuration: dict[str, Any]) -> dict[str, Any]:
     }
     if is_commerce_agent:
         public_config["commerce"] = configuration["commerce"]
+    # Expose inquiry/lead-capture config so the widget can show the
+    # "Send Inquiry" button on product cards when the skill is enabled.
+    inquiry = configuration.get("inquiry") or {}
+    public_config["inquiry"] = {
+        "enabled": bool(inquiry.get("enabled", False)),
+        "recipient_email": inquiry.get("recipient_email", ""),
+        "confirm_before_send": bool(inquiry.get("confirm_before_send", True)),
+        "success_message": inquiry.get("success_message", ""),
+    }
     return public_config
 
 

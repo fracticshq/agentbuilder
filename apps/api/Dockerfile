@@ -43,7 +43,8 @@ WORKDIR /app/api
 
 EXPOSE 8000
 
-RUN chmod +x /app/api/docker-entrypoint.sh \
+RUN sed -i 's/\r$//' /app/api/docker-entrypoint.sh \
+    && chmod +x /app/api/docker-entrypoint.sh \
     && groupadd --system app \
     && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
     && chown -R app:app /app

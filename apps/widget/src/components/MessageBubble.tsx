@@ -6,6 +6,7 @@ import type { Message, ProductData, KundaliChartData } from '../types';
 import { ProductCard } from './ProductCard';
 import { DealerCard } from './DealerCard';
 import { KundaliChart } from './KundaliChart';
+import { InquiryFormModal } from './InquiryFormModal';
 
 interface MessageBubbleProps {
   message: Message;
@@ -19,6 +20,23 @@ interface MessageBubbleProps {
   showProductCards?: boolean;
   apiUrl?: string;
   agentId?: string | null;
+  /** Sends a chat message as if the user typed it (used by the product
+   * card's "Send Inquiry for Price" CTA). */
+  onSendMessage?: (text: string) => void;
+  /** Show inquiry / quote buttons on product cards */
+  showInquiry?: boolean;
+  /** V2: opens the inline inquiry form for a product */
+  onOpenInquiryForm?: (productName: string, productSku?: string) => void;
+  /** Conversation id — passed to the inline form for submission */
+  conversationId?: string;
+  /** Called when the inline form submits successfully */
+  onInquirySuccess?: (message: string) => void;
+  /** Called when the inline form is skipped/closed */
+  onInquirySkip?: () => void;
+  /** When a Lal Kitab kundali chart is already shown in a dedicated side
+   * panel (see ChatWindow's `sideChart` slot), the same chart must not also
+   * be re-rendered inline inside each chat reply — one visual chart, not two. */
+  hideKundaliChart?: boolean;
 }
 
 // Initialize markdown-it instance
@@ -120,7 +138,6 @@ const formatProductPrice = (price?: number, currency?: string): string => {
 // Fetch product details from API
 const fetchProductDetails = async (skus: string[], agentId: string, apiUrl?: string): Promise<ProductData[]> => {
   try {
-    console.log('[MessageBubble] Fetching products for SKUs:', skus, 'agentId:', agentId);
     const sessionKey = `agent_widget_session_v1_${encodeURIComponent(window.location.origin)}_${agentId}`;
     let sessionToken: string | undefined;
     try {
@@ -148,7 +165,6 @@ const fetchProductDetails = async (skus: string[], agentId: string, apiUrl?: str
     }
     
     const data = await response.json();
-    console.log('[MessageBubble] Received products:', data);
     return data.products || [];
   } catch (error) {
     console.error('[MessageBubble] Error fetching products:', error);
@@ -156,7 +172,7 @@ const fetchProductDetails = async (skus: string[], agentId: string, apiUrl?: str
   }
 };
 
-export const MessageBubble: React.FC<MessageBubbleProps> = ({
+const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
   message,
   userMsgBg = '#2563eb',
   userMsgColor = '#ffffff',
@@ -168,8 +184,39 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   showProductCards = true,
   apiUrl,
   agentId,
+  onSendMessage,
+  showInquiry,
+  onOpenInquiryForm,
+  conversationId,
+  onInquirySuccess,
+  onInquirySkip,
+  hideKundaliChart = false,
 }) => {
   const isUser = message.role === 'user';
+
+  // ── Inline inquiry form — renders as a chat bubble ────────────────
+  const inlineMeta = message.metadata as Record<string, unknown> | undefined;
+  if (!isUser && inlineMeta?.inline_inquiry_form && agentId && apiUrl) {
+    return (
+      <div className="message-bubble assistant message-bubble-wrapper">
+        <div className="message-content assistant-message"
+          style={{ padding: 0, background: 'transparent', boxShadow: 'none', border: 'none' }}
+        >
+          <InquiryFormModal
+            isOpen={true}
+            inline={true}
+            productName={typeof inlineMeta.product_name === 'string' ? inlineMeta.product_name : ''}
+            productSku={typeof inlineMeta.product_sku === 'string' ? inlineMeta.product_sku : undefined}
+            agentId={agentId}
+            conversationId={conversationId}
+            apiUrl={apiUrl}
+            onSuccess={onInquirySuccess ?? (() => {})}
+            onSkip={onInquirySkip ?? (() => {})}
+          />
+        </div>
+      </div>
+    );
+  }
   const [extractedProducts, setExtractedProducts] = useState<ProductData[]>([]);
   const [hydrationState, setHydrationState] = useState<'idle' | 'loading' | 'ready' | 'empty' | 'error'>('idle');
   const [isHovered, setIsHovered] = useState(false);
@@ -199,7 +246,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     setHydrationState('loading');
     fetchProductDetails(productSkus, resolvedAgentId, apiUrl)
       .then(products => {
-        console.log('[MessageBubble] Fetched products:', products);
         setExtractedProducts(products);
         setHydrationState(products.length ? 'ready' : 'empty');
       })
@@ -267,17 +313,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     return null;
   };
   
-  console.log('[MessageBubble] Rendering message:', {
-    id: message.id,
-    role: message.role,
-    contentLength: message.content.length,
-    content: message.content.substring(0, 50) + (message.content.length > 50 ? '...' : ''),
-    hasProducts: allProducts.length > 0,
-    productsCount: allProducts.length,
-    hasDealers: !!message.dealers && message.dealers.length > 0,
-    dealersCount: message.dealers?.length || 0,
-  });
-  
   const handleFeedback = (feedback: 'up' | 'down') => {
     const next = message.feedback === feedback ? null : feedback;
     onFeedback?.(message.id, next);
@@ -296,8 +331,10 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           : { background: assistantMsgBg, color: assistantMsgColor }
         }
       >
-        {/* Lal Kitab kundali — visual chart artifact, always ahead of the reading */}
-        {!isUser && kundaliChart && <KundaliChart data={kundaliChart} />}
+        {/* Lal Kitab kundali — visual chart artifact, ahead of the reading.
+            Skipped when the same chart is already shown in the dedicated
+            side panel (ChatWindow's sideChart slot) so it isn't duplicated. */}
+        {!isUser && !hideKundaliChart && kundaliChart && <KundaliChart data={kundaliChart} />}
 
         {isUser ? (
           <p className="message-text">{message.content}</p>
@@ -323,7 +360,12 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             </div>
             <div className="cards-grid">
               {allProducts.map((product) => (
-                <ProductCard key={getProductKey(product)} product={product} />
+                <ProductCard
+                  key={getProductKey(product)}
+                  product={product}
+                  onSendInquiry={showInquiry && !onOpenInquiryForm ? onSendMessage : undefined}
+                  onOpenInquiryForm={showInquiry && onOpenInquiryForm ? onOpenInquiryForm : undefined}
+                />
               ))}
             </div>
           </div>
@@ -455,3 +497,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     </div>
   );
 };
+
+// Memoized: ChatWindow re-renders on unrelated state (e.g. the cycling
+// placeholder text ticking every ~2.2s via useCyclingText), which otherwise
+// re-renders every message bubble in the list on each tick. React.memo skips
+// that unless this bubble's own props actually changed.
+export const MessageBubble = React.memo(MessageBubbleComponent);

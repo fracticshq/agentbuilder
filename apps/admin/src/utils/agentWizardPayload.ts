@@ -74,6 +74,10 @@ export interface AgentWizardData {
   context_connectors: ContextConnector[];
   url_context_boost_enabled: boolean;
   artifacts_config: Record<string, { enabled: boolean; options?: Record<string, any> }>;
+  inquiry_enabled?: boolean;
+  inquiry_recipient_email?: string;
+  inquiry_confirm_before_send?: boolean;
+  inquiry_success_message?: string;
   selected_skill_ids: string[];
   selected_tool_ids: string[];
   agent_api_enabled: boolean;
@@ -282,6 +286,13 @@ export function buildAgentWizardPayload(
           enabled: agentData.long_term_memory,
           status: agentData.long_term_memory ? 'enabled' : 'needs_privacy_setup',
         },
+      },
+      inquiry: {
+        enabled: agentData.inquiry_enabled,
+        recipient_email: agentData.inquiry_recipient_email,
+        delivery_method: 'email',
+        confirm_before_send: agentData.inquiry_confirm_before_send,
+        success_message: agentData.inquiry_success_message || undefined,
       },
       skills: buildCapabilityConfig(existingConfiguration.skills, agentData.selected_skill_ids, 'skill_id'),
       tools: buildCapabilityConfig(existingConfiguration.tools, agentData.selected_tool_ids, 'tool_id'),

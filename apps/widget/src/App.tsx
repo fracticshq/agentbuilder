@@ -1,6 +1,8 @@
 import React from 'react';
 import { WidgetButton } from './components/WidgetButton';
 import { ChatWindow } from './components/ChatWindow';
+import { BirthDetailsForm } from './components/LalKitab/BirthDetailsForm';
+import { LalKitabSideChart } from './components/LalKitab/LalKitabSideChart';
 import { useWidgetStore } from './stores/widgetStore';
 import { useFullscreen } from './hooks/useFullscreen';
 import { APIClient } from './utils/apiClient';
@@ -89,6 +91,7 @@ function App({ config }: AppProps) {
     setHumanInControl,
     setMessageFeedback,
     removeMessage,
+    brandTheme,
   } = useWidgetStore();
 
   const [activity, setActivity] = React.useState<ActivityState>(EMPTY_ACTIVITY);
@@ -121,6 +124,7 @@ function App({ config }: AppProps) {
   const [humanTakeoverEnabled, setHumanTakeoverEnabled] = React.useState(false);
   const [showSources, setShowSources] = React.useState(config?.showSources ?? false);
   const [showProductCards, setShowProductCards] = React.useState(config?.showProductCards ?? true);
+  const [showInquiry, setShowInquiry] = React.useState(false);
   // 'basic' = the lightweight cycling indicator; 'advanced' = the live step
   // timeline. Admin-configurable per agent; defaults to 'basic'.
   const [activityMode, setActivityMode] = React.useState<'basic' | 'advanced'>('basic');
@@ -130,6 +134,41 @@ function App({ config }: AppProps) {
   const [unavailableMessage, setUnavailableMessage] = React.useState<string | null>(null);
   // Holds the pending conversation lifecycle event type until agentId is ready.
   const [convStartEvent, setConvStartEvent] = React.useState<'conversation_started' | 'conversation_resumed' | null>(null);
+
+  // ── Lal Kitab form-first flow ──────────────────────────────────
+  // Only active for astrology_lalkitab agents with lalkitab.require_birth_profile_form
+  // enabled in their configuration (opt-in, see message_service.py
+  // _lalkitab_requires_birth_profile_form). All other agents are unaffected.
+  const [lalkitabFormRequired, setLalkitabFormRequired] = React.useState(false);
+  const [lalkitabProfileStatus, setLalkitabProfileStatus] = React.useState<'unknown' | 'missing' | 'confirmed'>('unknown');
+  const [lalkitabChart, setLalkitabChart] = React.useState<unknown>(null);
+  const [lalkitabReportText, setLalkitabReportText] = React.useState<string | undefined>(undefined);
+  // Maps this brand's real theme tokens onto the birth-details form's CSS
+  // variables, so the form matches the same light/dark palette the rest of
+  // the widget uses instead of a hardcoded color scheme of its own.
+  const lalkitabCssVars = React.useMemo(() => {
+    const tk = brandTheme?.tokens;
+    const mode = brandTheme?.mode ?? 'light';
+    const accent = tk?.accentColor ?? '#c2410c';
+    const lightArrow = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='rgba(60,40,20,0.45)' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E\")";
+    const darkArrow = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='rgba(255,255,255,0.4)' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E\")";
+    return {
+      '--lk-bg': tk?.panelBg ?? (mode === 'dark'
+        ? 'linear-gradient(160deg,#080d14 0%,#0d1520 30%,#061008 100%)'
+        : 'linear-gradient(160deg,#fdfaf5 0%,#ede8df 100%)'),
+      '--lk-fg': tk?.titleColor ?? (mode === 'dark' ? '#ffffff' : '#1a1208'),
+      '--lk-muted': tk?.subtitleColor ?? (mode === 'dark' ? 'rgba(255,255,255,0.45)' : 'rgba(60,40,20,0.5)'),
+      '--lk-card-bg': mode === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.7)',
+      '--lk-border': tk?.dividerColor ?? (mode === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'),
+      '--lk-card-shadow': mode === 'dark' ? '0 10px 30px rgba(0,0,0,0.35)' : '0 10px 30px rgba(0,0,0,0.08)',
+      '--lk-input-bg': tk?.inputBg ?? (mode === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.85)'),
+      '--lk-input-border': tk?.inputBorder ?? (mode === 'dark' ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'),
+      '--lk-accent': accent,
+      '--lk-accent-grad': tk?.sendBg ?? `linear-gradient(135deg,${accent},${accent})`,
+      '--lk-accent-shadow': tk?.sendShad ?? `0 4px 14px ${accent}55`,
+      '--lk-select-arrow': mode === 'dark' ? darkArrow : lightArrow,
+    } as React.CSSProperties;
+  }, [brandTheme]);
 
   // ── Resolve agent ID ──────────────────────────────────────────
   React.useEffect(() => {
@@ -168,6 +207,17 @@ function App({ config }: AppProps) {
         const takeoverEnabled = config?.enableHumanTakeover ?? widgetChannel.human_takeover ?? features.human_takeover === true;
         const shouldShowSources = config?.showSources ?? widgetChannel.show_sources ?? features.show_sources === true;
         const shouldShowProductCards = config?.showProductCards ?? widgetChannel.show_product_cards ?? features.show_product_cards !== false;
+        const inquiryConfig = agent.configuration?.inquiry || {};
+        const shouldShowInquiry = Boolean(inquiryConfig.enabled);
+        const domainTemplate = agent.configuration?.domain?.template || agent.configuration?.agent_template || agent.configuration?.template;
+        const lalkitabCfg = agent.configuration?.lalkitab || {};
+        const isLalkitabAgent = String(domainTemplate || '').toLowerCase().includes('lalkitab') || String(domainTemplate || '').toLowerCase().includes('lal_kitab') || String(domainTemplate || '').toLowerCase().includes('lal-kitab') || String(domainTemplate || '').toLowerCase().includes('lal kitab');
+        // Default ON for every Lal Kitab agent — set
+        // configuration.lalkitab.require_birth_profile_form = false explicitly
+        // to opt a specific agent out of the form-first flow.
+        const formFlagRaw = lalkitabCfg.require_birth_profile_form;
+        const formRequired = formFlagRaw === undefined || formFlagRaw === null ? true : Boolean(formFlagRaw);
+        setLalkitabFormRequired(isLalkitabAgent && formRequired);
         const resolvedActivityMode =
           (widgetChannel.activity_mode ?? features.activity_mode) === 'advanced' ? 'advanced' : 'basic';
         const resolvedActivityPersistence =
@@ -176,6 +226,7 @@ function App({ config }: AppProps) {
         setHumanTakeoverEnabled(takeoverEnabled);
         setShowSources(shouldShowSources);
         setShowProductCards(shouldShowProductCards);
+        setShowInquiry(shouldShowInquiry);
         setActivityMode(resolvedActivityMode);
         setActivityPersistence(resolvedActivityPersistence);
         if (!brandId) return;
@@ -352,6 +403,16 @@ function App({ config }: AppProps) {
     };
   }, [isOpen, conversationId, agentId, setConversationId, setMessages]);
 
+  // ── Lal Kitab: always require the birth-details form fresh on every page
+  // load/refresh — even if this browser session already has a confirmed
+  // profile stored server-side for this conversation. We deliberately do
+  // NOT call GET /lalkitab/profile to auto-resume past the form here: a
+  // refresh must show the form again, not silently jump to chat.
+  React.useEffect(() => {
+    if (!lalkitabFormRequired) return;
+    setLalkitabProfileStatus('missing');
+  }, [lalkitabFormRequired]);
+
   // ── Fire conversation lifecycle event once both IDs are ready ─
   React.useEffect(() => {
     if (!convStartEvent || !conversationId || !agentId) return;
@@ -369,7 +430,7 @@ function App({ config }: AppProps) {
 
   const handleToggleWidget = () => setIsOpen(!isOpen);
 
-  const handleSendMessage = async (text: string) => {
+  const handleSendMessage = async (text: string, opts?: { inquiryJustCompleted?: boolean }) => {
     if (!agentId) {
       addMessage({
         id: Date.now().toString(),
@@ -439,7 +500,7 @@ function App({ config }: AppProps) {
 
       const client = useWebSocket ? wsClient : apiClient;
       const response = await client.sendMessage(
-        { content: text, context, userId: currentUserId },
+        { content: text, context, userId: currentUserId, inquiryJustCompleted: opts?.inquiryJustCompleted },
         currentConvId,
         agentId,
         (chunk) => {
@@ -500,8 +561,24 @@ function App({ config }: AppProps) {
     }
   };
 
-  const handleRegenerate = (messageId: string) => {
-    const msgIndex = messages.findIndex(m => m.id === messageId);
+  // V2 inquiry: after form submission the success message is shown as an
+  // assistant bubble directly by ChatWindow. The next real user message
+  // (anything the user types after that) must carry inquiry_just_completed=true
+  // so the backend skips the inquiry adapter for that one turn.
+  const handleSendMessageWithReset = (text: string) => {
+    // Show the success message as an assistant bubble directly — no LLM call.
+    // Include inquiry_pending.submitted so the next user message is treated
+    // as a clean turn (not part of an ongoing inquiry flow).
+    addMessage({
+      id: Date.now().toString(),
+      content: text,
+      role: 'assistant',
+      timestamp: new Date(),
+      metadata: { inquiry_pending: { submitted: true } },
+    });
+  };
+
+  const handleRegenerate = (messageId: string) => {    const msgIndex = messages.findIndex(m => m.id === messageId);
     if (msgIndex < 0) return;
     // Find the preceding user message
     let userMsg: string | null = null;
@@ -520,27 +597,63 @@ function App({ config }: AppProps) {
     <div className="widget-container">
       <WidgetButton onClick={handleToggleWidget} />
 
-      {isOpen && (
-        <div className={`widget-overlay ${isExpanded ? 'expanded' : ''}`}>
+      {isOpen && lalkitabFormRequired && lalkitabProfileStatus === 'missing' && (
+        <div className="widget-overlay expanded">
+          <div className="lk-root" style={lalkitabCssVars}>
+            <BirthDetailsForm
+              agentId={agentId || ''}
+              apiUrl={configuredApiBase}
+              sessionToken={apiClient.getSessionToken()}
+              onGenerated={({ kundaliChart }) => {
+                setLalkitabChart(kundaliChart);
+                setLalkitabProfileStatus('confirmed');
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {isOpen && (!lalkitabFormRequired || lalkitabProfileStatus === 'confirmed') && (
+        <div className={`widget-overlay ${(isExpanded || lalkitabFormRequired) ? 'expanded' : ''}`}>
           <ChatWindow
             messages={messages}
             isTyping={isTyping}
             activity={activity}
             activityMode={activityMode}
             activityPersistence={activityPersistence}
-            isExpanded={isExpanded}
+            isExpanded={isExpanded || lalkitabFormRequired}
             isMobile={isMobile}
             onSendMessage={handleSendMessage}
             onClose={() => setIsOpen(false)}
-            onToggleExpand={toggleExpanded}
+            onToggleExpand={lalkitabFormRequired ? undefined : toggleExpanded}
             onRegenerate={handleRegenerate}
             onFeedback={setMessageFeedback}
             showSources={showSources}
             showProductCards={showProductCards}
+            showInquiry={showInquiry}
             isAgentConfigured={Boolean(agentId)}
             unavailableMessage={unavailableMessage || undefined}
             apiUrl={configuredApiBase}
             agentId={agentId}
+            conversationId={conversationId}
+            onSendMessageWithReset={handleSendMessageWithReset}
+            sideChart={
+              lalkitabFormRequired && lalkitabProfileStatus === 'confirmed'
+                ? <LalKitabSideChart kundaliChart={lalkitabChart as never} reportText={lalkitabReportText} />
+                : undefined
+            }
+            // Lal Kitab-only greeting defaults, used only when this brand
+            // hasn't configured its own hero/chips text (see ChatWindow's
+            // fallback order: brandTheme value first, then these defaults).
+            // Every other agent/brand is completely unaffected.
+            defaultHeroTitle={lalkitabFormRequired ? "Hi, I'm your Lal Kitab guide" : undefined}
+            defaultHeroSubtitle={lalkitabFormRequired ? 'How can I help you today?' : undefined}
+            defaultSuggestionChips={lalkitabFormRequired ? [
+              'Where is my Moon?',
+              'How is my career?',
+              'Tell me about my life',
+              'What is my current dasha?',
+            ] : undefined}
           />
         </div>
       )}

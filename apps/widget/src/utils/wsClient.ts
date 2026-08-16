@@ -259,7 +259,7 @@ export class WebSocketClient {
   }
 
   async sendMessage(
-    request: { content: string; context?: PageContext; userId?: string },
+    request: { content: string; context?: PageContext; userId?: string; inquiryJustCompleted?: boolean },
     conversationId?: string,
     agentId?: string,
     onStream?: (chunk: StreamingMessage) => void,
@@ -284,6 +284,7 @@ export class WebSocketClient {
         page_context: request.context,
         stream: true,
         session_token: this.sessionToken,
+        ...(request.inquiryJustCompleted ? { inquiry_just_completed: true } : {}),
       }));
     });
   }

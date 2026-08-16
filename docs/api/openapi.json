@@ -605,6 +605,135 @@
         "title": "BatchTrackResponse",
         "type": "object"
       },
+      "BirthProfileRequest": {
+        "properties": {
+          "agent_id": {
+            "minLength": 1,
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "birth_date": {
+            "description": "YYYY-MM-DD",
+            "minLength": 1,
+            "title": "Birth Date",
+            "type": "string"
+          },
+          "birth_place": {
+            "minLength": 1,
+            "title": "Birth Place",
+            "type": "string"
+          },
+          "birth_time": {
+            "description": "HH:MM (24h) or HH:MM AM/PM",
+            "minLength": 1,
+            "title": "Birth Time",
+            "type": "string"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": "en",
+            "title": "Language"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "name",
+          "birth_date",
+          "birth_time",
+          "birth_place"
+        ],
+        "title": "BirthProfileRequest",
+        "type": "object"
+      },
+      "BirthProfileResponse": {
+        "properties": {
+          "api_context": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Context"
+          },
+          "awaiting_place_choice": {
+            "default": false,
+            "title": "Awaiting Place Choice",
+            "type": "boolean"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "kundali_chart": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kundali Chart"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "place_candidates": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Place Candidates",
+            "type": "array"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "upstream_status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Status Code"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "BirthProfileResponse",
+        "type": "object"
+      },
       "Body_import_agent_manifest_api_v1_admin_agents_import_post": {
         "properties": {
           "brand_id": {
@@ -619,7 +748,7 @@
             "title": "Brand Id"
           },
           "file": {
-            "format": "binary",
+            "contentMediaType": "application/octet-stream",
             "title": "File",
             "type": "string"
           }
@@ -637,7 +766,7 @@
             "type": "string"
           },
           "file": {
-            "format": "binary",
+            "contentMediaType": "application/octet-stream",
             "title": "File",
             "type": "string"
           }
@@ -684,7 +813,7 @@
             "title": "Dealer Data"
           },
           "file": {
-            "format": "binary",
+            "contentMediaType": "application/octet-stream",
             "title": "File",
             "type": "string"
           },
@@ -721,7 +850,7 @@
         "properties": {
           "files": {
             "items": {
-              "format": "binary",
+              "contentMediaType": "application/octet-stream",
               "type": "string"
             },
             "title": "Files",
@@ -2169,6 +2298,128 @@
         "title": "IngestionStatus",
         "type": "object"
       },
+      "InquirySubmitRequest": {
+        "properties": {
+          "agent_id": {
+            "minLength": 1,
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "city": {
+            "minLength": 1,
+            "title": "City",
+            "type": "string"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "country": {
+            "minLength": 1,
+            "title": "Country",
+            "type": "string"
+          },
+          "email": {
+            "minLength": 3,
+            "title": "Email",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "phone": {
+            "minLength": 1,
+            "title": "Phone",
+            "type": "string"
+          },
+          "product_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Name"
+          },
+          "product_sku": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Sku"
+          },
+          "query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query"
+          }
+        },
+        "required": [
+          "agent_id",
+          "name",
+          "phone",
+          "email",
+          "city",
+          "country"
+        ],
+        "title": "InquirySubmitRequest",
+        "type": "object"
+      },
+      "InquirySubmitResponse": {
+        "properties": {
+          "delivered": {
+            "default": false,
+            "title": "Delivered",
+            "type": "boolean"
+          },
+          "inquiry_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inquiry Id"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "InquirySubmitResponse",
+        "type": "object"
+      },
       "JobStatusResponse": {
         "description": "Response for job status check.",
         "properties": {
@@ -2460,6 +2711,11 @@
               }
             ],
             "title": "Filters"
+          },
+          "inquiry_just_completed": {
+            "default": false,
+            "title": "Inquiry Just Completed",
+            "type": "boolean"
           },
           "message": {
             "maxLength": 10000,
@@ -3900,6 +4156,13 @@
       },
       "ValidationError": {
         "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
           "loc": {
             "items": {
               "anyOf": [
@@ -9879,6 +10142,66 @@
         ]
       }
     },
+    "/api/v1/inquiry/submit": {
+      "post": {
+        "description": "Submit a lead-capture inquiry from the widget form.\n\nThe widget posts form fields directly here — no LLM processes this data.\nThe endpoint persists to MongoDB and sends an email to the configured\nrecipient, then returns a success flag + message for the widget to display.",
+        "operationId": "submit_inquiry_api_v1_inquiry_submit_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Widget-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Widget-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InquirySubmitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InquirySubmitResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Inquiry",
+        "tags": [
+          "inquiry"
+        ]
+      }
+    },
     "/api/v1/knowledge/bulk-upload": {
       "post": {
         "description": "Bulk upload products or dealers from JSON.\n\nAccepts:\n- Up to 1000 items per request\n- Products: Must have sku, name, price, category. Currency is optional and may come from commerce config.\n- Dealers: Must have dealer_id, name, city, phone\n\nEach item will be:\n1. Validated for required fields\n2. Converted to text chunks with structured metadata\n3. Embedded using Voyage AI\n4. Stored in MongoDB knowledge_base collection\n\nExample for products:\n```json\n{\n  \"content_type\": \"product\",\n  \"brand_id\": \"essco-bathware\",\n  \"items\": [\n    {\n      \"sku\": \"FAU-001\",\n      \"name\": \"Chrome Faucet\",\n      \"price\": 3499,\n      \"currency\": \"USD\",\n      \"category\": \"faucets\",\n      \"features\": [\"chrome\", \"ceramic disc\"]\n    }\n  ]\n}\n```",
@@ -11180,6 +11503,131 @@
         "summary": "Upload Document",
         "tags": [
           "knowledge"
+        ]
+      }
+    },
+    "/api/v1/lalkitab/profile": {
+      "get": {
+        "description": "Return the confirmed birth profile for this conversation, if one exists.\n\nThe widget calls this on session start to decide whether to show the\nbirth-details form or go straight to the dashboard + chat.",
+        "operationId": "get_birth_profile_api_v1_lalkitab_profile_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Widget-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Widget-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/BirthProfileResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Get Birth Profile Api V1 Lalkitab Profile Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Birth Profile",
+        "tags": [
+          "lalkitab"
+        ]
+      },
+      "post": {
+        "description": "Build the full Lal Kitab chart + report once and persist it as this\nconversation's confirmed birth profile.\n\nStatus codes are genuine here (not always 200): a real chart/connector\nfailure returns 502 so it is visibly red in the Network tab, not just a\n\"success\": false line inside an otherwise-fine-looking 200 response.\nOnly a safe, generic `error_code` + `request_id` ever reach the browser —\nnever a provider's raw error text, stack trace, or any connector secret;\nthe full diagnostic detail stays in the server's own structured logs,\ncorrelated by `request_id`.",
+        "operationId": "submit_birth_profile_api_v1_lalkitab_profile_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Widget-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Widget-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BirthProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BirthProfileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Birth Profile",
+        "tags": [
+          "lalkitab"
         ]
       }
     },

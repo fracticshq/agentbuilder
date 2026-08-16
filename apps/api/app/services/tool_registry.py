@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 from urllib.parse import urlparse
+import asyncio
 import ipaddress
 import json
 import re
@@ -467,7 +468,18 @@ def _connector_auth_headers(auth: dict[str, Any] | None) -> dict[str, str]:
         if parsed:
             return parsed
         if isinstance(raw_header, str) and raw_header.strip():
-            return {"Authorization": f"Bearer {raw_header.strip()}"}
+            value = raw_header.strip()
+            # The admin UI's "Auth header" field stores only the header
+            # VALUE (e.g. "Bearer vk_live_xxx" or a bare token), never the
+            # "Header-Name: value" pair — _parse_auth_header() above only
+            # matches the latter. Do not blindly prefix "Bearer " here: if
+            # the saved value already carries its own auth scheme (Bearer,
+            # Basic, Token, ApiKey, ...), doing so double-wraps it into an
+            # invalid "Bearer Bearer vk_live_xxx" header that every provider
+            # rejects as unauthorized.
+            if re.match(r"^[A-Za-z][A-Za-z0-9._-]*\s+\S", value):
+                return {"Authorization": value}
+            return {"Authorization": f"Bearer {value}"}
     return {}
 
 
@@ -563,6 +575,44 @@ def _redacted_url(url: str) -> str:
     if not parsed.scheme or not parsed.netloc:
         return url
     return parsed._replace(query="", fragment="").geturl()
+
+
+# A handful of top-level response fields are near-universal provider
+# bookkeeping (billing/quota/balance, HTTP-shaped envelopes, internal
+# endpoint routing) that a user-facing citation card must never show
+# verbatim — they read as confusing raw JSON rather than a real source.
+# This is deliberately generic (keyed on common field names, not any single
+# connector's schema) since ContextConnectorTool/ApiDataSourceTool serve any
+# configured connector, not just Lal Kitab's Vedika integration.
+_INTERNAL_RESPONSE_FIELD_NAMES = {
+    "billing", "balance", "balancebefore", "balanceafter", "charged",
+    "currency", "endpoint", "status_code", "statuscode", "request_id",
+    "requestid", "trace_id", "traceid",
+}
+
+
+def _public_connector_snippet(connector_name: str, endpoint_name: str | None, data: Any) -> str:
+    """Build a short, human-readable citation snippet for a connector call —
+    never the provider's raw JSON response (billing/balance fields, internal
+    endpoint paths, request envelopes), which is not a readable source and
+    can look like something is broken even when the call succeeded fine.
+    The full raw payload remains available internally via `data`/
+    `response_summary` for anything that actually needs it (e.g. the
+    claim-evidence evidence pool); only this display string is redacted.
+    """
+    label = f"{connector_name} · {endpoint_name}" if endpoint_name else connector_name
+    if isinstance(data, dict):
+        readable_keys = [
+            str(key) for key in data.keys()
+            if str(key).lower() not in _INTERNAL_RESPONSE_FIELD_NAMES
+        ]
+        if readable_keys:
+            preview = ", ".join(readable_keys[:6])
+            return f"{label} returned calculated data ({preview})."
+        return f"{label} returned calculated data."
+    if isinstance(data, list):
+        return f"{label} returned {len(data)} calculated result(s)."
+    return f"{label} returned calculated data."
 
 
 def _host_allowed(url: str, allowlist: list[Any] | None) -> bool:
@@ -691,11 +741,15 @@ class ApiDataSourceTool(BaseTool):
                 "provider": "http",
                 "source_name": source_name,
                 "url": url,
+                # No `url` on the citation itself: like ContextConnectorTool,
+                # this is a raw API endpoint (often auth-protected) rather
+                # than a page a user could actually open and read, so linking
+                # it only leads to a confusing auth-error page. The internal
+                # `url` field above is kept for diagnostics/logging only.
                 "sources": [
                     {
                         "title": source_name,
-                        "url": url,
-                        "snippet": serialized[:500],
+                        "snippet": _public_connector_snippet(source_name, None, data),
                     }
                 ],
                 "confidence": 0.9,
@@ -855,6 +909,17 @@ class ContextConnectorTool(BaseTool):
                             response = await client.get(url, params=request_payload if self.endpoint.get("payload_mode") == "flat_body" else payload, headers=headers)
                         else:
                             response = await client.request(method, url, json=request_payload, headers=headers)
+                        if response.status_code == 429 and attempt < retry_count:
+                            # Provider rate limit — retrying immediately would
+                            # just hit 429 again. Honor Retry-After when the
+                            # provider sends one, otherwise back off briefly.
+                            retry_after = response.headers.get("retry-after")
+                            try:
+                                delay = min(max(float(retry_after), 0.5), 10.0) if retry_after else 1.5 * (attempt + 1)
+                            except ValueError:
+                                delay = 1.5 * (attempt + 1)
+                            await asyncio.sleep(delay)
+                            continue
                         response.raise_for_status()
                         content_type = response.headers.get("content-type", "")
                         raw_text = response.text
@@ -882,6 +947,18 @@ class ContextConnectorTool(BaseTool):
                             raise
         except httpx.HTTPError as exc:
             error_message = str(exc) or type(exc).__name__
+            # The provider's raw HTTP status (e.g. 429 rate-limited, 401
+            # unauthorized) is a single, safe integer — no secrets, no
+            # request/response body — so it is threaded all the way up to
+            # the caller's error_code as e.g. "upstream_429" instead of a
+            # generic "chart_unavailable". This lets a real cause (rate
+            # limit vs auth failure vs timeout) be told apart in the
+            # browser's Network tab without reading server logs, while the
+            # provider's actual error text/headers/body are still never
+            # exposed to the browser.
+            upstream_status_code = (
+                exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            )
             return ToolResult(
                 success=False,
                 data=None,
@@ -895,6 +972,7 @@ class ContextConnectorTool(BaseTool):
                     "url": _redacted_url(url),
                     "latency_ms": round((time.perf_counter() - started) * 1000, 2),
                     "error_type": type(exc).__name__,
+                    "upstream_status_code": upstream_status_code,
                 },
             )
 
@@ -922,11 +1000,25 @@ class ContextConnectorTool(BaseTool):
                     "headers": _redacted_headers(headers),
                     **request_shape_extra,
                 },
+                # A user-facing citation card must never show the provider's
+                # raw JSON (billing/balance fields, internal endpoint paths,
+                # request shape) — that is internal diagnostic detail, not a
+                # readable source. `_public_connector_snippet` builds a short,
+                # generic human-readable line instead; the full untouched
+                # `data`/`response_summary` below still carries the raw
+                # payload for internal use (claim-evidence matching, etc.).
+                #
+                # No `url` here: this is a machine API endpoint that requires
+                # a secret Authorization header the browser will never send,
+                # so clicking it only ever lands a user on a bare "auth
+                # required" error page — never an actual readable source page
+                # they can visit. A citation card with no url safely renders
+                # as plain, non-clickable text (see MessageBubble.tsx), so
+                # omitting it is strictly safer than pointing at a dead end.
                 "sources": [
                     {
                         "title": f"{connector_name} · {endpoint_name}",
-                        "url": _redacted_url(url),
-                        "snippet": serialized[:500],
+                        "snippet": _public_connector_snippet(connector_name, endpoint_name, data),
                     }
                 ],
                 "response_summary": serialized[:1000],

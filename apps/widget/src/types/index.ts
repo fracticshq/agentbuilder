@@ -146,9 +146,9 @@ export interface ProductVariantData {
   title?: string;
   variant_title?: string;
   variant_options?: Record<string, string>;
-  price?: number;
+  price?: number | null;
   /** Canonical minor-unit price. Legacy price is accepted by adapters only. */
-  price_minor?: number;
+  price_minor?: number | null;
   price_unit?: 'minor';
   currency?: string;
   currency_source?: CurrencySource;
@@ -167,9 +167,9 @@ export interface ProductData {
   product_group_id?: string;
   handle?: string;
   name: string;
-  price?: number;
+  price?: number | null;
   /** Canonical minor-unit price. Legacy price is accepted by adapters only. */
-  price_minor?: number;
+  price_minor?: number | null;
   price_unit?: 'minor';
   currency?: string;
   currency_source?: CurrencySource;
@@ -183,8 +183,8 @@ export interface ProductData {
   description?: string;
   has_variants?: boolean;
   variant_count?: number;
-  price_min?: number;
-  price_max?: number;
+  price_min?: number | null;
+  price_max?: number | null;
   default_variant_id?: string;
   variant_id?: string;
   variant_sku?: string;
@@ -192,6 +192,10 @@ export interface ProductData {
   variant_options?: Record<string, string>;
   variant_url?: string;
   variants?: ProductVariantData[];
+  // Dedicated inquiry/quote-request link, independent of product_url.
+  // Used by the "Send Inquiry" CTA so it can point to a shared form
+  // instead of the product's own page.
+  inquiry_url?: string;
 }
 
 export type CurrencySource = 'shopify_store' | 'catalog' | 'presentment' | 'configured_default' | 'missing';

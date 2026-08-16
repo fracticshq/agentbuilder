@@ -209,6 +209,16 @@
   text-overflow: ellipsis;
 }
 
+.product-name-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.product-name-link:hover {
+  color: #2563EB;
+  text-decoration: underline;
+}
+
 .stock-badge {
   font-size: 9px;
   font-weight: 600;
